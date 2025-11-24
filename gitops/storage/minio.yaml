@@ -1,0 +1,64 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: minio
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+spec:
+  project: default
+  source:
+    repoURL: https://charts.min.io/
+    chart: minio
+    targetRevision: 5.2.0
+    helm:
+      values: |
+        mode: standalone
+        replicas: 1
+        persistence:
+          enabled: true
+          storageClass: longhorn
+          size: 50Gi
+          accessMode: ReadWriteOnce
+        
+        resources:
+          requests:
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+
+        # Create buckets automatically on startup
+        buckets:
+          - name: velero
+            policy: none
+            purge: false
+          - name: harbor
+            policy: none
+            purge: false
+          - name: loki-data
+            policy: none
+            purge: false
+          - name: thanos-data
+            policy: none
+            purge: false
+
+        ingress:
+          enabled: true
+          ingressClassName: traefik
+          hosts:
+            - minio.192.168.68.210.nip.io
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+
+        # Default credentials (CHANGE IN PRODUCTION)
+        rootUser: admin
+        rootPassword: password123
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: storage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
