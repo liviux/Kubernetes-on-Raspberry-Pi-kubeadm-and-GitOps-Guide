@@ -1,0 +1,52 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: harbor
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://helm.goharbor.io
+    chart: harbor
+    targetRevision: 1.15.0
+    helm:
+      values: |
+        expose:
+          type: ingress
+          ingress:
+            hosts:
+              core: harbor.192.168.68.210.nip.io
+            className: traefik
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+        
+        # Point to our local MinIO
+        persistence:
+          imageChartStorage:
+            type: s3
+            s3:
+              region: us-east-1
+              bucket: harbor
+              endpoint: http://minio.storage.svc.cluster.local:9000
+              accesskey: admin
+              secretkey: password123
+              storageclass: STANDARD
+
+        # Disable Notary/ChartMuseum to save RAM on Pis
+        notary:
+          enabled: false
+        chartmuseum:
+          enabled: false
+        
+        # Keep Trivy for security scanning
+        trivy:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: harbor
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
