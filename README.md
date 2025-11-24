@@ -50,6 +50,11 @@
     *   [12.3 Security Tooling (Trivy & OWASP ZAP)](#123-security-tooling-trivy--owasp-zap)
     *   [12.4 Local Development (Skaffold)](#124-local-development-skaffold)
     *   [12.5 Phase 7 Execution Steps](#125-phase-7-execution-steps)
+13. [Phase 8: Day 2 Operations & Maintenance](#13-phase-8-day-2-operations--maintenance)
+    *   [13.1 Upgrading Kubernetes](#131-upgrading-kubernetes)
+    *   [13.2 OS Patching](#132-os-patching)
+    *   [13.3 Backup & Disaster Recovery](#133-backup--disaster-recovery)
+    *   [13.4 Troubleshooting Cheatsheet](#134-troubleshooting-cheatsheet)
 
 ---
 
@@ -2002,3 +2007,107 @@ deploy:
     ```bash
     kubectl get vulnerabilityreports -A
     ```
+## 13. Phase 8: Day 2 Operations & Maintenance
+
+This section outlines the routine tasks required to keep the cluster secure and up-to-date.
+
+### 13.1 Upgrading Kubernetes
+Since we pinned versions in Ansible, upgrades must be deliberate.
+**Upgrade Order:** Control Plane -> Workers.
+
+1.  **Un-hold packages (Ansible):**
+    Update `ansible/hosts` vars to the new version (e.g., `1.32`) and run a playbook to unhold and update `kubeadm`.
+2.  **Upgrade Control Plane:**
+    ```bash
+    # On rpi4-1
+    sudo kubeadm upgrade plan
+    sudo kubeadm upgrade apply v1.32.x
+    ```
+3.  **Upgrade Kubelet:**
+    ```bash
+    # On all nodes (via Ansible)
+    sudo apt-get install -y kubelet=1.32.x-1.1 kubectl=1.32.x-1.1
+    sudo systemctl daemon-reload
+    sudo systemctl restart kubelet
+    ```
+
+### 13.2 OS Patching
+To apply Linux security patches without downtime, drain nodes one by one.
+
+```bash
+# 1. Drain Node (Move workloads elsewhere)
+kubectl drain rpi4-2 --ignore-daemonsets --delete-emptydir-data
+
+# 2. Run Ansible Update
+ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml --limit rpi4-2
+
+# 3. Uncordon (Allow workloads back)
+kubectl uncordon rpi4-2
+```
+
+### 13.3 Backup & Disaster Recovery
+We utilize **Velero** (installed in Phase 5).
+
+*   **Manual Backup:**
+    ```bash
+    velero backup create manual-backup-$(date +%F) --from-schedule=nightly
+    ```
+*   **Restore:**
+    ```bash
+    # Disaster scenario: Cluster wiped.
+    # 1. Re-install Infrastructure & Velero.
+    # 2. Run restore:
+    velero restore create --from-backup manual-backup-2025-11-20
+    ```
+
+### 13.4 Troubleshooting Cheatsheet
+*   **Cilium Connectivity:** `cilium connectivity test`
+*   **Longhorn Disk Pressure:** Check UI for "Schedulable" status on `rpi4-1`.
+*   **DNS Issues:** `kubectl run -it --rm --restart=Never busybox --image=busybox:1.28 -- nslookup kubernetes.default`
+*   **ArgoCD Sync Stuck:** `argocd app sync <app-name> --prune --force`
+
+---
+
+## Final Deliverable: File Checklist
+
+You should now have the following files created in your repository folder. **This is your complete Project Artifact.**
+
+### 1. Root
+*   `README.md` (The complete guide we generated)
+
+### 2. Ansible (Infrastructure)
+*   `ansible/hosts`
+*   `ansible/playbooks/01_node_prep.yml`
+*   `ansible/playbooks/02_k8s_binaries.yml`
+*   `ansible/playbooks/03_cluster_init.yml`
+*   `ansible/playbooks/04_storage_mount.yml`
+
+### 3. Bootstrap (Shell Scripts)
+*   `bootstrap/cilium/install.sh` *(Embedded in playbook, but good to have standalone)*
+*   `bootstrap/longhorn/install.sh`
+*   `bootstrap/traefik/install.sh`
+*   `bootstrap/argocd/install.sh`
+
+### 4. GitOps (ArgoCD Manifests)
+*   `gitops/app-of-apps.yaml` (The Root)
+*   `gitops/infrastructure/cert-manager.yaml`
+*   `gitops/services/gitea.yaml`
+*   `gitops/storage/minio.yaml`
+*   `gitops/observability/kube-prometheus-stack.yaml` (Implicit in app-of-apps example, ensures monitoring)
+*   `gitops/observability/loki-stack.yaml`
+*   `gitops/observability/opencost.yaml`
+*   `gitops/observability/k8sgpt.yaml`
+*   `gitops/observability/signoz.yaml`
+*   `gitops/security/harbor.yaml`
+*   `gitops/security/trivy-operator.yaml`
+*   `gitops/cicd/argo-image-updater.yaml`
+*   `gitops/cicd/jenkins.yaml`
+*   `gitops/management/velero.yaml`
+
+### 5. Tests (Validation)
+*   `tests/01_infra_test.sh`
+*   `tests/02_network_test.sh`
+*   `tests/03_storage_test.sh`
+
+***
+
