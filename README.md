@@ -36,14 +36,20 @@
     *   [10.2 Certificate Automation (Cert-Manager)](#102-certificate-automation-cert-manager)
     *   [10.3 Container Registry (Harbor)](#103-container-registry-harbor)
     *   [10.4 Backup & Restore (Velero)](#104-backup--restore-velero)
-    *   [10.5 The Root Application (App of Apps)](#105-the-root-application-app-of-apps)
-    *   [10.6 Phase 5 Execution Steps](#106-phase-5-execution-steps)
+    *   [10.5 Secrets Management (OpenBao)](#105-secrets-management-openbao)
+    *   [10.6 Policy Enforcement (Kyverno)](#106-policy-enforcement-kyverno)
+    *   [10.7 Runtime Security (Falco)](#107-runtime-security-falco)
+    *   [10.8 The Root Application (App of Apps)](#108-the-root-application-app-of-apps)
+    *   [10.9 Phase 5 Execution Steps](#109-phase-5-execution-steps)
 11. [Phase 6: Advanced Observability](#11-phase-6-advanced-observability)
-    *   [11.1 Log Aggregation (Loki & Promtail)](#111-log-aggregation-loki--promtail)
-    *   [11.2 Cost Management (OpenCost)](#112-cost-management-opencost)
-    *   [11.3 AI Diagnostics (K8sGPT)](#113-ai-diagnostics-k8sgpt)
-    *   [11.4 Full Stack APM (SigNoz)](#114-full-stack-apm-signoz)
-    *   [11.5 Phase 6 Execution Steps](#115-phase-6-execution-steps)
+    *   [11.1 Log Aggregation (Loki Stack)](#111-log-aggregation-loki-stack)
+    *   [11.2 Log Collection (Fluent Bit)](#112-log-collection-fluent-bit)
+    *   [11.3 Distributed Tracing (OpenTelemetry)](#113-distributed-tracing-opentelemetry)
+    *   [11.4 Traffic Analysis (Kubeshark)](#114-traffic-analysis-kubeshark)
+    *   [11.5 Cost Management (OpenCost)](#115-cost-management-opencost)
+    *   [11.6 AI Diagnostics (K8sGPT)](#116-ai-diagnostics-k8sgpt)
+    *   [11.7 Full Stack APM (SigNoz)](#117-full-stack-apm-signoz)
+    *   [11.8 Phase 6 Execution Steps](#118-phase-6-execution-steps)
 12. [Phase 7: CI/CD & Developer Experience](#12-phase-7-cicd--developer-experience)
     *   [12.1 Image Automation (Argo Image Updater)](#121-image-automation-argo-image-updater)
     *   [12.2 CI/CD Platform (Jenkins)](#122-cicd-platform-jenkins)
@@ -131,53 +137,55 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 .
 ├── README.md                        # This guide
 ├── ansible/                         # INFRASTRUCTURE (Imperative)
-│   ├── hosts                        # Inventory file defined below
+│   ├── hosts                        # Inventory file
+│   ├── ansible.cfg                  # Local Ansible config
 │   ├── playbooks/
 │   │   ├── 01_node_prep.yml         # OS config, Cgroups, Kernel modules, Dependencies
 │   │   ├── 02_k8s_binaries.yml      # Installing Kubeadm/Kubelet/Kubectl/Helm
 │   │   ├── 03_cluster_init.yml      # Bootstrap CP, Join Workers, Taints, Labels
 │   │   ├── 04_storage_mount.yml     # Formats and mounts HDD on CP
-│   │   └── 05_reset_cluster.yml     # Tear down script (for reproducibility)
+│   │   └── 05_reset_cluster.yml     # Tear down script
+│   └── roles/                       # Reusable roles
 ├── bootstrap/                       # BOOTSTRAP (Pre-GitOps)
 │   ├── cilium/                      # Helm scripts for CNI & L2 Announcements
 │   ├── longhorn/                    # Helm scripts for Storage (HDD constraints)
+│   ├── traefik/                     # Helm scripts for Ingress
 │   └── argocd/                      # Helm scripts to install ArgoCD
 ├── gitops/                          # APPLICATIONS (Declarative)
 │   ├── app-of-apps.yaml             # The Root Application
 │   ├── infrastructure/              # Core Networking & Ingress
-│   │   ├── traefik/
-│   │   └── cert-manager/
+│   │   ├── traefik/                 # (Adoption config)
+│   │   └── cert-manager/            # TLS Certificate automation
 │   ├── storage/                     # Storage Dependencies
-│   │   ├── longhorn-config/         # Post-install configuration
-│   │   └── minio/                   # Object Store for Thanos/Loki/Velero
+│   │   ├── minio/                   # Object Store (S3) for Thanos/Loki/Velero
+│   │   └── longhorn-config/         # (Adoption config)
 │   ├── observability/               # Monitoring Stack
 │   │   ├── kube-prometheus-stack/   # Prom + Alertmanager + Grafana
-│   │   ├── thanos/
-│   │   ├── loki-distributed/
-│   │   ├── fluentd/
-│   │   ├── opentelemetry/
-│   │   ├── jaeger/
-│   │   ├── signoz/
-│   │   ├── opencost/
-│   │   ├── k8sgpt/
-│   │   └── kubeshark/
+│   │   ├── thanos/                  # Long-term metrics
+│   │   ├── loki-stack/              # Logs (Loki + Promtail/Fluent-Bit)
+│   │   ├── fluent-bit/              # Log Collector (Lightweight replacement for Fluentd)
+│   │   ├── opentelemetry/           # Tracing Operator
+│   │   ├── jaeger/                  # Tracing Backend
+│   │   ├── signoz/                  # Full-stack APM
+│   │   ├── opencost/                # Cost allocation
+│   │   ├── k8sgpt/                  # AI Diagnostics
+│   │   └── kubeshark/               # API Traffic Analyzer
 │   ├── security/                    # Security Stack
-│   │   ├── harbor/
-│   │   ├── openbao/
-│   │   ├── falco/
-│   │   ├── kyverno/
-│   │   └── trivy-operator/
+│   │   ├── harbor/                  # Container Registry
+│   │   ├── openbao/                 # Secrets Management (Vault)
+│   │   ├── falco/                   # Runtime Threat Detection
+│   │   ├── kyverno/                 # Policy Engine
+│   │   └── trivy-operator/          # Vulnerability Scanner
 │   ├── cicd/                        # Build Pipelines
-│   │   ├── jenkins-x/
-│   │   ├── owasp-zap/
-│   │   └── argo-image-updater/
+│   │   ├── jenkins-x/               # CI/CD Platform
+│   │   └── argo-image-updater/      # GitOps Image Automation
 │   └── management/                  # Ops Tools
-│       ├── velero/
-│       └── portainer/
+│       ├── velero/                  # Backup & Restore
+│       └── portainer/               # Visual Dashboard
 └── tests/                           # VALIDATION
-    ├── infra_test.sh                # Verifies Nodes, RAM, HDD mounts
-    ├── network_test.sh              # Verifies Cilium L2, DNS, Ingress
-    └── storage_test.sh              # Verifies PVC creation on HDD
+    ├── 01_infra_test.sh
+    ├── 02_network_test.sh
+    └── 03_storage_test.sh
 ```
 
 ---
@@ -1530,8 +1538,120 @@ spec:
     syncOptions:
       - CreateNamespace=true
 ```
+### 10.5 Secrets Management (OpenBao)
+**File:** `gitops/security/openbao.yaml`
+We use OpenBao (the community fork of Vault) to handle secrets securely.
+*   **Storage:** Uses Longhorn (HDD) to persist encrypted secrets.
+*   **UI:** Exposed internally via LoadBalancer.
 
-### 10.5 The Root Application (App of Apps)
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: openbao
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://openbao.github.io/openbao-helm
+    chart: openbao
+    targetRevision: 0.1.0
+    helm:
+      values: |
+        server:
+          dataStorage:
+            enabled: true
+            size: 10Gi
+            storageClass: longhorn
+          ha:
+            enabled: false # Standalone mode for Pi resources
+        ui:
+          enabled: true
+          serviceType: LoadBalancer
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: security
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 10.6 Policy Enforcement (Kyverno)
+**File:** `gitops/security/kyverno.yaml`
+Kyverno enforces best practices (e.g., preventing root containers) without the complexity of OPA Gatekeeper.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://kyverno.github.io/kyverno/
+    chart: kyverno
+    targetRevision: 3.1.4
+    helm:
+      values: |
+        admissionController:
+          replicas: 1
+        backgroundController:
+          replicas: 1
+        cleanupController:
+          replicas: 1
+        reportsController:
+          replicas: 1
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 10.7 Runtime Security (Falco)
+**File:** `gitops/security/falco.yaml`
+Monitors kernel syscalls to detect intrusions. We explicitly configure the **eBPF driver** because the traditional kernel module driver is often problematic on Ubuntu RPi kernels.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: falco
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://falcosecurity.github.io/charts/
+    chart: falco
+    targetRevision: 4.0.0
+    helm:
+      values: |
+        driver:
+          kind: ebpf
+        falcosidekick:
+          enabled: true
+          webui:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: security
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+    
+### 10.8 The Root Application (App of Apps)
 **File:** `gitops/root-app.yaml`
 
 This is the "One Ring to Rule Them All." Instead of applying the files above individually, we point ArgoCD to this single file (or eventually, to the Git repo containing it). It tells ArgoCD to deploy the entire stack defined in the `gitops/` directory structure.
@@ -1560,7 +1680,7 @@ spec:
       selfHeal: true
 ```
 
-### 10.6 Phase 5 Execution Steps
+### 10.9 Phase 5 Execution Steps
 
 1.  **Commit Files:** Ensure the files above are created in your local `gitops/` folder.
 2.  **Push to Gitea:**
@@ -1636,8 +1756,100 @@ spec:
       prune: true
       selfHeal: true
 ```
+### 11.2 Log Collection (Fluent Bit)
+**File:** `gitops/observability/fluent-bit.yaml`
+*Note:* You requested Fluentd, but **Fluent Bit** is the industry standard for Edge/Raspberry Pi. It is written in C (vs Ruby for Fluentd) and uses ~10x less RAM. It is configured here to forward logs to the Loki stack.
 
-### 11.2 Cost Management (OpenCost)
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fluent-bit
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://fluent.github.io/helm-charts
+    chart: fluent-bit
+    targetRevision: 0.44.0
+    helm:
+      values: |
+        config:
+          outputs: |
+            [OUTPUT]
+                Name loki
+                Match *
+                Host loki-stack.monitoring.svc.cluster.local
+                Port 3100
+                Labels job=fluent-bit
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+### 11.3 Distributed Tracing (OpenTelemetry)
+**File:** `gitops/observability/opentelemetry.yaml`
+Installs the OpenTelemetry Operator. This allows you to inject tracing sidecars into your applications automatically.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: opentelemetry-operator
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
+    chart: opentelemetry-operator
+    targetRevision: 0.49.0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+### 11.4 Traffic Analysis (Kubeshark)
+**File:** `gitops/observability/kubeshark.yaml`
+Provides deep visibility into API traffic (HTTP, REST, gRPC, GraphQL) similar to Wireshark, but for K8s.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kubeshark
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://helm.kubeshark.co
+    chart: kubeshark
+    targetRevision: 52.3.0
+    helm:
+      values: |
+        tap:
+          persistentStorage: true
+          storageClass: longhorn
+          storageSize: 5Gi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 11.5 Cost Management (OpenCost)
 **File:** `gitops/observability/opencost.yaml`
 
 OpenCost calculates the resource consumption (CPU/RAM/Storage) of every pod and estimates a "cloud cost" equivalent. This is excellent for understanding which namespace is hogging resources on your Raspberry Pis.
@@ -1678,7 +1890,7 @@ spec:
       selfHeal: true
 ```
 
-### 11.3 AI Diagnostics (K8sGPT)
+### 11.6 AI Diagnostics (K8sGPT)
 **File:** `gitops/observability/k8sgpt.yaml`
 
 K8sGPT scans your cluster for issues (CrashLoops, PVC failures, Service misconfigs) and uses an AI backend to explain the fix in plain English.
@@ -1707,7 +1919,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.4 Full Stack APM (SigNoz)
+### 11.7 Full Stack APM (SigNoz)
 **File:** `gitops/observability/signoz.yaml`
 
 SigNoz is an open-source alternative to Datadog. It provides traces, metrics, and logs in a single UI.
@@ -1765,7 +1977,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.5 Phase 6 Execution Steps
+### 11.8 Phase 6 Execution Steps
 
 1.  **Commit:** Save the YAML files to `gitops/observability/` locally.
     ```bash
