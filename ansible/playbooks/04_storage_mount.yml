@@ -1,0 +1,38 @@
+---
+- name: Phase 3a - Mount HDD for Longhorn
+  hosts: big
+  become: true
+  vars:
+    # CHANGE THIS to your actual HDD device identifier (lsblk)
+    # Best practice: Use /dev/disk/by-id/... to avoid USB enumeration changes
+    hdd_device: "/dev/sda1" 
+    mount_path: "/var/lib/longhorn"
+  tasks:
+    - name: Ensure Mount Directory Exists
+      file:
+        path: "{{ mount_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Format HDD (ext4)
+      filesystem:
+        fstype: ext4
+        dev: "{{ hdd_device }}"
+        # force: no # Safety: set to yes only if you want to wipe the drive
+      ignore_errors: yes # Ignores error if already formatted
+
+    - name: Mount HDD
+      mount:
+        path: "{{ mount_path }}"
+        src: "{{ hdd_device }}"
+        fstype: ext4
+        state: mounted
+        opts: defaults,noatime
+
+    - name: Verify Mount
+      shell: df -h {{ mount_path }}
+      register: df_out
+      changed_when: false
+
+    - debug:
+        msg: "Storage mounted: {{ df_out.stdout }}"
