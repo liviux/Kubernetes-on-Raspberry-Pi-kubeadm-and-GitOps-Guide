@@ -1942,7 +1942,7 @@ spec:
 **Note on OWASP ZAP:**
 OWASP ZAP is best run as a step in your Jenkins pipeline (`Jenkinsfile`) against a staging URL. It does not require a standalone Helm installation for this architecture.
 
-### 12.4 Local Development (Skaffold)
+### 12.4 Local Development (Skaffold) (optional)
 
 To enable rapid iteration on your local machine without pushing git commits for every line of code change, use **Skaffold**.
 
