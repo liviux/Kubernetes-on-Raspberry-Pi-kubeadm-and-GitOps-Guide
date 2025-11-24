@@ -11,6 +11,11 @@
     *   [Local Client Configuration](#local-client-configuration)
     *   [Ansible Configuration](#ansible-configuration)
 5.  [Deployment Roadmap](#5-deployment-roadmap)
+6.  [Phase 1: Infrastructure Provisioning](#6-phase-1-infrastructure-provisioning)
+    *   [6.1 OS Preparation Playbook](#61-os-preparation-playbook)
+    *   [6.2 Kubernetes Binaries Playbook](#62-kubernetes-binaries-playbook)
+    *   [6.3 Infrastructure Verification](#63-infrastructure-verification)
+    *   [6.4 Phase 1 Execution Steps](#64-phase-1-execution-steps)
 
 ---
 
@@ -237,14 +242,22 @@ This roadmap outlines the specific order of operations required to bootstrap the
 2.  **Integration:** Configure Harbor for image pushing and Security scanners.
 
 
-We are now executing **Phase 1: Infrastructure**. You need to create the Ansible playbooks that will turn your fresh Ubuntu installation into a Kubernetes-ready node.
+## 6. Phase 1: Infrastructure Provisioning
 
-Create the following files in your repository.
+This phase transforms the raw Ubuntu OS into a "Kubernetes Ready" node. It handles low-level kernel tuning, disables unnecessary hardware to save resources, and installs the immutable versions of the Kubernetes binaries.
 
----
+### 6.1 OS Preparation Playbook
+**File:** `ansible/playbooks/01_node_prep.yml`
 
-### File: `ansible/playbooks/01_node_prep.yml`
-**Purpose:** This playbook handles the low-level OS tuning. It disables unnecessary hardware (WiFi/BT/Swap), enables required Kernel modules for container networking, enforces memory limits via Cgroups, and installs storage dependencies (`open-iscsi`) required later by Longhorn.
+This playbook performs the following critical tasks:
+1.  **System Updates:** Upgrades all packages.
+2.  **Dependencies:** Installs `open-iscsi` (required for Longhorn), `nfs-common`, and `ipset`.
+3.  **Swap:** Disables swap permanently (required for Kubelet).
+4.  **Kernel Modules:** Loads `overlay` and `br_netfilter` for container networking.
+5.  **Sysctl:** Enables IP forwarding and bridge traversing.
+6.  **Cgroups:** Modifies `/boot/firmware/cmdline.txt` to enable memory and cpuset cgroups (critical for RPi 4).
+7.  **Hardware Optimization:** Disables WiFi and Bluetooth; limits GPU memory to 16MB.
+8.  **Container Runtime:** Installs and configures `containerd` with `SystemdCgroup = true`.
 
 ```yaml
 ---
@@ -252,12 +265,9 @@ Create the following files in your repository.
   hosts: all
   become: true
   vars:
-    # Hardware tuning
     gpu_mem: 16
   tasks:
-    # ---------------------------------------------------------
-    # 1. SYSTEM UPDATES & BASICS
-    # ---------------------------------------------------------
+    # --- SYSTEM UPDATES & DEPENDENCIES ---
     - name: Update apt cache and upgrade packages
       apt:
         update_cache: yes
@@ -274,10 +284,10 @@ Create the following files in your repository.
           - curl
           - gnupg
           - lsb-release
-          - open-iscsi  # Required for Longhorn
-          - nfs-common  # Required for RWX volumes
-          - ipset       # Required for Cilium
-          - jq          # Utility for parsing JSON
+          - open-iscsi  # Critical for Longhorn
+          - nfs-common  # Critical for RWX volumes
+          - ipset       # Critical for Cilium
+          - jq
         state: present
 
     - name: Disable Swap (Runtime)
@@ -290,10 +300,8 @@ Create the following files in your repository.
         regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
         replace: '# \1'
 
-    # ---------------------------------------------------------
-    # 2. KERNEL & NETWORK TUNING
-    # ---------------------------------------------------------
-    - name: Load Kernel Modules (overlay, br_netfilter)
+    # --- KERNEL & NETWORK TUNING ---
+    - name: Load Kernel Modules
       blockinfile:
         path: /etc/modules-load.d/k8s.conf
         create: yes
@@ -306,7 +314,7 @@ Create the following files in your repository.
         modprobe overlay
         modprobe br_netfilter
 
-    - name: Configure Sysctl for Kubernetes Networking
+    - name: Configure Sysctl
       blockinfile:
         path: /etc/sysctl.d/k8s.conf
         create: yes
@@ -318,11 +326,8 @@ Create the following files in your repository.
     - name: Apply Sysctl params
       command: sysctl --system
 
-    # ---------------------------------------------------------
-    # 3. RASPBERRY PI SPECIFIC (CGROUPS & HARDWARE)
-    # ---------------------------------------------------------
-    - name: Enable Cgroups (Memory & CPU) in cmdline.txt
-      # We use a robust regex to ensure we don't duplicate flags
+    # --- RASPBERRY PI SPECIFIC ---
+    - name: Enable Cgroups in cmdline.txt
       shell: |
         cmdline=$(cat /boot/firmware/cmdline.txt)
         if [[ "$cmdline" != *"cgroup_enable=cpuset"* ]]; then
@@ -332,18 +337,15 @@ Create the following files in your repository.
       register: cgroup_update
       changed_when: "'updated' in cgroup_update.stdout"
 
-    - name: Optimize Hardware (Disable WiFi/BT, GPU Memory)
+    - name: Optimize Hardware (Disable WiFi/BT/GPU)
       blockinfile:
         path: /boot/firmware/config.txt
         block: |
-          # K8s Optimization
           gpu_mem={{ gpu_mem }}
           dtoverlay=disable-bt
           dtoverlay=disable-wifi
 
-    # ---------------------------------------------------------
-    # 4. CONTAINER RUNTIME (CONTAINERD)
-    # ---------------------------------------------------------
+    # --- CONTAINER RUNTIME ---
     - name: Install Containerd
       apt:
         name: containerd
@@ -354,7 +356,7 @@ Create the following files in your repository.
         mkdir -p /etc/containerd
         containerd config default > /etc/containerd/config.toml
 
-    - name: Configure SystemdCgroup = true
+    - name: Configure SystemdCgroup
       replace:
         path: /etc/containerd/config.toml
         regexp: 'SystemdCgroup = false'
@@ -366,20 +368,22 @@ Create the following files in your repository.
         state: restarted
         enabled: yes
 
-    # ---------------------------------------------------------
-    # 5. REBOOT HANDLER
-    # ---------------------------------------------------------
-    - name: Reboot if critical changes occurred
+    # --- REBOOT HANDLER ---
+    - name: Reboot Node
       reboot:
         msg: "Rebooting for Kernel/Cgroup changes"
         post_reboot_delay: 30
       when: cgroup_update.changed or apt_action.changed
 ```
 
----
+### 6.2 Kubernetes Binaries Playbook
+**File:** `ansible/playbooks/02_k8s_binaries.yml`
 
-### File: `ansible/playbooks/02_k8s_binaries.yml`
-**Purpose:** This playbook installs the specific versions of Kubernetes tools, Helm, and the Cilium CLI. It uses the modern `pkgs.k8s.io` repositories and locks the versions to prevent drift.
+This playbook installs the core software stack.
+1.  **Repository:** Adds the official `pkgs.k8s.io` v1.31 repository.
+2.  **Packages:** Installs `kubelet`, `kubeadm`, and `kubectl`.
+3.  **Version Locking:** Uses `dpkg --set-selections` to "hold" the packages. This prevents `apt upgrade` from accidentally updating Kubernetes and breaking the cluster.
+4.  **Tools:** Installs `helm` and `cilium-cli` for later bootstrap steps.
 
 ```yaml
 ---
@@ -388,12 +392,9 @@ Create the following files in your repository.
   become: true
   vars:
     k8s_version_major: "1.31"
-    # We define the specific package version format for apt
-    k8s_pkg_version: "1.31.*" 
+    k8s_pkg_version: "1.31.*"
   tasks:
-    # ---------------------------------------------------------
-    # 1. KUBERNETES REPO SETUP
-    # ---------------------------------------------------------
+    # --- KUBERNETES REPO ---
     - name: Create keyring directory
       file:
         path: /etc/apt/keyrings
@@ -419,9 +420,7 @@ Create the following files in your repository.
       apt:
         update_cache: yes
 
-    # ---------------------------------------------------------
-    # 2. INSTALL PACKAGES
-    # ---------------------------------------------------------
+    # --- INSTALL PACKAGES ---
     - name: Install Kubelet, Kubeadm, Kubectl
       apt:
         name:
@@ -431,7 +430,7 @@ Create the following files in your repository.
         state: present
         allow_downgrade: yes
 
-    - name: Hold K8s Packages (Prevent auto-upgrade)
+    - name: Hold K8s Packages
       dpkg_selections:
         name: "{{ item }}"
         selection: hold
@@ -444,11 +443,8 @@ Create the following files in your repository.
       service:
         name: kubelet
         enabled: yes
-        # Note: It will loop/fail until kubeadm init is run, this is normal.
 
-    # ---------------------------------------------------------
-    # 3. HELM INSTALLATION
-    # ---------------------------------------------------------
+    # --- INSTALL HELM ---
     - name: Download Helm Installer
       get_url:
         url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
@@ -460,9 +456,7 @@ Create the following files in your repository.
       args:
         creates: /usr/local/bin/helm
 
-    # ---------------------------------------------------------
-    # 4. CILIUM CLI INSTALLATION (For Debugging)
-    # ---------------------------------------------------------
+    # --- INSTALL CILIUM CLI ---
     - name: Download Cilium CLI
       unarchive:
         src: https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-arm64.tar.gz
@@ -473,16 +467,15 @@ Create the following files in your repository.
           - cilium
 ```
 
----
+### 6.3 Infrastructure Verification
+**File:** `tests/infra_test.sh`
 
-### File: `tests/infra_test.sh`
-**Purpose:** A script to verify that Phase 1 was successful. It checks if binaries exist, if swap is off, and if cgroups are active.
+This script validates that Phase 1 successfully prepared the nodes.
 
 ```bash
 #!/bin/bash
 echo "=== INFRASTRUCTURE VERIFICATION SUITE ==="
 
-# Function to run a check
 check() {
     NAME=$1
     CMD=$2
@@ -494,44 +487,45 @@ check() {
     fi
 }
 
-echo "Checking Local Connection..."
-ansible -i ansible/hosts all -m ping > /dev/null && echo "✅ Ansible Connectivity: PASS" || exit 1
+echo "1. Checking Ansible Connectivity..."
+ansible -i ansible/hosts all -m ping > /dev/null && echo "✅ Ansible Ping: PASS" || exit 1
 
-echo "Checking Binaries on Nodes..."
-ansible -i ansible/hosts all -m shell -a "kubeadm version" > /dev/null && echo "✅ Kubeadm Installed: PASS"
-ansible -i ansible/hosts all -m shell -a "helm version" > /dev/null && echo "✅ Helm Installed: PASS"
+echo "2. Checking Kubernetes Binaries..."
+ansible -i ansible/hosts all -m shell -a "kubeadm version" > /dev/null && echo "✅ Kubeadm: PASS"
+ansible -i ansible/hosts all -m shell -a "helm version" > /dev/null && echo "✅ Helm: PASS"
 
-echo "Checking Swap Status (Should be empty)..."
+echo "3. Checking Swap Status..."
+# Returns 1 (PASS) if grep finds no swap entries
 ansible -i ansible/hosts all -m shell -a "swapon --show" | grep -v "rc=0" | grep -q "" 
 if [ $? -eq 1 ]; then
     echo "✅ Swap Disabled: PASS"
 else
-    echo "❌ Swap is still active on some nodes!"
+    echo "❌ Swap Active (FAIL)"
+    exit 1
 fi
 
-echo "Checking Cgroups..."
-ansible -i ansible/hosts all -m shell -a "cat /proc/cgroups | grep memory | grep 1" > /dev/null && echo "✅ Memory Cgroups Enabled: PASS"
+echo "4. Checking Cgroups (Memory)..."
+ansible -i ansible/hosts all -m shell -a "cat /proc/cgroups | grep memory | grep 1" > /dev/null && echo "✅ Cgroups: PASS"
 
-echo "=== READY FOR PHASE 2 ==="
+echo "=== PHASE 1 COMPLETE ==="
 ```
 
----
+### 6.4 Phase 1 Execution Steps
 
-### Instructions for Phase 1
+Run the following commands from your management machine to execute Phase 1.
 
-1.  **Create the files** above in your repository.
-2.  **Run OS Prep:**
+1.  **Prepare the Nodes:**
+    This will reboot the nodes if kernel parameters or cgroups are updated.
     ```bash
     ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
     ```
-    *(Expect reboots to happen automatically. Wait 1-2 minutes after it finishes)*
-3.  **Run Binary Install:**
+
+2.  **Install Software:**
     ```bash
     ansible-playbook -i ansible/hosts ansible/playbooks/02_k8s_binaries.yml
     ```
-4.  **Verify:**
+
+3.  **Verify State:**
     ```bash
     bash tests/infra_test.sh
     ```
-
-**Let me know when the verification script passes, and we will proceed to Phase 2: Cluster Bootstrap.**
