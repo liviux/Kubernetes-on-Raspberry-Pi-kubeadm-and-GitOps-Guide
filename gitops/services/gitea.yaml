@@ -1,0 +1,78 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitea
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+spec:
+  project: default
+  source:
+    repoURL: https://dl.gitea.com/charts/
+    chart: gitea
+    targetRevision: 10.6.0
+    helm:
+      values: |
+        global:
+          storageClass: longhorn
+        
+        gitea:
+          admin:
+            existingSecret: "" # We create admin on first login
+          config:
+            APP_NAME: "PiCluster Git"
+            server:
+              DOMAIN: "gitea.192.168.68.210.nip.io"
+              ROOT_URL: "http://gitea.192.168.68.210.nip.io/"
+              SSH_DOMAIN: "192.168.68.210"
+              SSH_PORT: "2222"
+              DEFAULT_THEME: "gitea-auto"
+            service:
+              DISABLE_REGISTRATION: false
+
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+
+        persistence:
+          enabled: true
+          size: 10Gi
+
+        postgresql:
+          enabled: true
+          global:
+            storageClass: longhorn
+          primary:
+            persistence:
+              size: 5Gi
+
+        ingress:
+          enabled: true
+          className: traefik
+          hosts:
+            - host: gitea.192.168.68.210.nip.io
+              paths:
+                - path: /
+                  pathType: Prefix
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+
+        service:
+          ssh:
+            type: LoadBalancer
+            port: 2222
+            annotations: 
+              io.cilium/lb-ipam-ips: "192.168.68.210"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitea
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
