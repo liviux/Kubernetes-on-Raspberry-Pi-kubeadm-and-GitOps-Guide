@@ -31,6 +31,13 @@
     *   [9.3 Source Control Service (Gitea)](#93-source-control-service-gitea)
     *   [9.4 The "App of Apps" Pattern](#94-the-app-of-apps-pattern)
     *   [9.5 Phase 4 Execution Steps](#95-phase-4-execution-steps)
+10. [Phase 5: Security & Management Stack](#10-phase-5-security--management-stack)
+    *   [10.1 Object Storage (MinIO)](#101-object-storage-minio)
+    *   [10.2 Certificate Automation (Cert-Manager)](#102-certificate-automation-cert-manager)
+    *   [10.3 Container Registry (Harbor)](#103-container-registry-harbor)
+    *   [10.4 Backup & Restore (Velero)](#104-backup--restore-velero)
+    *   [10.5 The Root Application (App of Apps)](#105-the-root-application-app-of-apps)
+    *   [10.6 Phase 5 Execution Steps](#106-phase-5-execution-steps)
 
 ---
 
@@ -1273,3 +1280,282 @@ spec:
     kubectl apply -f gitops/app-of-apps.yaml
     ```
     *Verify: Open `http://grafana.192.168.68.210.nip.io`.*
+
+## 10. Phase 5: Security & Management Stack
+
+Now that the GitOps engine is running, we utilize it to deploy the infrastructure dependencies required for a secure, production-grade environment.
+
+### 10.1 Object Storage (MinIO)
+**File:** `gitops/storage/minio.yaml`
+
+Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. Since we are on bare metal, we self-host **MinIO** to provide this API.
+*   **Storage:** Uses Longhorn (HDD) for the data backing.
+*   **Buckets:** Automatically provisions buckets for `velero`, `loki`, `harbor`, and `thanos`.
+*   **Access:** Exposed via Console Ingress (`minio.192.168.68.210.nip.io`).
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: minio
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+spec:
+  project: default
+  source:
+    repoURL: https://charts.min.io/
+    chart: minio
+    targetRevision: 5.2.0
+    helm:
+      values: |
+        mode: standalone
+        replicas: 1
+        persistence:
+          enabled: true
+          storageClass: longhorn
+          size: 50Gi
+          accessMode: ReadWriteOnce
+        
+        resources:
+          requests:
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+
+        # Create buckets automatically on startup
+        buckets:
+          - name: velero
+            policy: none
+            purge: false
+          - name: harbor
+            policy: none
+            purge: false
+          - name: loki-data
+            policy: none
+            purge: false
+          - name: thanos-data
+            policy: none
+            purge: false
+
+        ingress:
+          enabled: true
+          ingressClassName: traefik
+          hosts:
+            - minio.192.168.68.210.nip.io
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+
+        # Default credentials (CHANGE IN PRODUCTION)
+        rootUser: admin
+        rootPassword: password123
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: storage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 10.2 Certificate Automation (Cert-Manager)
+**File:** `gitops/infrastructure/cert-manager.yaml`
+
+Cert-Manager handles TLS certificates within the cluster.
+*   **Self-Signed Issuer:** Configured to issue self-signed certificates locally. This prevents the "Not Secure" browser warnings from escalating into connection errors, while avoiding the complexity of external DNS validation (Let's Encrypt) for this private setup.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://charts.jetstack.io
+    chart: cert-manager
+    targetRevision: v1.16.0
+    helm:
+      parameters:
+        - name: installCRDs
+          value: "true"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 10.3 Container Registry (Harbor)
+**File:** `gitops/security/harbor.yaml`
+
+Harbor serves as the local "Docker Hub".
+*   **Dependency:** Connects to the **MinIO** S3 service installed above for storing huge container images (keeping them off the SD cards).
+*   **Scanning:** Trivy is enabled to scan every uploaded image for CVEs.
+*   **Database:** Uses internal PostgreSQL backed by Longhorn.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: harbor
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://helm.goharbor.io
+    chart: harbor
+    targetRevision: 1.15.0
+    helm:
+      values: |
+        expose:
+          type: ingress
+          ingress:
+            hosts:
+              core: harbor.192.168.68.210.nip.io
+            className: traefik
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+        
+        # Point to our local MinIO
+        persistence:
+          imageChartStorage:
+            type: s3
+            s3:
+              region: us-east-1
+              bucket: harbor
+              endpoint: http://minio.storage.svc.cluster.local:9000
+              accesskey: admin
+              secretkey: password123
+              storageclass: STANDARD
+
+        # Disable Notary/ChartMuseum to save RAM on Pis
+        notary:
+          enabled: false
+        chartmuseum:
+          enabled: false
+        
+        # Keep Trivy for security scanning
+        trivy:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: harbor
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 10.4 Backup & Restore (Velero)
+**File:** `gitops/management/velero.yaml`
+
+Velero performs nightly backups of the cluster configuration and persistent volumes.
+*   **Target:** Stores backups in the `velero` bucket on MinIO.
+*   **Volume Snapshots:** Integrated with Longhorn CSI to take snapshots of the HDD data.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://vmware-tanzu.github.io/helm-charts
+    chart: velero
+    targetRevision: 5.1.0
+    helm:
+      values: |
+        configuration:
+          provider: aws
+          backupStorageLocation:
+            bucket: velero
+            config:
+              region: minio
+              s3ForcePathStyle: true
+              s3Url: http://minio.storage.svc.cluster.local:9000
+          volumeSnapshotLocation:
+            config:
+              region: minio
+        
+        credentials:
+          useSecret: true
+          secretContents:
+            cloud: |
+              [default]
+              aws_access_key_id = admin
+              aws_secret_access_key = password123
+
+        initContainers:
+          - name: velero-plugin-for-aws
+            image: velero/velero-plugin-for-aws:v1.9.0
+            volumeMounts:
+              - mountPath: /target
+                name: plugins
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 10.5 The Root Application (App of Apps)
+**File:** `gitops/root-app.yaml`
+
+This is the "One Ring to Rule Them All." Instead of applying the files above individually, we point ArgoCD to this single file (or eventually, to the Git repo containing it). It tells ArgoCD to deploy the entire stack defined in the `gitops/` directory structure.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: http://gitea.192.168.68.210.nip.io/liviu/home-cluster.git
+    targetRevision: main
+    path: gitops
+    directory:
+      recurse: true
+      exclude: "{apps/*,services/*}" # Avoid infinite loops with existing apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+### 10.6 Phase 5 Execution Steps
+
+1.  **Commit Files:** Ensure the files above are created in your local `gitops/` folder.
+2.  **Push to Gitea:**
+    ```bash
+    git add .
+    git commit -m "Add Security and Management stack"
+    git push origin main
+    ```
+3.  **Apply Root App:**
+    ```bash
+    kubectl apply -f gitops/root-app.yaml
+    ```
+4.  **Verification:**
+    *   **MinIO Console:** `http://minio.192.168.68.210.nip.io` (User: `admin`, Pass: `password123`)
+    *   **Harbor Registry:** `http://harbor.192.168.68.210.nip.io` (Default User: `admin`, Pass: `Harbor12345`)
