@@ -1,0 +1,88 @@
+---
+- name: Phase 1 - Install Kubernetes Binaries
+  hosts: all
+  become: true
+  vars:
+    k8s_version_major: "1.31"
+    k8s_pkg_version: "1.31.*"
+  tasks:
+    # --- KUBERNETES REPO ---
+    - name: Create keyring directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download K8s Signing Key
+      get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major }}/deb/Release.key"
+        dest: /tmp/k8s-release.key
+
+    - name: Dearmor K8s Key
+      shell: |
+        cat /tmp/k8s-release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg --yes
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add K8s Apt Repository
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major }}/deb/ /"
+        state: present
+        filename: kubernetes
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    # --- INSTALL PACKAGES (ALL NODES) ---
+    - name: Install Kubelet, Kubeadm, Kubectl
+      apt:
+        name:
+          - kubelet={{ k8s_pkg_version }}
+          - kubeadm={{ k8s_pkg_version }}
+          - kubectl={{ k8s_pkg_version }}
+        state: present
+        allow_downgrade: yes
+
+    - name: Hold K8s Packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Enable Kubelet Service
+      service:
+        name: kubelet
+        enabled: yes
+
+    # --- CONTROL PLANE TOOLS (CP ONLY) ---
+    - name: Install Management Tools on Control Plane
+      block:
+        - name: Install etcdctl
+          apt:
+            name: etcd-client
+            state: present
+
+        - name: Download Helm Installer
+          get_url:
+            url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            dest: /tmp/get_helm.sh
+            mode: '0700'
+
+        - name: Run Helm Installer
+          shell: /tmp/get_helm.sh
+          args:
+            creates: /usr/local/bin/helm
+
+        - name: Download Cilium CLI
+          unarchive:
+            src: https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-arm64.tar.gz
+            dest: /usr/local/bin
+            remote_src: yes
+            mode: '0755'
+            include: 
+              - cilium
+      when: "'big' in group_names"
