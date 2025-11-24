@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kubeshark
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://helm.kubeshark.co
+    chart: kubeshark
+    targetRevision: 52.3.0
+    helm:
+      values: |
+        tap:
+          persistentStorage: true
+          storageClass: longhorn
+          storageSize: 5Gi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
