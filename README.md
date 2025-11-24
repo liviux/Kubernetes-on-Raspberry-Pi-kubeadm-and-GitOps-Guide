@@ -44,6 +44,12 @@
     *   [11.3 AI Diagnostics (K8sGPT)](#113-ai-diagnostics-k8sgpt)
     *   [11.4 Full Stack APM (SigNoz)](#114-full-stack-apm-signoz)
     *   [11.5 Phase 6 Execution Steps](#115-phase-6-execution-steps)
+12. [Phase 7: CI/CD & Developer Experience](#12-phase-7-cicd--developer-experience)
+    *   [12.1 Image Automation (Argo Image Updater)](#121-image-automation-argo-image-updater)
+    *   [12.2 CI/CD Platform (Jenkins)](#122-cicd-platform-jenkins)
+    *   [12.3 Security Tooling (Trivy & OWASP ZAP)](#123-security-tooling-trivy--owasp-zap)
+    *   [12.4 Local Development (Skaffold)](#124-local-development-skaffold)
+    *   [12.5 Phase 7 Execution Steps](#125-phase-7-execution-steps)
 
 ---
 
@@ -1779,3 +1785,220 @@ spec:
     *   Open `http://signoz.192.168.68.210.nip.io`.
     *   Create an admin account and view the "Services" dashboard.
 
+## 12. Phase 7: CI/CD & Developer Experience
+
+In this final phase, we establish the machinery that builds, tests, and releases code. We replace manual `docker build` commands with an automated pipeline and ensure every change is scanned for security vulnerabilities before reaching production.
+
+### 12.1 Image Automation (Argo Image Updater)
+**File:** `gitops/cicd/argo-image-updater.yaml`
+
+This component watches your **Harbor** registry. When a CI pipeline pushes a new image tag (e.g., `v1.0.1`), this tool automatically updates the Git repository (modifying the ArgoCD Application) to reflect the new version.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-image-updater
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argocd-image-updater
+    targetRevision: 0.9.1
+    helm:
+      values: |
+        config:
+          registries:
+            - name: harbor.192.168.68.210.nip.io
+              api_url: https://harbor.192.168.68.210.nip.io
+              prefix: harbor.192.168.68.210.nip.io/library
+              ping: yes
+              insecure: yes # Self-signed certs
+              credentials: secret:argocd/harbor-creds#password
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+### 12.2 CI/CD Platform (Jenkins)
+**File:** `gitops/cicd/jenkins.yaml`
+
+We deploy **Jenkins** configured as a Kubernetes-native Controller.
+*   **Agents:** Instead of static agents, Jenkins spawns short-lived Pods in the cluster to run build jobs.
+*   **Integration:** Pre-configured to talk to Gitea and Harbor.
+*   **Persistence:** Stores job history on Longhorn (HDD).
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jenkins
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://charts.jenkins.io
+    chart: jenkins
+    targetRevision: 5.1.0
+    helm:
+      values: |
+        controller:
+          # Use Longhorn HDD for Jenkins Home
+          storageClass: longhorn
+          accessMode: ReadWriteOnce
+          size: 10Gi
+          
+          # Resource limits for Pi
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1536Mi"
+          
+          # Expose UI via Traefik
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            hostName: jenkins.192.168.68.210.nip.io
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+
+          # JCasC (Configuration as Code) - Pre-configure Kubernetes Cloud
+          JCasC:
+            defaultConfig: true
+            configScripts:
+              cloud-config: |
+                jenkins:
+                  clouds:
+                    - kubernetes:
+                        name: "kubernetes"
+                        serverUrl: "https://kubernetes.default"
+                        namespace: "jenkins"
+                        jenkinsUrl: "http://jenkins.jenkins.svc.cluster.local:8080"
+                        templates:
+                          - name: "builder"
+                            namespace: "jenkins"
+                            label: "builder"
+                            nodeUsageMode: "EXCLUSIVE"
+                            containers:
+                              - name: "jnlp"
+                                image: "jenkins/inbound-agent:alpine"
+                                resourceRequestCpu: "100m"
+                                resourceRequestMemory: "256Mi"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: jenkins
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 12.3 Security Tooling (Trivy & OWASP ZAP)
+
+Rather than installing these as standalone long-running services, we install the **Trivy Operator** to scan the running cluster, and we provide the configurations to run ZAP/Trivy inside CI pipelines.
+
+**File:** `gitops/security/trivy-operator.yaml`
+Scans running pods and generates "VulnerabilityReports" visible in the cluster.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: trivy-operator
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://aquasecurity.github.io/helm-charts/
+    chart: trivy-operator
+    targetRevision: 0.19.1
+    helm:
+      values: |
+        trivy:
+          ignoreUnfixed: true
+        serviceMonitor:
+          enabled: true # Integration with Prometheus
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: security
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+**Note on OWASP ZAP:**
+OWASP ZAP is best run as a step in your Jenkins pipeline (`Jenkinsfile`) against a staging URL. It does not require a standalone Helm installation for this architecture.
+
+### 12.4 Local Development (Skaffold)
+
+To enable rapid iteration on your local machine without pushing git commits for every line of code change, use **Skaffold**.
+
+**Setup Instructions (Run on Local Machine):**
+1.  Install Skaffold: `choco install skaffold` (Windows) or `brew install skaffold`.
+2.  Create a `skaffold.yaml` in your application source code repo:
+
+```yaml
+apiVersion: skaffold/v4beta3
+kind: Config
+metadata:
+  name: my-app
+build:
+  artifacts:
+  - image: harbor.192.168.68.210.nip.io/library/my-app
+    docker:
+      dockerfile: Dockerfile
+manifests:
+  rawYaml:
+  - k8s/deployment.yaml
+deploy:
+  kubectl:
+    manifests:
+    - k8s/deployment.yaml
+```
+
+3.  Run `skaffold dev`.
+    *   Skaffold will watch your source files.
+    *   On save, it builds the image, pushes to Harbor, and redeploys to the Raspberry Pi cluster in seconds.
+
+### 12.5 Phase 7 Execution Steps
+
+1.  **Commit & Push:**
+    Save the YAML files to `gitops/cicd/` and `gitops/security/`.
+    ```bash
+    git add .
+    git commit -m "Add Jenkins, Image Updater, and Security Scanners"
+    git push origin main
+    ```
+
+2.  **Verify Jenkins:**
+    *   Open `http://jenkins.192.168.68.210.nip.io`.
+    *   **User:** `admin`.
+    *   **Password:** Retrieve via:
+        ```bash
+        kubectl get secret -n jenkins jenkins -o jsonpath="{.data.jenkins-admin-password}" | base64 -d; echo
+        ```
+
+3.  **Verify Image Updater:**
+    Check the logs to ensure it can connect to Harbor:
+    ```bash
+    kubectl logs -n argocd -l app.kubernetes.io/name=argocd-image-updater
+    ```
+
+4.  **Verify Trivy Operator:**
+    Check for security reports generated for your existing pods:
+    ```bash
+    kubectl get vulnerabilityreports -A
+    ```
