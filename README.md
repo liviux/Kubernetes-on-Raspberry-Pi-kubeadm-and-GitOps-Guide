@@ -25,6 +25,12 @@
     *   [8.2 Longhorn Bootstrap Script](#82-longhorn-bootstrap-script)
     *   [8.3 Storage Verification Script](#83-storage-verification-script)
     *   [8.4 Phase 3 Execution Steps](#84-phase-3-execution-steps)
+9.  [Phase 4: GitOps & Observability](#9-phase-4-gitops--observability)
+    *   [9.1 Ingress Bootstrap (Traefik)](#91-ingress-bootstrap-traefik)
+    *   [9.2 GitOps Bootstrap (ArgoCD)](#92-gitops-bootstrap-argocd)
+    *   [9.3 Source Control Service (Gitea)](#93-source-control-service-gitea)
+    *   [9.4 The "App of Apps" Pattern](#94-the-app-of-apps-pattern)
+    *   [9.5 Phase 4 Execution Steps](#95-phase-4-execution-steps)
 
 ---
 
@@ -965,3 +971,305 @@ echo "=== PHASE 3 COMPLETE ==="
     bash tests/03_storage_test.sh
     ```
 
+## 9. Phase 4: GitOps & Observability
+
+We now move up the stack to the application layer. Instead of managing tools individually, we establish the **GitOps Loop**.
+
+**The Bootstrap Order:**
+1.  **Traefik:** Provides the LoadBalancer IP (`192.168.68.210`) and routing so we can access UIs.
+2.  **ArgoCD:** The controller that syncs Git state to the Cluster.
+3.  **Gitea:** The internal Git server where our cluster configuration will live.
+4.  **App of Apps:** A single manifest that tells ArgoCD to install everything else (Observability, Security, etc.).
+
+### 9.1 Ingress Bootstrap (Traefik)
+**File:** `bootstrap/traefik/install.sh`
+
+This script installs **Traefik v3**. It is configured to:
+*   Request the specific LoadBalancer IP (`192.168.68.210`) from Cilium.
+*   Redirect HTTP to HTTPS globally.
+*   Expose Prometheus metrics for the Observability stack.
+*   Enable JSON access logs for the Logging stack (Loki).
+
+```bash
+#!/bin/bash
+set -e
+echo "=== PHASE 4a: TRAEFIK BOOTSTRAP ==="
+
+# 1. Add Repo
+helm repo add traefik https://traefik.github.io/charts
+helm repo update
+
+# 2. Install Traefik v3
+# We use --set-string for annotations to avoid Helm integer parsing errors on port "9100"
+echo "Deploying Traefik..."
+helm upgrade --install traefik traefik/traefik \
+  --namespace traefik-system \
+  --create-namespace \
+  --version 37.3.0 \
+  --set service.type=LoadBalancer \
+  --set ports.web.nodePort=null \
+  --set ports.websecure.nodePort=null \
+  --set providers.kubernetesCRD.allowCrossNamespace=true \
+  --set logs.general.level=INFO \
+  --set logs.access.enabled=true \
+  --set logs.access.format=json \
+  --set metrics.prometheus.enabled=true \
+  --set metrics.prometheus.addEntryPointsLabels=true \
+  --set metrics.prometheus.addRoutersLabels=true \
+  --set-string service.annotations."prometheus\.io/scrape"="true" \
+  --set-string service.annotations."prometheus\.io/port"="9100" \
+  --set resources.requests.cpu="100m" \
+  --set resources.requests.memory="100Mi" \
+  --set resources.limits.cpu="500m" \
+  --set resources.limits.memory="300Mi" \
+  --wait
+
+echo "=== TRAEFIK INSTALLED ==="
+echo "External IP should be assigned shortly."
+```
+
+### 9.2 GitOps Bootstrap (ArgoCD)
+**File:** `bootstrap/argocd/install.sh`
+
+This script installs **ArgoCD**.
+*   **Insecure Mode:** We disable ArgoCD's internal TLS because Traefik handles SSL termination at the ingress level.
+*   **Ingress:** We automatically apply an Ingress rule so the UI is accessible at `argocd.192.168.68.210.nip.io`.
+
+```bash
+#!/bin/bash
+set -e
+echo "=== PHASE 4b: ARGOCD BOOTSTRAP ==="
+
+# 1. Add Repo
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+
+# 2. Install ArgoCD
+# We use --insecure to offload TLS to Traefik
+echo "Deploying ArgoCD..."
+helm upgrade --install argocd argo/argo-cd \
+  --namespace argocd \
+  --create-namespace \
+  --version 7.7.0 \
+  --set server.extraArgs="{--insecure}" \
+  --set configs.params."server\.insecure"=true \
+  --set global.logging.format=json \
+  --wait
+
+# 3. Expose UI via Ingress
+echo "Creating Ingress Rule..."
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-server
+  namespace: argocd
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+  - host: argocd.192.168.68.210.nip.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: argocd-server
+            port:
+              number: 80
+EOF
+
+echo "=== ARGOCD READY ==="
+echo "URL: http://argocd.192.168.68.210.nip.io"
+echo "Get Password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+```
+
+### 9.3 Source Control Service (Gitea)
+**File:** `gitops/services/gitea.yaml`
+
+This is our first **Declarative Application**. Instead of a shell script, this is a YAML file we feed to ArgoCD.
+*   **Database:** Deploys a dedicated PostgreSQL instance managed by the chart.
+*   **Storage:** Uses the `longhorn` storage class (HDD).
+*   **UI:** Configured with a modern theme and mapped to `gitea.192.168.68.210.nip.io`.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitea
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+spec:
+  project: default
+  source:
+    repoURL: https://dl.gitea.com/charts/
+    chart: gitea
+    targetRevision: 10.6.0
+    helm:
+      values: |
+        global:
+          storageClass: longhorn
+        
+        gitea:
+          admin:
+            existingSecret: "" # We create admin on first login
+          config:
+            APP_NAME: "PiCluster Git"
+            server:
+              DOMAIN: "gitea.192.168.68.210.nip.io"
+              ROOT_URL: "http://gitea.192.168.68.210.nip.io/"
+              SSH_DOMAIN: "192.168.68.210"
+              SSH_PORT: "2222"
+              DEFAULT_THEME: "gitea-auto"
+            service:
+              DISABLE_REGISTRATION: false
+
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+
+        persistence:
+          enabled: true
+          size: 10Gi
+
+        postgresql:
+          enabled: true
+          global:
+            storageClass: longhorn
+          primary:
+            persistence:
+              size: 5Gi
+
+        ingress:
+          enabled: true
+          className: traefik
+          hosts:
+            - host: gitea.192.168.68.210.nip.io
+              paths:
+                - path: /
+                  pathType: Prefix
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+
+        service:
+          ssh:
+            type: LoadBalancer
+            port: 2222
+            annotations: 
+              io.cilium/lb-ipam-ips: "192.168.68.210"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitea
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 9.4 The "App of Apps" Pattern
+**File:** `gitops/app-of-apps.yaml`
+
+This is the master controller. It points to your Git repository (once created in Gitea) and recursively installs everything else defined in the `gitops/` folder (Security, Observability, Management).
+
+*Note: Initially, this will be manual. Once you migrate the code to Gitea (Step 9.5), you will update the `repoURL` here.*
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 66.3.0
+    helm:
+      values: |
+        prometheus:
+          prometheusSpec:
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: longhorn
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 10Gi
+            resources:
+              limits:
+                memory: 500Mi
+
+        grafana:
+          persistence:
+            enabled: true
+            storageClassName: longhorn
+            size: 2Gi
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            hosts:
+              - grafana.192.168.68.210.nip.io
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+
+        alertmanager:
+          alertmanagerSpec:
+            storage:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: longhorn
+                  resources:
+                    requests:
+                      storage: 2Gi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+```
+
+### 9.5 Phase 4 Execution Steps
+
+1.  **Install Traefik:**
+    ```bash
+    bash bootstrap/traefik/install.sh
+    ```
+    *Verify: `kubectl get svc -n traefik-system` should show External-IP `192.168.68.210`.*
+
+2.  **Install ArgoCD:**
+    ```bash
+    bash bootstrap/argocd/install.sh
+    ```
+    *Verify: Open `http://argocd.192.168.68.210.nip.io` and login with the secret password.*
+
+3.  **Deploy Gitea (via ArgoCD):**
+    ```bash
+    kubectl apply -f gitops/services/gitea.yaml
+    ```
+    *Wait 5 minutes. Verify: Open `http://gitea.192.168.68.210.nip.io` and create your admin account.*
+
+4.  **The Pivot (Critical Step):**
+    *   Create a repository in Gitea named `home-cluster`.
+    *   Push your local `gitops/` folder to this new repo.
+    *   (Optional) Modify the `gitea.yaml` and `app-of-apps.yaml` to point to your new `http://gitea...` repo URL instead of public charts, completing the loop.
+
+5.  **Deploy Observability:**
+    ```bash
+    kubectl apply -f gitops/app-of-apps.yaml
+    ```
+    *Verify: Open `http://grafana.192.168.68.210.nip.io`.*
