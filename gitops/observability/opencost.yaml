@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: opencost
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://opencost.github.io/opencost-helm-chart
+    chart: opencost
+    targetRevision: 1.29.0
+    helm:
+      values: |
+        opencost:
+          exporter:
+            defaultClusterId: "rpi-cluster"
+          prometheus:
+            external:
+              url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+        ingress:
+          enabled: true
+          className: traefik
+          hosts:
+            - opencost.192.168.68.210.nip.io
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
