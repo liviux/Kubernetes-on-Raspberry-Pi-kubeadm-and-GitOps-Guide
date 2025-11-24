@@ -1,67 +1,87 @@
 # Kubernetes Cluster on Raspberry Pi 4: Bare Metal GitOps Guide
 
-## 1. Introduction and Scope
-This project establishes a production-grade "Cloud Native" Kubernetes cluster on bare metal Raspberry Pi 4 hardware. The objective is to build a self-healing, observable, and secure platform managed entirely through **GitOps** principles.
+## Table of Contents
+1.  [Introduction and Scope](#1-introduction-and-scope)
+2.  [Architecture Overview](#2-architecture-overview)
+    *   [Hardware Topology](#hardware-topology)
+    *   [Software Stack & Justification](#software-stack--justification)
+3.  [Repository Directory Structure](#3-repository-directory-structure)
+4.  [Prerequisites & Initial Provisioning](#4-prerequisites--initial-provisioning)
+    *   [OS & Network Setup](#os--network-setup)
+    *   [Local Client Configuration](#local-client-configuration)
+    *   [Ansible Configuration](#ansible-configuration)
+5.  [Deployment Roadmap](#5-deployment-roadmap)
 
-This guide serves as the definitive roadmap for reproducing the cluster from scratch, ensuring that the infrastructure (Ansible) and the application state (ArgoCD) are version-controlled and automated.
+---
+
+## 1. Introduction and Scope
+This project documents the establishment of a production-grade "Cloud Native" Kubernetes cluster on bare metal Raspberry Pi 4 hardware. The objective is to build a self-healing, observable, and secure platform managed entirely through **GitOps** principles.
+
+This guide serves as the definitive roadmap for reproducing the cluster from scratch. It ensures that the infrastructure provisioning (via Ansible) and the application state (via ArgoCD) are strictly version-controlled, automated, and reproducible.
+
+---
 
 ## 2. Architecture Overview
 
 ### Hardware Topology
-*   **Control Plane (rpi4-1):** 8GB RAM, 128GB SD, 1TB HDD.
-    *   *Role:* Kubernetes API, Etcd, and **Primary Storage Node**.
-    *   *Labels:* `ram=8gb`, `storage=hdd`, `unique-hdd=true`.
-    *   *Taints:* Untainted to allow workloads, but reserved primarily for critical storage components.
-*   **Worker Nodes (rpi4-2, 3, 4):** 4GB RAM, 64GB SD.
-    *   *Role:* Stateless workload execution.
-    *   *Protection:* Configured to block persistent storage writes to prevent SD card burnout.
+The cluster consists of four nodes, topologically separated into storage-heavy control roles and compute-heavy worker roles.
+
+*   **Control Plane (`rpi4-1`):** 8GB RAM, 128GB SD, 1TB HDD.
+    *   **Role:** Kubernetes API, Etcd, and **Primary Storage Node**.
+    *   **Configuration:** Labeled with `storage=hdd` and `unique-hdd=true`.
+    *   **Taints:** Untainted to allow workload scheduling, but functionally reserved for critical storage components (Longhorn/MinIO) to utilize the HDD.
+*   **Worker Nodes (`rpi4-2`, `rpi4-3`, `rpi4-4`):** 4GB RAM, 64GB SD.
+    *   **Role:** Stateless workload execution.
+    *   **Protection:** Explicitly configured to block persistent storage writes, preventing SD card burnout.
 
 ### Software Stack & Justification
 
 #### **A. Orchestration & Deployment**
-*   **Kubernetes (Kubeadm):** The foundation. Installed via Ansible for a pure upstream experience.
+*   **Kubernetes (Kubeadm):** The cluster foundation. Installed via Ansible (Phase 1) to ensure a pure upstream experience.
 *   **Helm:** The package manager used by ArgoCD to deploy applications.
-*   **ArgoCD + Image Updater:** The GitOps engine. Monitors this repository and syncs changes to the cluster automatically. Image Updater automates container version bumps.
-*   **JenkinsX:** The CI/CD automation platform. Handles complex pipelines (linting, building, releasing) and orchestrates the testing suites.
+*   **ArgoCD + Image Updater:** The GitOps engine (Phase 4). Monitors this repository and automatically syncs changes to the cluster. The Image Updater automates container version bumps based on registry tags.
+*   **JenkinsX:** The CI/CD automation platform (Phase 5). Orchestrates complex pipelines including linting, building, releasing, and testing suites.
 
 #### **B. Network Layer**
-*   **Cilium:** The CNI plugin. Replaces `kube-proxy` with eBPF for superior performance and security. **Hubble:** Network observability tool (part of Cilium) to visualize communication maps. **Tetragon:** eBPF-based security observability and runtime enforcement.
-*   **Traefik:** The Ingress Controller. Manages external access to services and handles LoadBalancing via Cilium L2 Announcements.
+*   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF for superior performance. Configured with L2 Announcements to turn the Raspberry Pis into a physical Load Balancer.
+*   **Hubble:** Network observability tool (embedded in Cilium) for visualizing communication maps.
+*   **Tetragon:** eBPF-based security observability and runtime enforcement.
+*   **Traefik:** The Ingress Controller. Manages external access to services via LoadBalancer IPs requested from Cilium.
 
-#### **C. Observability Stack**
-*   **Prometheus Operator (Prometheus + Alertmanager):** The standard for metrics collection and alerting.
-*   **Thanos:** Provides long-term storage for Prometheus metrics (deduplication and downsampling).
-*   **Grafana:** Visual dashboarding for metrics and logs.
-*   **Fluentd:** The log collector. Gathers logs from all nodes and processes them.
-*   **Loki:** The log database. Stores logs indexed by labels.
-*   **OpenTelemetry + Jaeger:** Distributed tracing. Tracks requests as they jump between microservices for latency debugging.
-*   **SigNoz:** Full-stack APM (Application Performance Monitoring). Included for learning/redundancy to compare against the Prometheus/Loki stack.
-*   **OpenCost:** Cloud cost allocation tool to estimate resource consumption costs.
+#### **C. Observability Stack** (Deployed via GitOps)
+*   **Prometheus Operator:** The standard for metrics collection and alerting.
+*   **Thanos:** Provides long-term storage for Prometheus metrics (deduplication and downsampling). *Depends on MinIO.*
+*   **Grafana:** Visualization for metrics and logs.
+*   **Fluentd:** Log collector. Gathers logs from all nodes.
+*   **Loki:** Log database. Stores logs indexed by labels. *Depends on MinIO.*
+*   **OpenTelemetry + Jaeger:** Distributed tracing. Tracks requests across microservices for latency debugging.
+*   **SigNoz:** Full-stack APM (Application Performance Monitoring). Included for redundancy and deep-dive performance analysis.
+*   **OpenCost:** Cloud cost allocation tool to estimate resource consumption.
 *   **Kube-state-metrics:** Exposes raw Kubernetes object metrics.
 *   **K8sGPT:** AI-powered diagnostics tool to explain cluster errors in plain English.
 *   **Kubeshark:** API traffic analyzer (Wireshark for K8s).
 
-#### **D. Security Layer**
+#### **D. Security Layer** (Deployed via GitOps)
 *   **Cert-Manager:** Automates the issuance and renewal of TLS certificates.
-*   **Harbor:** Private container registry to store built images locally. Scans images for vulnerabilities.
-*   **OpenBao:** Secrets management (Vault fork) to securely store API keys and credentials.
-*   **Trivy:** Vulnerability scanner integrated into the CI/CD pipeline to block insecure images.
-*   **OWASP ZAP:** Dynamic Application Security Testing (DAST) tool integrated into JenkinsX for security testing.
+*   **Harbor:** Private container registry to store built images locally.
+*   **OpenBao:** Secrets management (Community fork of Vault) to securely store API keys.
+*   **Trivy:** Vulnerability scanner integrated into the CI/CD pipeline.
+*   **OWASP ZAP:** Dynamic Application Security Testing (DAST) tool integrated into JenkinsX.
 *   **Falco:** Runtime threat detection. Alerts on suspicious system calls.
 *   **Kyverno:** Policy engine. Enforces rules (e.g., "No root containers") at the API level.
 
 #### **E. Cluster Management & Storage**
-*   **Longhorn:** Distributed block storage. Configured to use the 1TB HDD on the control plane.
-*   **MinIO:** Object storage. *Required Dependency* for Thanos, Loki, and Velero to function on bare metal.
+*   **Longhorn:** Distributed block storage (Phase 3). Configured to strictly use the 1TB HDD on the control plane.
+*   **MinIO:** Object storage. **Required Dependency** for Thanos, Loki, and Velero to function on bare metal.
 *   **Velero:** Backup and disaster recovery. Backs up cluster state and volumes to MinIO.
-*   **Portainer:** Visual web UI for quick container management.
-*   **K9s:** Terminal-based UI for real-time cluster management (local tool).
+*   **Portainer:** Visual web UI for simplified container management.
+*   **K9s:** Terminal-based UI for real-time cluster interaction.
 
 ---
 
 ## 3. Repository Directory Structure
 
-This structure separates infrastructure provisioning from application deployment.
+This structure separates infrastructure provisioning (Ansible), bootstrap scripts, and the declarative Application state (GitOps).
 
 ```text
 .
@@ -82,7 +102,6 @@ This structure separates infrastructure provisioning from application deployment
 │   ├── app-of-apps.yaml             # The Root Application
 │   ├── infrastructure/              # Core Networking & Ingress
 │   │   ├── traefik/
-│   │   ├── metallb-config/          # (If needed, replaced by Cilium L2)
 │   │   └── cert-manager/
 │   ├── storage/                     # Storage Dependencies
 │   │   ├── longhorn-config/         # Post-install configuration
@@ -112,58 +131,46 @@ This structure separates infrastructure provisioning from application deployment
 │       ├── velero/
 │       └── portainer/
 └── tests/                           # VALIDATION
+    ├── infra_test.sh                # Verifies Nodes, RAM, HDD mounts
+    ├── network_test.sh              # Verifies Cilium L2, DNS, Ingress
+    └── storage_test.sh              # Verifies PVC creation on HDD
 ```
 
 ---
 
+## 4. Prerequisites & Initial Provisioning
 
-## 4. Deployment Roadmap
+Before executing Ansible playbooks, the physical devices must be provisioned and network-accessible.
 
-### Phase 1: Infrastructure (Ansible)
-This phase makes the hardware "Kubernetes Ready."
-1.  **OS Tuning:** Update Ubuntu, disable Swap, disable WiFi/BT (save power/interrupts), set GPU memory to minimum (16MB).
-2.  **Kernel & Network:** Load `overlay` and `br_netfilter` modules. Enable IP forwarding and bridged traffic in `sysctl`.
-3.  **Cgroups:** Append `cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1` to `cmdline.txt` to enable resource limits.
-4.  **Dependencies:** Install `containerd`, `open-iscsi`, `nfs-common`, `ipset`.
-5.  **Binaries:** Install `kubeadm`, `kubelet`, `kubectl` (locked versions), `helm`, `etcdctl`, `cilium-cli`.
+### OS & Network Setup
+1.  **Flash OS:** Use **Raspberry Pi Imager** to flash **Ubuntu Server 25.10** to SD cards.
+    *   *Why 25.10?* Selected for the latest kernel support optimized for RPi 4.
+2.  **User Configuration:**
+    *   Hostname: `rpi4-1` through `rpi4-4`.
+    *   User: `user` (or your preferred username).
+    *   SSH: Enabled with public key authentication. 
+3.  **Network Configuration:**
+    *   Identify IPs via your home router. 
+    *   **Address Reservation:** Configure Static DHCP leases on the router to ensure IPs remain persistent (e.g., `192.168.0.201` - rpi4-1).
+    *   **Port Forwarding/DDNS:** Configure DDNS and port forwarding if external access is required (optional). Unless you ave Static IPv4 and then you can have public access easier.
 
-### Phase 2: Cluster Bootstrap
-1.  **Init:** Run `kubeadm init` on `rpi4-1`.
-2.  **Networking:** Install Cilium immediately to allow nodes to become Ready. Configure L2 Announcements for LoadBalancing.
-3.  **Join:** Run `kubeadm join` on worker nodes.
-4.  **Labeling:** Apply labels to distinguish the HDD node from the SD card nodes.
+### Local Client Configuration
+To simplify management, map the IPs to hostnames on your local management machine (Windows/Linux).
 
-### Phase 3: Storage Foundation
-1.  **HDD Setup:** Format and mount the 1TB drive to `/var/lib/longhorn` on `rpi4-1`.
-2.  **Longhorn Install:** Deploy Longhorn. Configure it to strictly enforce data locality (replica count 1, data stored only on the HDD node).
-3.  **MinIO Install:** Deploy MinIO on top of Longhorn. This creates the S3 bucket storage required for the next phase.
+**Windows:** `C:\Windows\System32\drivers\etc\hosts`. I use WSL so I must edit the hosts file on Windows.
+**Linux/Mac:** `/etc/hosts`
 
-### Phase 4: GitOps & Observability
-1.  **ArgoCD:** Deploy ArgoCD.
-2.  **App of Apps:** Apply the root GitOps manifest. ArgoCD will then take over and install:
-    *   **Observability:** Prometheus, Grafana, Thanos (connected to MinIO), Loki (connected to MinIO), Fluentd, OpenTelemetry/Jaeger, SigNoz.
-    *   **Security:** Cert-Manager, Harbor, Kyverno, Falco, OpenBao.
-    *   **Management:** Velero (connected to MinIO).
-
-### Phase 5: CI/CD & DevEx
-1.  **JenkinsX:** Deploy the JenkinsX platform for pipeline management.
-2.  **Integration:** Configure JenkinsX to use Harbor for image pushing and OWASP ZAP/Trivy for security scanning steps.
-
-## 5. Initial provisioning of Rasspberry Pis and Ansible Configuration
-
-First thing to do is to write on each rpi sd card the OS. I used Raspberry Pi Imager and selected Ubuntu Server (25.10) as a smaller image to save resources. In configuration set a hostname (i have rpi4-1 ... rpi4-4), a username (user) and password, enable SSH and I added my key to authorized_keys.
-From my home router I found the devices IPs. Still there you can configure Address reservation so every time they keep their IP. Did some Port forwarding too so I can access them from everywhere using DDNS from my ISP, as I don't have static IPv4. All of these settings are configured from you home router so Google how to if you're interested.
-I added every PI to local machine C:\Windows\System32\drivers\etc\hosts file to be able to control them easier.
+```text
 192.168.0.201 rpi4-1
 192.168.0.202 rpi4-2
 192.168.0.203 rpi4-3
 192.168.0.204 rpi4-4
+```
 
-
-This is the required inventory file to map the architecture to the playbooks.
+### Ansible Configuration
+We use Ansible to drive the infrastructure state.
 
 **File:** `ansible/hosts`
-
 ```ini
 [big]
 # Control Plane (8GB RAM) - The Storage Node
@@ -176,13 +183,55 @@ rpi4-3
 rpi4-4
 
 [all:vars]
-# Global Connection Variables
+# Connection Settings
 ansible_connection=ssh
 ansible_user=user
 ansible_ssh_private_key_file=/home/user/.ssh/rsa-4096/key-nopassphrase.pem
 ansible_python_interpreter=/usr/bin/python3.13
+
+# Environment Variables
+k8s_version=1.31
+```
+
+*Verification:*
+Run the following to confirm connectivity before proceeding:
+```bash
+ansible -i ansible/hosts all -m ping
 ```
 
 ---
 
-after this part we should test connection with ansible -i ansible/hosts all -m ping.
+## 5. Deployment Roadmap
+
+This roadmap outlines the specific order of operations required to bootstrap the cluster.
+
+### Phase 1: Infrastructure (Ansible)
+**Goal:** "Kubernetes Ready" hardware.
+1.  **OS Tuning:** Update packages, disable Swap/WiFi/Bluetooth, set GPU memory to 16MB.
+2.  **Kernel & Network:** Load `overlay`/`br_netfilter` modules; enable IP forwarding.
+3.  **Cgroups:** Append `cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1` to boot config.
+4.  **Dependencies:** Install `containerd`, `open-iscsi`, `nfs-common`, `ipset`.
+5.  **Binaries:** Install `kubeadm`, `kubelet`, `kubectl` (locked versions), `helm`, `etcdctl`, `cilium-cli`.
+
+### Phase 2: Cluster Bootstrap
+**Goal:** A running API server and networked nodes.
+1.  **Init:** Run `kubeadm init` on `rpi4-1`.
+2.  **Networking:** Install **Cilium** immediately to allow nodes to become Ready. Configure L2 Announcements.
+3.  **Join:** Run `kubeadm join` on workers.
+4.  **Labeling:** Apply labels (`hardware/storage=hdd`, `hardware/ram=8gb`) to distinguish the nodes.
+
+### Phase 3: Storage Foundation
+**Goal:** Persistent storage for the GitOps engine.
+1.  **HDD Setup:** Format and mount the 1TB drive to `/var/lib/longhorn`.
+2.  **Longhorn Install:** Deploy Longhorn with strict affinity settings (Replica Count: 1, Control Plane only).
+3.  **MinIO Install:** Deploy MinIO on top of Longhorn to provide S3-compatible storage.
+
+### Phase 4: GitOps & Observability
+**Goal:** Automated application management.
+1.  **ArgoCD:** Deploy ArgoCD.
+2.  **App of Apps:** Apply the root manifest. ArgoCD takes over and installs the Observability, Security, and Management stacks defined in the `gitops/` directory.
+
+### Phase 5: CI/CD & DevEx
+**Goal:** Developer productivity.
+1.  **JenkinsX:** Deploy the JenkinsX platform.
+2.  **Integration:** Configure Harbor for image pushing and Security scanners.
