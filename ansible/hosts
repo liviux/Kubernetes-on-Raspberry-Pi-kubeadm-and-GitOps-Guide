@@ -1,0 +1,16 @@
+[big]
+# Control Plane (8GB RAM) - The Storage Node
+rpi4-1
+
+[small]
+# Worker Nodes (4GB RAM) - Compute Only
+rpi4-2
+rpi4-3
+rpi4-4
+
+[all:vars]
+# Global Connection Variables
+ansible_connection=ssh
+ansible_user=user
+ansible_ssh_private_key_file=/home/user/.ssh/rsa-4096/key-nopassphrase.pem
+ansible_python_interpreter=/usr/bin/python3.13
