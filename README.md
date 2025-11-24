@@ -38,6 +38,12 @@
     *   [10.4 Backup & Restore (Velero)](#104-backup--restore-velero)
     *   [10.5 The Root Application (App of Apps)](#105-the-root-application-app-of-apps)
     *   [10.6 Phase 5 Execution Steps](#106-phase-5-execution-steps)
+11. [Phase 6: Advanced Observability](#11-phase-6-advanced-observability)
+    *   [11.1 Log Aggregation (Loki & Promtail)](#111-log-aggregation-loki--promtail)
+    *   [11.2 Cost Management (OpenCost)](#112-cost-management-opencost)
+    *   [11.3 AI Diagnostics (K8sGPT)](#113-ai-diagnostics-k8sgpt)
+    *   [11.4 Full Stack APM (SigNoz)](#114-full-stack-apm-signoz)
+    *   [11.5 Phase 6 Execution Steps](#115-phase-6-execution-steps)
 
 ---
 
@@ -1559,3 +1565,217 @@ spec:
 4.  **Verification:**
     *   **MinIO Console:** `http://minio.192.168.68.210.nip.io` (User: `admin`, Pass: `password123`)
     *   **Harbor Registry:** `http://harbor.192.168.68.210.nip.io` (Default User: `admin`, Pass: `Harbor12345`)
+
+## 11. Phase 6: Advanced Observability
+
+In this phase, we complete the observability pillar. Metrics (Prometheus) tell you *what* is happening, but Logs (Loki) tell you *why*. We also add cost estimation and AI analysis to help manage the cluster.
+
+### 11.1 Log Aggregation (Loki & Promtail)
+**File:** `gitops/observability/loki-stack.yaml`
+
+We use the **PLG Stack** (Promtail, Loki, Grafana).
+*   **Promtail:** Runs on every node (DaemonSet), reads logs from `/var/log/containers`, and pushes them to Loki.
+*   **Loki:** Stores logs efficiently. We configure it to use **MinIO** (installed in Phase 5) for long-term storage instead of filling up the pod's local volume.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: loki-stack
+    targetRevision: 2.10.2
+    helm:
+      values: |
+        loki:
+          enabled: true
+          persistence:
+            enabled: true
+            storageClassName: longhorn
+            size: 10Gi
+          config:
+            schema_config:
+              configs:
+                - from: 2024-04-01
+                  store: boltdb-shipper
+                  object_store: s3
+                  schema: v11
+                  index:
+                    prefix: index_
+                    period: 24h
+            storage_config:
+              aws:
+                s3: http://admin:password123@minio.storage.svc.cluster.local:9000/loki-data
+                s3forcepathstyle: true
+        
+        promtail:
+          enabled: true
+          config:
+            clients:
+              - url: http://loki-stack:3100/loki/api/v1/push
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+### 11.2 Cost Management (OpenCost)
+**File:** `gitops/observability/opencost.yaml`
+
+OpenCost calculates the resource consumption (CPU/RAM/Storage) of every pod and estimates a "cloud cost" equivalent. This is excellent for understanding which namespace is hogging resources on your Raspberry Pis.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: opencost
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://opencost.github.io/opencost-helm-chart
+    chart: opencost
+    targetRevision: 1.29.0
+    helm:
+      values: |
+        opencost:
+          exporter:
+            defaultClusterId: "rpi-cluster"
+          prometheus:
+            external:
+              url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+        ingress:
+          enabled: true
+          className: traefik
+          hosts:
+            - opencost.192.168.68.210.nip.io
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+### 11.3 AI Diagnostics (K8sGPT)
+**File:** `gitops/observability/k8sgpt.yaml`
+
+K8sGPT scans your cluster for issues (CrashLoops, PVC failures, Service misconfigs) and uses an AI backend to explain the fix in plain English.
+*   **Backend:** Configured here to use the public OpenAI API (requires an API Key) or LocalAI if you host it. *Note: Replace `YOUR_OPENAI_TOKEN` in the secret manually or use the OpenBao vault later.*
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: k8sgpt
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://charts.k8sgpt.ai/
+    chart: k8sgpt-operator
+    targetRevision: 0.1.4
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 11.4 Full Stack APM (SigNoz)
+**File:** `gitops/observability/signoz.yaml`
+
+SigNoz is an open-source alternative to Datadog. It provides traces, metrics, and logs in a single UI.
+*   **Warning:** SigNoz is resource-heavy (ClickHouse database). We configure it with strict limits to fit on the Pi cluster. It serves as a redundant learning tool alongside Prometheus.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: signoz
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://charts.signoz.io
+    chart: signoz
+    targetRevision: 0.36.0
+    helm:
+      values: |
+        global:
+          storageClass: longhorn
+        
+        # Limit ClickHouse resource usage
+        clickhouse:
+          resources:
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+            requests:
+              memory: 512Mi
+              cpu: 500m
+        
+        queryService:
+          resources:
+            limits:
+              memory: 512Mi
+        
+        frontend:
+          ingress:
+            enabled: true
+            className: traefik
+            hosts:
+              - host: signoz.192.168.68.210.nip.io
+                paths:
+                  - path: /
+                    pathType: Prefix
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: signoz
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 11.5 Phase 6 Execution Steps
+
+1.  **Commit:** Save the YAML files to `gitops/observability/` locally.
+    ```bash
+    git add .
+    git commit -m "Add Advanced Observability stack"
+    git push origin main
+    ```
+    *(ArgoCD will pick up the changes if you configured the Root App, or you can apply them manually).*
+
+2.  **Verify Loki:**
+    *   Open Grafana (`http://grafana.192.168.68.210.nip.io`).
+    *   Go to **Data Sources**.
+    *   Add Data Source -> **Loki**.
+    *   URL: `http://loki-stack:3100`.
+    *   Go to **Explore**, select **Loki**, and run query `{namespace="monitoring"}` to see logs.
+
+3.  **Verify OpenCost:**
+    *   Open `http://opencost.192.168.68.210.nip.io`.
+    *   You should see a breakdown of costs per namespace.
+
+4.  **Verify SigNoz:**
+    *   Open `http://signoz.192.168.68.210.nip.io`.
+    *   Create an admin account and view the "Services" dashboard.
+
