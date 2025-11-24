@@ -20,6 +20,11 @@
     *   [7.1 Cluster Initialization Playbook](#71-cluster-initialization-playbook)
     *   [7.2 Network Verification Script](#72-network-verification-script)
     *   [7.3 Phase 2 Execution Steps](#73-phase-2-execution-steps)
+8.  [Phase 3: Storage Foundation](#8-phase-3-storage-foundation)
+    *   [8.1 Storage Mounting Playbook](#81-storage-mounting-playbook)
+    *   [8.2 Longhorn Bootstrap Script](#82-longhorn-bootstrap-script)
+    *   [8.3 Storage Verification Script](#83-storage-verification-script)
+    *   [8.4 Phase 3 Execution Steps](#84-phase-3-execution-steps)
 
 ---
 
@@ -747,3 +752,216 @@ echo "=== PHASE 2 COMPLETE ==="
     ```bash
     bash tests/02_network_test.sh
     ```
+
+## 8. Phase 3: Storage Foundation
+
+In this phase, we enable the persistent storage layer. Since Raspberry Pis use SD cards (which are slow and unreliable for heavy writes), we utilize the **1TB HDD** attached to the Control Plane (`rpi4-1`).
+
+We install **Longhorn** as the storage provider. We configure it with **Strict Affinity** rules: it will serve volumes to the entire cluster, but the physical data will *only* be written to the HDD on `rpi4-1`.
+
+### 8.1 Storage Mounting Playbook
+**File:** `ansible/playbooks/04_storage_mount.yml`
+
+This playbook runs only on the `big` (Control Plane) node. It formats the USB HDD (if necessary) and mounts it persistently to the path Longhorn expects.
+
+*   **Mount Point:** `/var/lib/longhorn`
+*   **Filesystem:** `ext4`
+
+```yaml
+---
+- name: Phase 3a - Mount HDD for Longhorn
+  hosts: big
+  become: true
+  vars:
+    # CHANGE THIS to your actual HDD device identifier (lsblk)
+    # Best practice: Use /dev/disk/by-id/... to avoid USB enumeration changes
+    hdd_device: "/dev/sda1" 
+    mount_path: "/var/lib/longhorn"
+  tasks:
+    - name: Ensure Mount Directory Exists
+      file:
+        path: "{{ mount_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Format HDD (ext4)
+      filesystem:
+        fstype: ext4
+        dev: "{{ hdd_device }}"
+        # force: no # Safety: set to yes only if you want to wipe the drive
+      ignore_errors: yes # Ignores error if already formatted
+
+    - name: Mount HDD
+      mount:
+        path: "{{ mount_path }}"
+        src: "{{ hdd_device }}"
+        fstype: ext4
+        state: mounted
+        opts: defaults,noatime
+
+    - name: Verify Mount
+      shell: df -h {{ mount_path }}
+      register: df_out
+      changed_when: false
+
+    - debug:
+        msg: "Storage mounted: {{ df_out.stdout }}"
+```
+
+### 8.2 Longhorn Bootstrap Script
+**File:** `bootstrap/longhorn/install.sh`
+
+This script installs Longhorn via Helm and applies the critical "Day 2" configurations to protect your hardware.
+
+1.  **Install:** Deploys Longhorn v1.10.1 via Helm.
+2.  **Label:** Applies `node.longhorn.io/create-default-disk=true` to `rpi4-1` so Longhorn knows where to create the initial storage chunk.
+3.  **Restrict:** Patches the configuration of worker nodes (`rpi4-2,3,4`) to set `allowScheduling: false`. This prevents Longhorn from ever trying to save data to their SD cards.
+
+```bash
+#!/bin/bash
+set -e
+
+echo "=== PHASE 3: LONGHORN BOOTSTRAP ==="
+
+# 1. Add Repo
+helm repo add longhorn https://charts.longhorn.io
+helm repo update
+
+# 2. Install Longhorn (Version locked)
+# We set replicaCount=1 because we only have 1 HDD.
+echo "Installing Longhorn Chart..."
+helm upgrade --install longhorn longhorn/longhorn \
+  --namespace longhorn-system \
+  --create-namespace \
+  --version 1.10.1 \
+  --set defaultSettings.defaultDataPath="/var/lib/longhorn" \
+  --set persistence.defaultClassReplicaCount=1 \
+  --set defaultSettings.createDefaultDiskLabeledNodes=true \
+  --set defaultSettings.allowNodeDrainWithLastHealthyReplica=true \
+  --wait
+
+# 3. Configure Control Plane Storage
+echo "Configuring Control Plane (HDD) storage..."
+kubectl label node rpi4-1 node.longhorn.io/create-default-disk=true --overwrite
+
+# 4. Protect Worker SD Cards
+# We disable storage scheduling on all small nodes
+echo "Locking out worker nodes from storage duties..."
+WORKERS=("rpi4-2" "rpi4-3" "rpi4-4")
+
+for NODE in "${WORKERS[@]}"; do
+    echo "Disabling scheduling on $NODE..."
+    # We use 'patch' to modify the Longhorn Node CRD directly
+    kubectl patch nodes.longhorn.io $NODE -n longhorn-system --type=merge -p '{"spec":{"allowScheduling": false}}' || true
+done
+
+echo "=== LONGHORN INSTALLED & CONFIGURED ==="
+```
+
+### 8.3 Storage Verification Script
+**File:** `tests/03_storage_test.sh`
+
+This script creates a real Persistent Volume Claim (PVC) and a Pod to verify that:
+1.  Longhorn can provision storage.
+2.  The data is physically written to `rpi4-1`.
+3.  A Pod running on a *different* node (e.g., `rpi4-2`) can access that data over the network.
+
+```bash
+#!/bin/bash
+echo "=== STORAGE VERIFICATION SUITE ==="
+
+# 1. Check System Pods
+echo "Checking Longhorn System..."
+PODS=$(kubectl get pods -n longhorn-system | grep Running | wc -l)
+if [ "$PODS" -gt 10 ]; then
+    echo "✅ Longhorn System is Running"
+else
+    echo "❌ Longhorn pods are missing or crashed"
+    kubectl get pods -n longhorn-system
+    exit 1
+fi
+
+# 2. Check Node Configuration
+echo "Checking Disk Scheduling..."
+# rpi4-1 should be true, others false
+CP_SCHED=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}')
+WORKER_SCHED=$(kubectl get nodes.longhorn.io rpi4-2 -n longhorn-system -o jsonpath='{.spec.allowScheduling}')
+
+if [ "$CP_SCHED" == "true" ] && [ "$WORKER_SCHED" == "false" ]; then
+    echo "✅ HDD Affinity Configured (Only CP stores data)"
+else
+    echo "❌ Node Scheduling config is wrong! CP: $CP_SCHED, Worker: $WORKER_SCHED"
+    exit 1
+fi
+
+# 3. Create Test Workload
+echo "Deploying Test PVC & Pod..."
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-storage-verify
+spec:
+  accessModes: [ "ReadWriteOnce" ]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-storage-pod
+spec:
+  nodeSelector:
+    # Force pod to run on a worker to test network attachment
+    hardware/sd: "64gb"
+  containers:
+  - name: write-test
+    image: busybox
+    command: ["/bin/sh", "-c", "echo 'Storage Works' > /data/test.txt && sleep 3600"]
+    volumeMounts:
+    - name: vol
+      mountPath: /data
+  volumes:
+  - name: vol
+    persistentVolumeClaim:
+      claimName: test-storage-verify
+EOF
+
+echo "Waiting for Pod to start (This verifies volume attach)..."
+kubectl wait --for=condition=Ready pod/test-storage-pod --timeout=120s
+
+if [ $? -eq 0 ]; then
+    echo "✅ Storage Attached Successfully over Network"
+    # Cleanup
+    kubectl delete pod test-storage-pod
+    kubectl delete pvc test-storage-verify
+else
+    echo "❌ Test Pod failed to start (Volume Attach Error?)"
+    kubectl describe pod test-storage-pod
+    exit 1
+fi
+
+echo "=== PHASE 3 COMPLETE ==="
+```
+
+### 8.4 Phase 3 Execution Steps
+
+1.  **Mount the HDD:**
+    *(Ensure your HDD is plugged into `rpi4-1` and check `lsblk` to confirm the device name matches the playbook vars).*
+    ```bash
+    ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
+    ```
+
+2.  **Install Longhorn:**
+    Run this script from your management machine (requires `helm` and `kubectl` access to the cluster).
+    ```bash
+    bash bootstrap/longhorn/install.sh
+    ```
+
+3.  **Verify Storage:**
+    ```bash
+    bash tests/03_storage_test.sh
+    ```
+
