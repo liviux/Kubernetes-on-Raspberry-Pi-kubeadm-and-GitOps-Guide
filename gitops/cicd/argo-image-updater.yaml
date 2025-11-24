@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-image-updater
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argocd-image-updater
+    targetRevision: 0.9.1
+    helm:
+      values: |
+        config:
+          registries:
+            - name: harbor.192.168.68.210.nip.io
+              api_url: https://harbor.192.168.68.210.nip.io
+              prefix: harbor.192.168.68.210.nip.io/library
+              ping: yes
+              insecure: yes # Self-signed certs
+              credentials: secret:argocd/harbor-creds#password
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
