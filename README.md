@@ -108,7 +108,7 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 *   **Prometheus Operator:** The standard for metrics collection and alerting.
 *   **Thanos:** Provides long-term storage for Prometheus metrics (deduplication and downsampling). *Depends on MinIO.*
 *   **Grafana:** Visualization for metrics and logs.
-*   **Fluentd:** Log collector. Gathers logs from all nodes.
+*   **Fluent Bit:** Log collector. Gathers logs from all nodes.
 *   **Loki:** Log database. Stores logs indexed by labels. *Depends on MinIO.*
 *   **OpenTelemetry + Jaeger:** Distributed tracing. Tracks requests across microservices for latency debugging.
 *   **SigNoz:** Full-stack APM (Application Performance Monitoring). Included for redundancy and deep-dive performance analysis.
