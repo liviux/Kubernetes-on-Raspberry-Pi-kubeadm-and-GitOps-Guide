@@ -29,7 +29,7 @@ spec:
             enabled: true
             ingressClassName: traefik
             hosts:
-              - jaeger.192.168.68.210.nip.io
+              - jaeger.192.168.0.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
   destination:

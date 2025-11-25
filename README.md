@@ -2490,6 +2490,43 @@ This playbook is a safety net for your learning process. If you misconfigure the
 *   **Action:** Runs `kubeadm reset`, cleans CNI configurations (`/etc/cni`), flushes IPtables, and removes local kube configs.
 *   **Safety:** By default, it *does not* wipe the Longhorn data on the HDD, preserving your persistent volumes.
 
+```yaml
+---
+- name: Phase 8 - Cluster Reset (The Nuclear Option)
+  hosts: all
+  become: true
+  tasks:
+    - name: Confirm Reset
+      pause:
+        prompt: "WARNING: This will reset the Kubernetes cluster on all nodes. Press Enter to continue or Ctrl+C to abort."
+
+    - name: Reset Kubeadm
+      command: kubeadm reset -f
+      ignore_errors: yes
+
+    - name: Flush IPtables
+      shell: |
+        iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+      ignore_errors: yes
+
+    - name: Cleanup CNI Config
+      file:
+        path: /etc/cni/net.d
+        state: absent
+
+    - name: Cleanup Kube Config
+      file:
+        path: /root/.kube
+        state: absent
+
+    - name: Remove CNI Interfaces
+      shell: |
+        ip link delete cilium_host || true
+        ip link delete cilium_net || true
+        ip link delete kube-ipvs0 || true
+      ignore_errors: yes
+```
+
 **Usage:**
 ```bash
 ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml
@@ -2554,7 +2591,6 @@ You should now have the following files created in your repository folder. **Thi
 *   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/cicd/argo-workflows.yaml`
 *   `gitops/cicd/argo-events.yaml`
-*   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/management/velero.yaml`
 
 ### 5. Tests (Validation)

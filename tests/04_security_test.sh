@@ -23,7 +23,7 @@ fi
 
 # 3. Harbor Registry
 echo "Checking Harbor Registry..."
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.68.210.nip.io/api/v2.0/ping)
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.0.210.nip.io/api/v2.0/ping)
 if [ "$STATUS" -eq 200 ]; then
     echo "✅ Harbor API is Live (200 OK)"
 else

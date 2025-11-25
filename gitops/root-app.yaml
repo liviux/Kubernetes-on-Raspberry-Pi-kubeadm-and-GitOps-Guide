@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: http://gitea.192.168.68.210.nip.io/liviu/home-cluster.git
+    repoURL: http://gitea.192.168.0.210.nip.io/liviu/home-cluster.git
     targetRevision: main
     path: gitops
     directory:

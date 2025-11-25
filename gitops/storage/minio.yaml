@@ -46,7 +46,7 @@ spec:
           enabled: true
           ingressClassName: traefik
           hosts:
-            - minio.192.168.68.210.nip.io
+            - minio.192.168.0.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
 

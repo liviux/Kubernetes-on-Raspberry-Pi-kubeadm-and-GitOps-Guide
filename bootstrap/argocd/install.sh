@@ -30,7 +30,7 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-  - host: argocd.192.168.68.210.nip.io
+  - host: argocd.192.168.0.210.nip.io
     http:
       paths:
       - path: /
@@ -43,5 +43,5 @@ spec:
 EOF
 
 echo "=== ARGOCD READY ==="
-echo "URL: http://argocd.192.168.68.210.nip.io"
+echo "URL: http://argocd.192.168.0.210.nip.io"
 echo "Get Password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"

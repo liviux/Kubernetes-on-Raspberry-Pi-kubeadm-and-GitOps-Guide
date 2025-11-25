@@ -21,7 +21,7 @@ spec:
           enabled: true
           className: traefik
           hosts:
-            - opencost.192.168.68.210.nip.io
+            - opencost.192.168.0.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
   destination:

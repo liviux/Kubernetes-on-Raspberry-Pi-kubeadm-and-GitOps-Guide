@@ -34,7 +34,7 @@ spec:
             enabled: true
             ingressClassName: traefik
             hosts:
-              - grafana.192.168.68.210.nip.io
+              - grafana.192.168.0.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
 

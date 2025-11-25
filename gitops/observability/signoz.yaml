@@ -34,7 +34,7 @@ spec:
             enabled: true
             className: traefik
             hosts:
-              - host: signoz.192.168.68.210.nip.io
+              - host: signoz.192.168.0.210.nip.io
                 paths:
                   - path: /
                     pathType: Prefix

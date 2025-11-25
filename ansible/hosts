@@ -9,8 +9,13 @@ rpi4-3
 rpi4-4
 
 [all:vars]
-# Global Connection Variables
+# Connection Settings
 ansible_connection=ssh
 ansible_user=user
 ansible_ssh_private_key_file=/home/user/.ssh/rsa-4096/key-nopassphrase.pem
 ansible_python_interpreter=/usr/bin/python3.13
+
+# Environment Variables
+k8s_version=1.31
+# Ensure this IP is within your router's subnet (192.168.0.x)
+loadbalancer_ip=192.168.0.210

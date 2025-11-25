@@ -22,9 +22,9 @@ spec:
           config:
             APP_NAME: "PiCluster Git"
             server:
-              DOMAIN: "gitea.192.168.68.210.nip.io"
-              ROOT_URL: "http://gitea.192.168.68.210.nip.io/"
-              SSH_DOMAIN: "192.168.68.210"
+              DOMAIN: "gitea.192.168.0.210.nip.io"
+              ROOT_URL: "http://gitea.192.168.0.210.nip.io/"
+              SSH_DOMAIN: "192.168.0.210"
               SSH_PORT: "2222"
               DEFAULT_THEME: "gitea-auto"
             service:
@@ -54,7 +54,7 @@ spec:
           enabled: true
           className: traefik
           hosts:
-            - host: gitea.192.168.68.210.nip.io
+            - host: gitea.192.168.0.210.nip.io
               paths:
                 - path: /
                   pathType: Prefix
@@ -66,7 +66,7 @@ spec:
             type: LoadBalancer
             port: 2222
             annotations: 
-              io.cilium/lb-ipam-ips: "192.168.68.210"
+              io.cilium/lb-ipam-ips: "192.168.0.210"
   destination:
     server: https://kubernetes.default.svc
     namespace: gitea

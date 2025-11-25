@@ -14,6 +14,7 @@ helm upgrade --install traefik traefik/traefik \
   --create-namespace \
   --version 37.3.0 \
   --set service.type=LoadBalancer \
+  --set loadBalancerIP=192.168.0.210 \
   --set ports.web.nodePort=null \
   --set ports.websecure.nodePort=null \
   --set providers.kubernetesCRD.allowCrossNamespace=true \
