@@ -99,10 +99,10 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 *   **Argo Workflows & Events:** The CI/CD engine (Phase 7). A Kubernetes-native pipeline system that replaces heavyweight tools like Jenkins. It handles builds, tests, and event triggers (webhooks).
 
 #### **B. Network Layer**
-*   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF for superior performance. Configured with L2 Announcements to turn the Raspberry Pis into a physical Load Balancer.
-*   **Hubble:** Network observability tool (embedded in Cilium) for visualizing communication maps.
-*   **Tetragon:** eBPF-based security observability and runtime enforcement.
-*   **Traefik:** The Ingress Controller. Manages external access to services via LoadBalancer IPs requested from Cilium.
+*   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF. Configured with L2 Announcements for Load Balancing.
+*   **Hubble:** Network observability tool.
+*   **Tetragon:** Security observability and runtime enforcement.
+*   **Traefik:** Ingress Controller and LoadBalancer.
 
 #### **C. Observability Stack** (Deployed via GitOps)
 *   **Prometheus Operator:** The standard for metrics collection and alerting.
@@ -117,14 +117,14 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 *   **K8sGPT:** AI-powered diagnostics tool to explain cluster errors in plain English.
 *   **Kubeshark:** API traffic analyzer (Wireshark for K8s).
 
-#### **D. Security Layer** (Deployed via GitOps)
-*   **Cert-Manager:** Automates the issuance and renewal of TLS certificates.
-*   **Harbor:** Private container registry to store built images locally.
-*   **OpenBao:** Secrets management (Community fork of Vault) to securely store API keys.
-*   **Trivy:** Vulnerability scanner integrated into the CI/CD pipeline.
-*   **OWASP ZAP:** Dynamic Application Security Testing (DAST) tool integrated into JenkinsX.
-*   **Falco:** Runtime threat detection. Alerts on suspicious system calls.
-*   **Kyverno:** Policy engine. Enforces rules (e.g., "No root containers") at the API level.
+#### **D. Security Layer**
+*   **Cert-Manager:** Automates TLS certificates.
+*   **Harbor:** Private container registry with Trivy integration.
+*   **OpenBao:** Secrets management.
+*   **Trivy:** Vulnerability scanner.
+*   **OWASP ZAP:** DAST tool integrated into **Argo Workflows** for security testing.
+*   **Falco:** Runtime threat detection.
+*   **Kyverno:** Policy engine.
 
 #### **E. Cluster Management & Storage**
 *   **Longhorn:** Distributed block storage (Phase 3). Configured to strictly use the 1TB HDD on the control plane.
@@ -1049,6 +1049,7 @@ helm upgrade --install traefik traefik/traefik \
   --create-namespace \
   --version 37.3.0 \
   --set service.type=LoadBalancer \
+  --set loadBalancerIP=192.168.0.210 \
   --set ports.web.nodePort=null \
   --set ports.websecure.nodePort=null \
   --set providers.kubernetesCRD.allowCrossNamespace=true \
@@ -2335,8 +2336,8 @@ spec:
       - CreateNamespace=true
 ```
 
-**Note on OWASP ZAP:**
-OWASP ZAP is best run as a step in your Jenkins pipeline (`Jenkinsfile`) against a staging URL. It does not require a standalone Helm installation for this architecture.
+> **Note on OWASP ZAP:**
+> OWASP ZAP is best run as a step in your **Argo Workflow** (`WorkflowTemplate`) against a staging URL. It does not require a standalone Helm installation for this architecture.
 
 ### 12.5 Local Development (Skaffold) (optional)
 
@@ -2380,17 +2381,27 @@ Verifies the build machinery components.
 #!/bin/bash
 echo "=== CI/CD PIPELINE VERIFICATION ==="
 
-# 1. Jenkins Status
-echo "Checking Jenkins Controller..."
-kubectl get pods -n jenkins -l app.kubernetes.io/component=jenkins-controller | grep Running > /dev/null
+# 1. Argo Workflows Status
+echo "Checking Argo Workflows Controller..."
+kubectl get pods -n argo-workflows -l app.kubernetes.io/name=argo-workflows-controller | grep Running > /dev/null
 if [ $? -eq 0 ]; then
-    echo "✅ Jenkins Controller is Running"
+    echo "✅ Argo Workflows Controller is Running"
 else
-    echo "❌ Jenkins is down"
+    echo "❌ Argo Workflows is down"
     exit 1
 fi
 
-# 2. Trivy Scanning
+# 2. Argo Events Status
+echo "Checking Argo Events..."
+kubectl get pods -n argo-events -l app.kubernetes.io/name=argo-events-controller | grep Running > /dev/null
+if [ $? -eq 0 ]; then
+    echo "✅ Argo Events Controller is Running"
+else
+    echo "❌ Argo Events is down"
+    exit 1
+fi
+
+# 3. Trivy Scanning
 echo "Checking Security Scans..."
 REPORTS=$(kubectl get vulnerabilityreports -A | wc -l)
 if [ "$REPORTS" -gt 0 ]; then
@@ -2412,13 +2423,10 @@ echo "=== CI/CD CHECK COMPLETE ==="
     git push origin main
     ```
 
-2.  **Verify Jenkins:**
-    *   Open `http://jenkins.192.168.0.210.nip.io`.
-    *   **User:** `admin`.
-    *   **Password:** Retrieve via:
-        ```bash
-        kubectl get secret -n jenkins jenkins -o jsonpath="{.data.jenkins-admin-password}" | base64 -d; echo
-        ```
+2.  **Verify Argo Workflows:**
+    *   Open `http://workflows.192.168.0.210.nip.io`.
+    *   Ensure you can see the Workflows dashboard.
+    *   *(Authentication is handled via the Server auth mode or Traefik, depending on config).*
 
 3.  **Verify Image Updater:**
     Check the logs to ensure it can connect to Harbor:
@@ -2541,13 +2549,14 @@ You should now have the following files created in your repository folder. **Thi
 *   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/cicd/argo-workflows.yaml`
 *   `gitops/cicd/argo-events.yaml`
-*   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/management/velero.yaml`
 
 ### 5. Tests (Validation)
 *   `tests/01_infra_test.sh`
 *   `tests/02_network_test.sh`
 *   `tests/03_storage_test.sh`
+*   `tests/04_security_test.sh`
+*   `tests/05_observability_test.sh`
 *   `tests/06_cicd_test.sh`
 
 
