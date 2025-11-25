@@ -95,14 +95,14 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 #### **A. Orchestration & Deployment**
 *   **Kubernetes (Kubeadm):** The foundation. Installed via Ansible (Phase 1) to ensure a pure upstream experience.
 *   **Helm:** The package manager used by ArgoCD to deploy applications.
-*   **ArgoCD + Image Updater:** The GitOps engine (Phase 4). Monitors this repository and automatically syncs changes to the cluster.
-*   **Argo Workflows & Events:** The CI/CD engine (Phase 7). A Kubernetes-native pipeline system that replaces heavyweight tools like Jenkins. It handles builds, tests, and event triggers (webhooks).
+*   **ArgoCD + Image Updater:** The GitOps engine (Phase 4). Monitors this repository and automatically syncs changes to the cluster. The Image Updater automates container version bumps based on registry tags.
+*   **Argo Workflows & Events:** The CI/CD engine (Phase 7). A Kubernetes-native pipeline system that replaces heavyweight tools like Jenkins. It handles builds, tests, and event triggers (webhooks) directly on the cluster.
 
 #### **B. Network Layer**
-*   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF. Configured with L2 Announcements for Load Balancing.
-*   **Hubble:** Network observability tool.
-*   **Tetragon:** Security observability and runtime enforcement.
-*   **Traefik:** Ingress Controller and LoadBalancer.
+*   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF for superior performance. Configured with L2 Announcements to turn the Raspberry Pis into a physical Load Balancer.
+*   **Hubble:** Network observability tool (embedded in Cilium) for visualizing communication maps.
+*   **Tetragon:** eBPF-based security observability and runtime enforcement.
+*   **Traefik:** The Ingress Controller. Manages external access to services via LoadBalancer IPs requested from Cilium.
 
 #### **C. Observability Stack** (Deployed via GitOps)
 *   **Prometheus Operator:** The standard for metrics collection and alerting.
@@ -117,14 +117,14 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 *   **K8sGPT:** AI-powered diagnostics tool to explain cluster errors in plain English.
 *   **Kubeshark:** API traffic analyzer (Wireshark for K8s).
 
-#### **D. Security Layer**
-*   **Cert-Manager:** Automates TLS certificates.
-*   **Harbor:** Private container registry with Trivy integration.
-*   **OpenBao:** Secrets management.
-*   **Trivy:** Vulnerability scanner.
-*   **OWASP ZAP:** DAST tool integrated into **Argo Workflows** for security testing.
-*   **Falco:** Runtime threat detection.
-*   **Kyverno:** Policy engine.
+#### **D. Security Layer** (Deployed via GitOps)
+*   **Cert-Manager:** Automates the issuance and renewal of TLS certificates.
+*   **Harbor:** Private container registry to store built images locally.
+*   **OpenBao:** Secrets management (Community fork of Vault) to securely store API keys.
+*   **Trivy:** Vulnerability scanner integrated into the CI/CD pipeline.
+*   **OWASP ZAP:** Dynamic Application Security Testing (DAST) tool integrated into **Argo Workflows** for security testing.
+*   **Falco:** Runtime threat detection. Alerts on suspicious system calls.
+*   **Kyverno:** Policy engine. Enforces rules (e.g., "No root containers") at the API level.
 
 #### **E. Cluster Management & Storage**
 *   **Longhorn:** Distributed block storage (Phase 3). Configured to strictly use the 1TB HDD on the control plane.
@@ -144,32 +144,30 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 
 ```text
 .
-├── README.md                        # The Master Guide
-├── ansible/                         # INFRASTRUCTURE
-│   ├── hosts                        # Inventory file
-│   ├── ansible.cfg                  # Config
+├── README.md                        # This guide
+├── ansible/                         # INFRASTRUCTURE (Imperative)
+│   ├── hosts                        # Inventory file defined below
+│   ├── ansible.cfg                  # Local Ansible config
 │   ├── playbooks/
-│   │   ├── 01_node_prep.yml         # OS config, Cgroups, Dependencies
-│   │   ├── 02_k8s_binaries.yml      # Kubeadm/Kubelet/Helm
-│   │   ├── 03_cluster_init.yml      # Cluster Bootstrap
-│   │   ├── 04_storage_mount.yml     # HDD Mount
-│   │   └── 05_reset_cluster.yml     # Tear down script
-│   └── roles/                       # Roles
-├── bootstrap/                       # BOOTSTRAP
-│   ├── cilium/                      # Network
-│   ├── longhorn/                    # Storage
-│   ├── traefik/                     # Ingress
-│   └── argocd/                      # GitOps Engine
-├── gitops/                          # APPLICATIONS
-│   ├── app-of-apps.yaml             # Root App
-│   ├── infrastructure/              # Networking
+│   │   ├── 01_node_prep.yml         # OS config, Cgroups, Kernel modules, Dependencies
+│   │   ├── 02_k8s_binaries.yml      # Installing Kubeadm/Kubelet/Kubectl/Helm
+│   │   ├── 03_cluster_init.yml      # Bootstrap CP, Join Workers, Taints, Labels
+│   │   ├── 04_storage_mount.yml     # Formats and mounts HDD on CP
+│   │   └── 05_reset_cluster.yml     # Tear down script (for reproducibility)
+├── bootstrap/                       # BOOTSTRAP (Pre-GitOps)
+│   ├── cilium/                      # Helm scripts for CNI & L2 Announcements
+│   ├── longhorn/                    # Helm scripts for Storage (HDD constraints)
+│   └── argocd/                      # Helm scripts to install ArgoCD
+├── gitops/                          # APPLICATIONS (Declarative)
+│   ├── app-of-apps.yaml             # The Root Application
+│   ├── infrastructure/              # Core Networking & Ingress
 │   │   ├── traefik/
 │   │   └── cert-manager/
-│   ├── storage/                     # Storage
-│   │   ├── minio/                   # S3 Object Store
-│   │   └── longhorn-config/
-│   ├── observability/               # Monitoring
-│   │   ├── kube-prometheus-stack/
+│   ├── storage/                     # Storage Dependencies
+│   │   ├── longhorn-config/         # Post-install configuration
+│   │   └── minio/                   # Object Store for Thanos/Loki/Velero
+│   ├── observability/               # Monitoring Stack
+│   │   ├── kube-prometheus-stack/   # Prom + Alertmanager + Grafana
 │   │   ├── thanos/
 │   │   ├── loki-stack/
 │   │   ├── fluent-bit/
@@ -179,7 +177,7 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 │   │   ├── opencost/
 │   │   ├── k8sgpt/
 │   │   └── kubeshark/
-│   ├── security/                    # Security
+│   ├── security/                    # Security Stack
 │   │   ├── harbor/
 │   │   ├── openbao/
 │   │   ├── falco/
@@ -189,17 +187,18 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 │   │   ├── argo-workflows/          # CI Engine
 │   │   ├── argo-events/             # Webhook Events
 │   │   └── argo-image-updater/      # Image Updater
-│   └── management/                  # Ops
+│   └── management/                  # Ops Tools
 │       ├── velero/
 │       └── portainer/
 └── tests/                           # VALIDATION
-    ├── 01_infra_test.sh
-    ├── 02_network_test.sh
-    ├── 03_storage_test.sh
-    ├── 04_security_test.sh
-    ├── 05_observability_test.sh
-    └── 06_cicd_test.sh
+    ├── 01_infra_test.sh             # Verifies Nodes, RAM, HDD mounts
+    ├── 02_network_test.sh           # Verifies Cilium L2, DNS, Ingress
+    ├── 03_storage_test.sh           # Verifies PVC creation on HDD
+    ├── 04_security_test.sh          # Verifies Kyverno, Falco, Harbor
+    ├── 05_observability_test.sh     # Verifies Prom, Loki, K8sGPT
+    └── 06_cicd_test.sh              # Verifies Argo Workflows
 ```
+
 ---
 
 ## 4. Prerequisites & Initial Provisioning
@@ -208,16 +207,20 @@ Before executing Ansible playbooks, the physical devices must be provisioned and
 
 ### OS & Network Setup
 1.  **Flash OS:** Use **Raspberry Pi Imager** to flash **Ubuntu Server 25.10** to SD cards.
-    *   *Settings:* Set hostname (`rpi4-1`...`rpi4-4`), username (`user`), and enable SSH with your public key.
-2.  **Network Configuration:**
+    *   *Why 25.10?* Selected for the latest kernel support optimized for RPi 4.
+2.  **User Configuration:**
+    *   Hostname: `rpi4-1` through `rpi4-4`.
+    *   User: `user` (or your preferred username).
+    *   SSH: Enabled with public key authentication.
+3.  **Network Configuration:**
     *   Identify IPs via your home router.
-    *   **Address Reservation:** Configure Static DHCP leases on the router to ensure IPs remain persistent (e.g., `192.168.0.201` through `.204`).
-    *   **Port Forwarding:** (Optional) Configure DDNS and port forwarding if external access is required.
+    *   **Address Reservation:** Configure Static DHCP leases on the router to ensure IPs remain persistent (e.g., `192.168.0.201` - `rpi4-1`).
+    *   **Port Forwarding/DDNS:** Configure DDNS and port forwarding if external access is required (optional). Unless you have Static IPv4 and then you can have public access easier.
 
 ### Local Client Configuration
 To simplify management, map the IPs to hostnames on your local management machine.
 
-**Windows:** `C:\Windows\System32\drivers\etc\hosts`
+**Windows:** `C:\Windows\System32\drivers\etc\hosts`. (If using WSL, you must edit the hosts file on Windows).
 **Linux/Mac:** `/etc/hosts`
 
 ```text
@@ -249,14 +252,14 @@ ansible_user=user
 ansible_ssh_private_key_file=/home/user/.ssh/rsa-4096/key-nopassphrase.pem
 ansible_python_interpreter=/usr/bin/python3.13
 
-# Cluster Configuration
+# Environment Variables
 k8s_version=1.31
-# IMPORTANT: Update this if your router uses 192.168.0.x
+# Ensure this IP is within your router's subnet (192.168.0.x)
 loadbalancer_ip=192.168.0.210 
 ```
 
 *Verification:*
-Run the following to confirm connectivity:
+Run the following to confirm connectivity before proceeding:
 ```bash
 ansible -i ansible/hosts all -m ping
 ```
@@ -298,6 +301,7 @@ This roadmap outlines the specific order of operations required to bootstrap the
 1.  **Argo Workflows & Events:** Deploy the CI engine and Event Bus.
 2.  **Integration:** Configure Harbor for image pushing and Security scanners (Trivy/ZAP) within the pipelines.
 
+---
 
 ## 6. Phase 1: Infrastructure Provisioning
 
@@ -540,7 +544,7 @@ This playbook installs the core software stack.
 ```
 
 ### 6.3 Infrastructure Verification
-**File:** `tests/infra_test.sh`
+**File:** `tests/01_infra_test.sh`
 
 This script validates that Phase 1 successfully prepared the nodes.
 
@@ -599,7 +603,7 @@ Run the following commands from your management machine to execute Phase 1.
 
 3.  **Verify State:**
     ```bash
-    bash tests/infra_test.sh
+    bash tests/01_infra_test.sh
     ```
 
 ## 7. Phase 2: Cluster Bootstrap
@@ -2374,8 +2378,9 @@ deploy:
 **File:** `tests/06_cicd_test.sh`
 
 Verifies the build machinery components.
-1.  **Jenkins:** Checks controller availability.
-2.  **Trivy:** Checks if vulnerability reports are being generated for running pods.
+1.  **Argo Workflows:** Checks controller availability.
+2.  **Argo Events:** Checks controller availability.
+3.  **Trivy:** Checks if vulnerability reports are being generated for running pods.
 
 ```bash
 #!/bin/bash
@@ -2419,7 +2424,7 @@ echo "=== CI/CD CHECK COMPLETE ==="
     Save the YAML files to `gitops/cicd/` and `gitops/security/`.
     ```bash
     git add .
-    git commit -m "Add Jenkins, Image Updater, and Security Scanners"
+    git commit -m "Add Argo Workflows, Image Updater, and Security Scanners"
     git push origin main
     ```
 
@@ -2549,6 +2554,7 @@ You should now have the following files created in your repository folder. **Thi
 *   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/cicd/argo-workflows.yaml`
 *   `gitops/cicd/argo-events.yaml`
+*   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/management/velero.yaml`
 
 ### 5. Tests (Validation)
@@ -2561,4 +2567,3 @@ You should now have the following files created in your repository folder. **Thi
 
 
 ***
-
