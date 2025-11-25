@@ -1,0 +1,50 @@
+---
+- name: Reset Kubernetes Cluster (Nuclear Option)
+  hosts: all
+  become: true
+  tasks:
+    - name: Kubeadm Reset
+      shell: kubeadm reset --force
+      ignore_errors: yes
+
+    - name: Clean CNI configuration
+      file:
+        path: /etc/cni/net.d
+        state: absent
+
+    - name: Clean CNI binaries (Optional, usually kept)
+      file:
+        path: /opt/cni/bin
+        state: absent
+      when: false # Set to true if you want to reinstall CNI plugins too
+
+    - name: Clean Kubelet data
+      file:
+        path: /var/lib/kubelet
+        state: absent
+
+    - name: Clean Etcd data
+      file:
+        path: /var/lib/etcd
+        state: absent
+
+    - name: Clean User Config
+      file:
+        path: /root/.kube
+        state: absent
+
+    - name: Flush Iptables
+      shell: |
+        iptables -F
+        iptables -t nat -F
+        iptables -t mangle -F
+        iptables -X
+      ignore_errors: yes
+
+    - name: Remove Longhorn Data (WARNING: DELETES DATA)
+      # Only run this if you really want to wipe the HDD storage too
+      # file:
+      #   path: /var/lib/longhorn
+      #   state: absent
+      debug:
+        msg: "Skipping Longhorn data wipe for safety. Manually rm /var/lib/longhorn if needed."
