@@ -139,61 +139,61 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 
 ```text
 .
-├── README.md                        # This guide
-├── ansible/                         # INFRASTRUCTURE (Imperative)
+├── README.md                        # The Master Guide
+├── ansible/                         # INFRASTRUCTURE
 │   ├── hosts                        # Inventory file
+│   ├── ansible.cfg                  # Config
 │   ├── playbooks/
-│   │   ├── 01_node_prep.yml         # OS config, Cgroups, Kernel modules, Dependencies
-│   │   ├── 02_k8s_binaries.yml      # Installing Kubeadm/Kubelet/Kubectl/Helm
-│   │   ├── 03_cluster_init.yml      # Bootstrap CP, Join Workers, Taints, Labels
-│   │   ├── 04_storage_mount.yml     # Formats and mounts HDD on CP
-│   │   └── 05_reset_cluster.yml     # Tear down script (for reproducibility)
-│   └── roles/                       # Reusable roles (if needed)
-├── bootstrap/                       # BOOTSTRAP (Pre-GitOps)
-│   ├── cilium/                      # Helm scripts for CNI & L2 Announcements
-│   ├── longhorn/                    # Helm scripts for Storage (HDD constraints)
-│   ├── traefik/                     # Helm scripts for Ingress
-│   └── argocd/                      # Helm scripts to install ArgoCD
-├── gitops/                          # APPLICATIONS (Declarative)
-│   ├── app-of-apps.yaml             # The Root Application
-│   ├── infrastructure/              # Core Networking & Ingress
-│   │   ├── traefik/                 # (Adoption config)
-│   │   └── cert-manager/            # TLS Certificate automation
-│   ├── storage/                     # Storage Dependencies
-│   │   ├── minio/                   # Object Store (S3) for Thanos/Loki/Velero
-│   │   └── longhorn-config/         # (Adoption config)
-│   ├── observability/               # Monitoring Stack
-│   │   ├── kube-prometheus-stack/   # Prom + Alertmanager + Grafana
-│   │   ├── thanos/                  # Long-term metrics storage
-│   │   ├── loki-stack/              # Log Database (Loki + Promtail)
-│   │   ├── fluent-bit/              # Log Collector (C-based, lightweight)
-│   │   ├── opentelemetry/           # Tracing Operator
-│   │   ├── jaeger/                  # Tracing UI/Backend
-│   │   ├── signoz/                  # Full-stack APM (Metrics/Logs/Traces)
-│   │   ├── opencost/                # Cloud Cost allocation
-│   │   ├── k8sgpt/                  # AI Cluster Diagnostics
-│   │   └── kubeshark/               # API Traffic Analyzer
-│   ├── security/                    # Security Stack
-│   │   ├── harbor/                  # Container Registry
-│   │   ├── openbao/                 # Secrets Management (Vault)
-│   │   ├── falco/                   # Runtime Threat Detection (eBPF)
-│   │   ├── kyverno/                 # Policy Enforcement Engine
-│   │   └── trivy-operator/          # Vulnerability Scanner
+│   │   ├── 01_node_prep.yml         # OS config, Cgroups, Dependencies
+│   │   ├── 02_k8s_binaries.yml      # Kubeadm/Kubelet/Helm
+│   │   ├── 03_cluster_init.yml      # Cluster Bootstrap
+│   │   ├── 04_storage_mount.yml     # HDD Mount
+│   │   └── 05_reset_cluster.yml     # Tear down script
+│   └── roles/                       # Roles
+├── bootstrap/                       # BOOTSTRAP
+│   ├── cilium/                      # Network
+│   ├── longhorn/                    # Storage
+│   ├── traefik/                     # Ingress
+│   └── argocd/                      # GitOps Engine
+├── gitops/                          # APPLICATIONS
+│   ├── app-of-apps.yaml             # Root App
+│   ├── infrastructure/              # Networking
+│   │   ├── traefik/
+│   │   └── cert-manager/
+│   ├── storage/                     # Storage
+│   │   ├── minio/                   # S3 Object Store
+│   │   └── longhorn-config/
+│   ├── observability/               # Monitoring
+│   │   ├── kube-prometheus-stack/
+│   │   ├── thanos/
+│   │   ├── loki-stack/
+│   │   ├── fluent-bit/
+│   │   ├── opentelemetry/
+│   │   ├── jaeger/
+│   │   ├── signoz/
+│   │   ├── opencost/
+│   │   ├── k8sgpt/
+│   │   └── kubeshark/
+│   ├── security/                    # Security
+│   │   ├── harbor/
+│   │   ├── openbao/
+│   │   ├── falco/
+│   │   ├── kyverno/
+│   │   └── trivy-operator/
 │   ├── cicd/                        # Build Pipelines
-│   │   ├── jenkins-x/               # CI/CD Platform
-│   │   └── argo-image-updater/      # Automated Container Updates
-│   └── management/                  # Ops Tools
-│       ├── velero/                  # Backup & Disaster Recovery
-│       └── portainer/               # Visual Container Dashboard
+│   │   ├── tekton/                  # CI/CD (Pipelines + Triggers + Dashboard)
+│   │   └── argo-image-updater/
+│   └── management/                  # Ops
+│       ├── velero/
+│       └── portainer/
 └── tests/                           # VALIDATION
-    ├── 01_infra_test.sh             # Verifies Nodes, RAM, HDD mounts
-    ├── 02_network_test.sh           # Verifies Cilium L2, DNS, Ingress
-    ├── 03_storage_test.sh           # Verifies PVC creation on HDD
-    ├── 04_security_test.sh          # Verifies Kyverno, Falco, Harbor
-    ├── 05_observability_test.sh     # Verifies Prom, Loki, K8sGPT
-    └── 06_cicd_test.sh              # Verifies Jenkins, Trivy
+    ├── 01_infra_test.sh
+    ├── 02_network_test.sh
+    ├── 03_storage_test.sh
+    ├── 04_security_test.sh
+    ├── 05_observability_test.sh
+    └── 06_cicd_test.sh
 ```
-
 ---
 
 ## 4. Prerequisites & Initial Provisioning
