@@ -1,0 +1,53 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-workflows
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-workflows
+    targetRevision: 0.41.0
+    helm:
+      values: |
+        server:
+          # Insecure mode handled by Traefik
+          extraArgs: ["--auth-mode=server"]
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            hosts:
+              - workflows.192.168.68.210.nip.io
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+        
+        controller:
+          workflowDefaults:
+            spec:
+              # Use MinIO for artifact storage
+              artifactRepository:
+                s3:
+                  bucket: argo-artifacts
+                  endpoint: minio.storage.svc.cluster.local:9000
+                  insecure: true
+                  accessKeySecret:
+                    name: argo-artifacts-creds
+                    key: accessKey
+                  secretKeySecret:
+                    name: argo-artifacts-creds
+                    key: secretKey
+
+        # Efficient executor for Docker-in-Docker builds
+        useDefaultArtifactRepo: true
+        executor:
+          pns: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-workflows
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
