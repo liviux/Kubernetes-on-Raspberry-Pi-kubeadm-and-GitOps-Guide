@@ -93,10 +93,10 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 ### Software Stack & Justification
 
 #### **A. Orchestration & Deployment**
-*   **Kubernetes (Kubeadm):** The cluster foundation. Installed via Ansible (Phase 1) to ensure a pure upstream experience.
+*   **Kubernetes (Kubeadm):** The foundation. Installed via Ansible (Phase 1) to ensure a pure upstream experience.
 *   **Helm:** The package manager used by ArgoCD to deploy applications.
-*   **ArgoCD + Image Updater:** The GitOps engine (Phase 4). Monitors this repository and automatically syncs changes to the cluster. The Image Updater automates container version bumps based on registry tags.
-*   **JenkinsX:** The CI/CD automation platform (Phase 5). Orchestrates complex pipelines including linting, building, releasing, and testing suites.
+*   **ArgoCD + Image Updater:** The GitOps engine (Phase 4). Monitors this repository and automatically syncs changes to the cluster.
+*   **Argo Workflows & Events:** The CI/CD engine (Phase 7). A Kubernetes-native pipeline system that replaces heavyweight tools like Jenkins. It handles builds, tests, and event triggers (webhooks).
 
 #### **B. Network Layer**
 *   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF for superior performance. Configured with L2 Announcements to turn the Raspberry Pis into a physical Load Balancer.
@@ -132,6 +132,9 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 *   **Velero:** Backup and disaster recovery. Backs up cluster state and volumes to MinIO.
 *   **Portainer:** Visual web UI for simplified container management.
 *   **K9s:** Terminal-based UI for real-time cluster interaction.
+
+#### **F. Developer Experience**
+*   **Skaffold:** Command-line tool for local development iteration (code-sync, build, push, deploy loop).
 
 ---
 
@@ -183,8 +186,9 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 │   │   ├── kyverno/
 │   │   └── trivy-operator/
 │   ├── cicd/                        # Build Pipelines
-│   │   ├── tekton/                  # CI/CD (Pipelines + Triggers + Dashboard)
-│   │   └── argo-image-updater/
+│   │   ├── argo-workflows/          # CI Engine
+│   │   ├── argo-events/             # Webhook Events
+│   │   └── argo-image-updater/      # Image Updater
 │   └── management/                  # Ops
 │       ├── velero/
 │       └── portainer/
@@ -204,20 +208,16 @@ Before executing Ansible playbooks, the physical devices must be provisioned and
 
 ### OS & Network Setup
 1.  **Flash OS:** Use **Raspberry Pi Imager** to flash **Ubuntu Server 25.10** to SD cards.
-    *   *Why 25.10?* Selected for the latest kernel support optimized for RPi 4.
-2.  **User Configuration:**
-    *   Hostname: `rpi4-1` through `rpi4-4`.
-    *   User: `user` (or your preferred username).
-    *   SSH: Enabled with public key authentication. 
-3.  **Network Configuration:**
-    *   Identify IPs via your home router. 
-    *   **Address Reservation:** Configure Static DHCP leases on the router to ensure IPs remain persistent (e.g., `192.168.0.201` - rpi4-1).
-    *   **Port Forwarding/DDNS:** Configure DDNS and port forwarding if external access is required (optional). Unless you ave Static IPv4 and then you can have public access easier.
+    *   *Settings:* Set hostname (`rpi4-1`...`rpi4-4`), username (`user`), and enable SSH with your public key.
+2.  **Network Configuration:**
+    *   Identify IPs via your home router.
+    *   **Address Reservation:** Configure Static DHCP leases on the router to ensure IPs remain persistent (e.g., `192.168.0.201` through `.204`).
+    *   **Port Forwarding:** (Optional) Configure DDNS and port forwarding if external access is required.
 
 ### Local Client Configuration
-To simplify management, map the IPs to hostnames on your local management machine (Windows/Linux).
+To simplify management, map the IPs to hostnames on your local management machine.
 
-**Windows:** `C:\Windows\System32\drivers\etc\hosts`. I use WSL so I must edit the hosts file on Windows.
+**Windows:** `C:\Windows\System32\drivers\etc\hosts`
 **Linux/Mac:** `/etc/hosts`
 
 ```text
@@ -249,12 +249,14 @@ ansible_user=user
 ansible_ssh_private_key_file=/home/user/.ssh/rsa-4096/key-nopassphrase.pem
 ansible_python_interpreter=/usr/bin/python3.13
 
-# Environment Variables
+# Cluster Configuration
 k8s_version=1.31
+# IMPORTANT: Update this if your router uses 192.168.0.x
+loadbalancer_ip=192.168.0.210 
 ```
 
 *Verification:*
-Run the following to confirm connectivity before proceeding:
+Run the following to confirm connectivity:
 ```bash
 ansible -i ansible/hosts all -m ping
 ```
@@ -293,8 +295,8 @@ This roadmap outlines the specific order of operations required to bootstrap the
 
 ### Phase 5: CI/CD & DevEx
 **Goal:** Developer productivity.
-1.  **JenkinsX:** Deploy the JenkinsX platform.
-2.  **Integration:** Configure Harbor for image pushing and Security scanners.
+1.  **Argo Workflows & Events:** Deploy the CI engine and Event Bus.
+2.  **Integration:** Configure Harbor for image pushing and Security scanners (Trivy/ZAP) within the pipelines.
 
 
 ## 6. Phase 1: Infrastructure Provisioning
@@ -2537,13 +2539,17 @@ You should now have the following files created in your repository folder. **Thi
 *   `gitops/security/harbor.yaml`
 *   `gitops/security/trivy-operator.yaml`
 *   `gitops/cicd/argo-image-updater.yaml`
-*   `gitops/cicd/jenkins.yaml`
+*   `gitops/cicd/argo-workflows.yaml`
+*   `gitops/cicd/argo-events.yaml`
+*   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/management/velero.yaml`
 
 ### 5. Tests (Validation)
 *   `tests/01_infra_test.sh`
 *   `tests/02_network_test.sh`
 *   `tests/03_storage_test.sh`
+*   `tests/06_cicd_test.sh`
+
 
 ***
 
