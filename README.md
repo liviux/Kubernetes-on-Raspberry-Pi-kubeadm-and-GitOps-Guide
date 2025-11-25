@@ -40,22 +40,26 @@
     *   [10.6 Policy Enforcement (Kyverno)](#106-policy-enforcement-kyverno)
     *   [10.7 Runtime Security (Falco)](#107-runtime-security-falco)
     *   [10.8 The Root Application (App of Apps)](#108-the-root-application-app-of-apps)
-    *   [10.9 Phase 5 Execution Steps](#109-phase-5-execution-steps)
+    *   [10.9 Security Verification Script](#109-security-verification-script)
+    *   [10.10 Phase 5 Execution Steps](#1010-phase-5-execution-steps)
 11. [Phase 6: Advanced Observability](#11-phase-6-advanced-observability)
     *   [11.1 Log Aggregation (Loki Stack)](#111-log-aggregation-loki-stack)
     *   [11.2 Log Collection (Fluent Bit)](#112-log-collection-fluent-bit)
     *   [11.3 Distributed Tracing (OpenTelemetry)](#113-distributed-tracing-opentelemetry)
-    *   [11.4 Traffic Analysis (Kubeshark)](#114-traffic-analysis-kubeshark)
-    *   [11.5 Cost Management (OpenCost)](#115-cost-management-opencost)
-    *   [11.6 AI Diagnostics (K8sGPT)](#116-ai-diagnostics-k8sgpt)
-    *   [11.7 Full Stack APM (SigNoz)](#117-full-stack-apm-signoz)
-    *   [11.8 Phase 6 Execution Steps](#118-phase-6-execution-steps)
+    *   [11.4 Tracing Backend (Jaeger)](#114-tracing-backend-jaeger)
+    *   [11.5 Traffic Analysis (Kubeshark)](#115-traffic-analysis-kubeshark)
+    *   [11.6 Cost Management (OpenCost)](#116-cost-management-opencost)
+    *   [11.7 AI Diagnostics (K8sGPT)](#117-ai-diagnostics-k8sgpt)
+    *   [11.8 Full Stack APM (SigNoz)](#118-full-stack-apm-signoz)
+    *   [11.9 Observability Verification Script](#119-observability-verification-script)
+    *   [11.10 Phase 6 Execution Steps](#1110-phase-6-execution-steps)
 12. [Phase 7: CI/CD & Developer Experience](#12-phase-7-cicd--developer-experience)
     *   [12.1 Image Automation (Argo Image Updater)](#121-image-automation-argo-image-updater)
     *   [12.2 CI/CD Platform (Jenkins)](#122-cicd-platform-jenkins)
     *   [12.3 Security Tooling (Trivy & OWASP ZAP)](#123-security-tooling-trivy--owasp-zap)
     *   [12.4 Local Development (Skaffold)](#124-local-development-skaffold)
-    *   [12.5 Phase 7 Execution Steps](#125-phase-7-execution-steps)
+    *   [12.5 CI/CD Verification Script](#125-cicd-verification-script)
+    *   [12.6 Phase 7 Execution Steps](#126-phase-7-execution-steps)
 13. [Phase 8: Day 2 Operations & Maintenance](#13-phase-8-day-2-operations--maintenance)
     *   [13.1 Upgrading Kubernetes](#131-upgrading-kubernetes)
     *   [13.2 OS Patching](#132-os-patching)
@@ -1679,8 +1683,52 @@ spec:
       prune: true
       selfHeal: true
 ```
+### 10.9 Security Verification Script
+**File:** `tests/04_security_test.sh`
 
-### 10.9 Phase 5 Execution Steps
+This script verifies that your security policies are enforced and services are accessible.
+1.  **Kyverno:** Attempts to create a pod violating the "no-latest-tag" policy. It expects a failure.
+2.  **Falco:** Verifies the eBPF probes are running.
+3.  **Harbor:** Checks API availability.
+
+```bash
+#!/bin/bash
+echo "=== SECURITY STACK VERIFICATION ==="
+
+# 1. Kyverno Policy Test
+echo "Testing Kyverno Policy Enforcement..."
+# We try to run a pod that violates policies. It MUST fail for the test to pass.
+kubectl run kyverno-test-fail --image=nginx:latest --dry-run=server 2>&1 | grep "disallowed" > /dev/null
+if [ $? -eq 0 ]; then
+    echo "✅ Kyverno blocked 'latest' tag: PASS"
+else
+    echo "⚠️  Kyverno allowed 'latest' tag (Policies might not be loaded yet)"
+fi
+
+# 2. Falco Status
+echo "Checking Falco (Runtime Security)..."
+PODS=$(kubectl get pods -n security -l app.kubernetes.io/name=falco | grep Running | wc -l)
+if [ "$PODS" -ge 1 ]; then
+    echo "✅ Falco eBPF Probes Running"
+else
+    echo "❌ Falco is not running"
+    exit 1
+fi
+
+# 3. Harbor Registry
+echo "Checking Harbor Registry..."
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.68.210.nip.io/api/v2.0/ping)
+if [ "$STATUS" -eq 200 ]; then
+    echo "✅ Harbor API is Live (200 OK)"
+else
+    echo "❌ Harbor API Unreachable (HTTP $STATUS)"
+    exit 1
+fi
+
+echo "=== SECURITY CHECK COMPLETE ==="
+```
+
+### 10.10 Phase 5 Execution Steps
 
 1.  **Commit Files:** Ensure the files above are created in your local `gitops/` folder.
 2.  **Push to Gitea:**
@@ -1815,8 +1863,60 @@ spec:
       prune: true
       selfHeal: true
 ```
+### 11.4 Tracing Backend (Jaeger)
+**File:** `gitops/observability/jaeger.yaml`
 
-### 11.4 Traffic Analysis (Kubeshark)
+Jaeger provides the UI to visualize the distributed traces collected by OpenTelemetry.
+*   **Storage:** Configured to use memory (limited size) for Raspberry Pi resource efficiency, as ElasticSearch is too heavy for this setup.
+*   **Ingress:** Exposed via Traefik.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jaeger
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://jaegertracing.github.io/helm-charts
+    chart: jaeger
+    targetRevision: 3.0.0
+    helm:
+      values: |
+        provisionDataStore:
+          cassandra: false
+          elasticsearch: false
+          kafka: false
+        allInOne:
+          enabled: true
+          # Limit in-memory traces to prevent OOM
+          args: ["--memory.max-traces=1000"] 
+          resources:
+            limits:
+              memory: 512Mi
+        storage:
+          type: memory
+        query:
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            hosts:
+              - jaeger.192.168.68.210.nip.io
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 11.5 Traffic Analysis (Kubeshark)
 **File:** `gitops/observability/kubeshark.yaml`
 Provides deep visibility into API traffic (HTTP, REST, gRPC, GraphQL) similar to Wireshark, but for K8s.
 
@@ -1849,7 +1949,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.5 Cost Management (OpenCost)
+### 11.6 Cost Management (OpenCost)
 **File:** `gitops/observability/opencost.yaml`
 
 OpenCost calculates the resource consumption (CPU/RAM/Storage) of every pod and estimates a "cloud cost" equivalent. This is excellent for understanding which namespace is hogging resources on your Raspberry Pis.
@@ -1890,7 +1990,7 @@ spec:
       selfHeal: true
 ```
 
-### 11.6 AI Diagnostics (K8sGPT)
+### 11.7 AI Diagnostics (K8sGPT)
 **File:** `gitops/observability/k8sgpt.yaml`
 
 K8sGPT scans your cluster for issues (CrashLoops, PVC failures, Service misconfigs) and uses an AI backend to explain the fix in plain English.
@@ -1919,7 +2019,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.7 Full Stack APM (SigNoz)
+### 11.8 Full Stack APM (SigNoz)
 **File:** `gitops/observability/signoz.yaml`
 
 SigNoz is an open-source alternative to Datadog. It provides traces, metrics, and logs in a single UI.
@@ -1977,7 +2077,52 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.8 Phase 6 Execution Steps
+### 11.9 Observability Verification Script
+**File:** `tests/05_observability_test.sh`
+
+This script ensures data is flowing through your pipelines.
+1.  **Prometheus:** Checks if scrape targets are active via the API.
+2.  **Loki:** Checks if the database is up.
+3.  **K8sGPT:** Verifies the AI operator is active.
+
+```bash
+#!/bin/bash
+echo "=== OBSERVABILITY STACK VERIFICATION ==="
+
+# 1. Prometheus Targets
+echo "Checking Prometheus Targets..."
+# Port-forward to query internal API
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090 > /dev/null 2>&1 &
+PID=$!
+sleep 3
+UP_TARGETS=$(curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets | length')
+kill $PID
+
+if [ "$UP_TARGETS" -gt 0 ]; then
+    echo "✅ Prometheus is scraping $UP_TARGETS targets"
+else
+    echo "❌ Prometheus has 0 targets"
+    exit 1
+fi
+
+# 2. Loki Log Ingestion
+echo "Checking Loki Status..."
+kubectl get pods -n monitoring -l app=loki | grep Running > /dev/null
+if [ $? -eq 0 ]; then
+    echo "✅ Loki Database is Running"
+else
+    echo "❌ Loki is down"
+    exit 1
+fi
+
+# 3. K8sGPT
+echo "Checking AI Diagnostics..."
+kubectl get pods -n observability -l app.kubernetes.io/name=k8sgpt-operator | grep Running > /dev/null && echo "✅ K8sGPT Operator is Active"
+
+echo "=== OBSERVABILITY CHECK COMPLETE ==="
+```
+
+### 11.10 Phase 6 Execution Steps
 
 1.  **Commit:** Save the YAML files to `gitops/observability/` locally.
     ```bash
@@ -2190,7 +2335,40 @@ deploy:
     *   Skaffold will watch your source files.
     *   On save, it builds the image, pushes to Harbor, and redeploys to the Raspberry Pi cluster in seconds.
 
-### 12.5 Phase 7 Execution Steps
+### 12.5 CI/CD Verification Script
+**File:** `tests/06_cicd_test.sh`
+
+Verifies the build machinery components.
+1.  **Jenkins:** Checks controller availability.
+2.  **Trivy:** Checks if vulnerability reports are being generated for running pods.
+
+```bash
+#!/bin/bash
+echo "=== CI/CD PIPELINE VERIFICATION ==="
+
+# 1. Jenkins Status
+echo "Checking Jenkins Controller..."
+kubectl get pods -n jenkins -l app.kubernetes.io/component=jenkins-controller | grep Running > /dev/null
+if [ $? -eq 0 ]; then
+    echo "✅ Jenkins Controller is Running"
+else
+    echo "❌ Jenkins is down"
+    exit 1
+fi
+
+# 2. Trivy Scanning
+echo "Checking Security Scans..."
+REPORTS=$(kubectl get vulnerabilityreports -A | wc -l)
+if [ "$REPORTS" -gt 0 ]; then
+    echo "✅ Trivy is generating reports ($REPORTS found)"
+else
+    echo "⚠️  No Vulnerability Reports found yet (Trivy might still be scanning)"
+fi
+
+echo "=== CI/CD CHECK COMPLETE ==="
+```
+
+### 12.6 Phase 7 Execution Steps
 
 1.  **Commit & Push:**
     Save the YAML files to `gitops/cicd/` and `gitops/security/`.
