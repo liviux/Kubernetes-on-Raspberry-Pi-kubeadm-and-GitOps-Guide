@@ -55,11 +55,12 @@
     *   [11.10 Phase 6 Execution Steps](#1110-phase-6-execution-steps)
 12. [Phase 7: CI/CD & Developer Experience](#12-phase-7-cicd--developer-experience)
     *   [12.1 Image Automation (Argo Image Updater)](#121-image-automation-argo-image-updater)
-    *   [12.2 CI/CD Platform (Jenkins)](#122-cicd-platform-jenkins)
-    *   [12.3 Security Tooling (Trivy & OWASP ZAP)](#123-security-tooling-trivy--owasp-zap)
-    *   [12.4 Local Development (Skaffold)](#124-local-development-skaffold)
-    *   [12.5 CI/CD Verification Script](#125-cicd-verification-script)
-    *   [12.6 Phase 7 Execution Steps](#126-phase-7-execution-steps)
+    *   [12.2 CI Engine (Argo Workflows)](#122-ci-engine-argo-workflows)
+    *   [12.3 Event Bus (Argo Events)](#123-event-bus-argo-events)
+    *   [12.4 Security Tooling (Trivy)](#124-security-tooling-trivy)
+    *   [12.5 Local Development (Skaffold)](#125-local-development-skaffold)
+    *   [12.6 CI/CD Verification Script](#126-cicd-verification-script)
+    *   [12.7 Phase 7 Execution Steps](#127-phase-7-execution-steps)
 13. [Phase 8: Day 2 Operations & Maintenance](#13-phase-8-day-2-operations--maintenance)
     *   [13.1 Upgrading Kubernetes](#131-upgrading-kubernetes)
     *   [13.2 OS Patching](#132-os-patching)
@@ -2190,76 +2191,62 @@ spec:
       selfHeal: true
 ```
 
-### 12.2 CI/CD Platform (Jenkins)
-**File:** `gitops/cicd/jenkins.yaml`
+### 12.2 CI Engine (Argo Workflows)
+**File:** `gitops/cicd/argo-workflows.yaml`
 
-We deploy **Jenkins** configured as a Kubernetes-native Controller.
-*   **Agents:** Instead of static agents, Jenkins spawns short-lived Pods in the cluster to run build jobs.
-*   **Integration:** Pre-configured to talk to Gitea and Harbor.
-*   **Persistence:** Stores job history on Longhorn (HDD).
+Argo Workflows is a Kubernetes-native workflow engine. It creates Pods to run your build steps (clone, build, push, test).
+*   **UI:** Exposed via Ingress.
+*   **Persistence:** Uses MinIO (S3) to store build artifacts (logs, compiled binaries).
+*   **Executor:** Uses `pns` (Process Namespace Sharing) for efficiency on Raspberry Pi.
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: jenkins
+  name: argo-workflows
   namespace: argocd
 spec:
   project: default
   source:
-    repoURL: https://charts.jenkins.io
-    chart: jenkins
-    targetRevision: 5.1.0
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-workflows
+    targetRevision: 0.41.0
     helm:
       values: |
-        controller:
-          # Use Longhorn HDD for Jenkins Home
-          storageClass: longhorn
-          accessMode: ReadWriteOnce
-          size: 10Gi
-          
-          # Resource limits for Pi
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "1536Mi"
-          
-          # Expose UI via Traefik
+        server:
+          # Insecure mode handled by Traefik
+          extraArgs: ["--auth-mode=server"]
           ingress:
             enabled: true
             ingressClassName: traefik
-            hostName: jenkins.192.168.68.210.nip.io
+            hosts:
+              - workflows.192.168.68.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
+        
+        controller:
+          workflowDefaults:
+            spec:
+              # Use MinIO for artifact storage
+              artifactRepository:
+                s3:
+                  bucket: argo-artifacts
+                  endpoint: minio.storage.svc.cluster.local:9000
+                  insecure: true
+                  accessKeySecret:
+                    name: argo-artifacts-creds
+                    key: accessKey
+                  secretKeySecret:
+                    name: argo-artifacts-creds
+                    key: secretKey
 
-          # JCasC (Configuration as Code) - Pre-configure Kubernetes Cloud
-          JCasC:
-            defaultConfig: true
-            configScripts:
-              cloud-config: |
-                jenkins:
-                  clouds:
-                    - kubernetes:
-                        name: "kubernetes"
-                        serverUrl: "https://kubernetes.default"
-                        namespace: "jenkins"
-                        jenkinsUrl: "http://jenkins.jenkins.svc.cluster.local:8080"
-                        templates:
-                          - name: "builder"
-                            namespace: "jenkins"
-                            label: "builder"
-                            nodeUsageMode: "EXCLUSIVE"
-                            containers:
-                              - name: "jnlp"
-                                image: "jenkins/inbound-agent:alpine"
-                                resourceRequestCpu: "100m"
-                                resourceRequestMemory: "256Mi"
+        # Efficient executor for Docker-in-Docker builds
+        useDefaultArtifactRepo: true
+        executor:
+          pns: true
   destination:
     server: https://kubernetes.default.svc
-    namespace: jenkins
+    namespace: argo-workflows
   syncPolicy:
     automated:
       prune: true
@@ -2268,7 +2255,49 @@ spec:
       - CreateNamespace=true
 ```
 
-### 12.3 Security Tooling (Trivy & OWASP ZAP)
+### 12.3 Event Bus (Argo Events)
+**File:** `gitops/cicd/argo-events.yaml`
+
+Argo Events listens for external triggers (like a `git push` to your Gitea repo) and triggers an Argo Workflow.
+*   **Sensor:** Listens for the event.
+*   **EventBus:** Manages the message queue (Jetstream).
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-events
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-events
+    targetRevision: 2.4.0
+    helm:
+      values: |
+        controller:
+          replicas: 1
+        webhook:
+          replicas: 1
+        eventbus:
+          replicas: 1
+          nats:
+            native:
+              replicas: 3
+              auth:token: "argo-events-secret"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-events
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+### 12.4 Security Tooling (Trivy & OWASP ZAP)
 
 Rather than installing these as standalone long-running services, we install the **Trivy Operator** to scan the running cluster, and we provide the configurations to run ZAP/Trivy inside CI pipelines.
 
@@ -2307,7 +2336,7 @@ spec:
 **Note on OWASP ZAP:**
 OWASP ZAP is best run as a step in your Jenkins pipeline (`Jenkinsfile`) against a staging URL. It does not require a standalone Helm installation for this architecture.
 
-### 12.4 Local Development (Skaffold) (optional)
+### 12.5 Local Development (Skaffold) (optional)
 
 To enable rapid iteration on your local machine without pushing git commits for every line of code change, use **Skaffold**.
 
@@ -2338,7 +2367,7 @@ deploy:
     *   Skaffold will watch your source files.
     *   On save, it builds the image, pushes to Harbor, and redeploys to the Raspberry Pi cluster in seconds.
 
-### 12.5 CI/CD Verification Script
+### 12.6 CI/CD Verification Script
 **File:** `tests/06_cicd_test.sh`
 
 Verifies the build machinery components.
@@ -2371,7 +2400,7 @@ fi
 echo "=== CI/CD CHECK COMPLETE ==="
 ```
 
-### 12.6 Phase 7 Execution Steps
+### 12.7 Phase 7 Execution Steps
 
 1.  **Commit & Push:**
     Save the YAML files to `gitops/cicd/` and `gitops/security/`.
@@ -2400,6 +2429,7 @@ echo "=== CI/CD CHECK COMPLETE ==="
     ```bash
     kubectl get vulnerabilityreports -A
     ```
+
 ## 13. Phase 8: Day 2 Operations & Maintenance
 
 This section outlines the routine tasks required to keep the cluster secure and up-to-date.
