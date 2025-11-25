@@ -1016,7 +1016,7 @@ echo "=== PHASE 3 COMPLETE ==="
 We now move up the stack to the application layer. Instead of managing tools individually, we establish the **GitOps Loop**.
 
 **The Bootstrap Order:**
-1.  **Traefik:** Provides the LoadBalancer IP (`192.168.68.210`) and routing so we can access UIs.
+1.  **Traefik:** Provides the LoadBalancer IP (`192.168.0.210`) and routing so we can access UIs.
 2.  **ArgoCD:** The controller that syncs Git state to the Cluster.
 3.  **Gitea:** The internal Git server where our cluster configuration will live.
 4.  **App of Apps:** A single manifest that tells ArgoCD to install everything else (Observability, Security, etc.).
@@ -1025,7 +1025,7 @@ We now move up the stack to the application layer. Instead of managing tools ind
 **File:** `bootstrap/traefik/install.sh`
 
 This script installs **Traefik v3**. It is configured to:
-*   Request the specific LoadBalancer IP (`192.168.68.210`) from Cilium.
+*   Request the specific LoadBalancer IP (`192.168.0.210`) from Cilium.
 *   Redirect HTTP to HTTPS globally.
 *   Expose Prometheus metrics for the Observability stack.
 *   Enable JSON access logs for the Logging stack (Loki).
@@ -1073,7 +1073,7 @@ echo "External IP should be assigned shortly."
 
 This script installs **ArgoCD**.
 *   **Insecure Mode:** We disable ArgoCD's internal TLS because Traefik handles SSL termination at the ingress level.
-*   **Ingress:** We automatically apply an Ingress rule so the UI is accessible at `argocd.192.168.68.210.nip.io`.
+*   **Ingress:** We automatically apply an Ingress rule so the UI is accessible at `argocd.192.168.0.210.nip.io`.
 
 ```bash
 #!/bin/bash
@@ -1108,7 +1108,7 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-  - host: argocd.192.168.68.210.nip.io
+  - host: argocd.192.168.0.210.nip.io
     http:
       paths:
       - path: /
@@ -1121,7 +1121,7 @@ spec:
 EOF
 
 echo "=== ARGOCD READY ==="
-echo "URL: http://argocd.192.168.68.210.nip.io"
+echo "URL: http://argocd.192.168.0.210.nip.io"
 echo "Get Password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
 ```
 
@@ -1131,7 +1131,7 @@ echo "Get Password: kubectl -n argocd get secret argocd-initial-admin-secret -o 
 This is our first **Declarative Application**. Instead of a shell script, this is a YAML file we feed to ArgoCD.
 *   **Database:** Deploys a dedicated PostgreSQL instance managed by the chart.
 *   **Storage:** Uses the `longhorn` storage class (HDD).
-*   **UI:** Configured with a modern theme and mapped to `gitea.192.168.68.210.nip.io`.
+*   **UI:** Configured with a modern theme and mapped to `gitea.192.168.0.210.nip.io`.
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -1158,9 +1158,9 @@ spec:
           config:
             APP_NAME: "PiCluster Git"
             server:
-              DOMAIN: "gitea.192.168.68.210.nip.io"
-              ROOT_URL: "http://gitea.192.168.68.210.nip.io/"
-              SSH_DOMAIN: "192.168.68.210"
+              DOMAIN: "gitea.192.168.0.210.nip.io"
+              ROOT_URL: "http://gitea.192.168.0.210.nip.io/"
+              SSH_DOMAIN: "192.168.0.210"
               SSH_PORT: "2222"
               DEFAULT_THEME: "gitea-auto"
             service:
@@ -1190,7 +1190,7 @@ spec:
           enabled: true
           className: traefik
           hosts:
-            - host: gitea.192.168.68.210.nip.io
+            - host: gitea.192.168.0.210.nip.io
               paths:
                 - path: /
                   pathType: Prefix
@@ -1202,7 +1202,7 @@ spec:
             type: LoadBalancer
             port: 2222
             annotations: 
-              io.cilium/lb-ipam-ips: "192.168.68.210"
+              io.cilium/lb-ipam-ips: "192.168.0.210"
   destination:
     server: https://kubernetes.default.svc
     namespace: gitea
@@ -1258,7 +1258,7 @@ spec:
             enabled: true
             ingressClassName: traefik
             hosts:
-              - grafana.192.168.68.210.nip.io
+              - grafana.192.168.0.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
 
@@ -1289,19 +1289,19 @@ spec:
     ```bash
     bash bootstrap/traefik/install.sh
     ```
-    *Verify: `kubectl get svc -n traefik-system` should show External-IP `192.168.68.210`.*
+    *Verify: `kubectl get svc -n traefik-system` should show External-IP `192.168.0.210`.*
 
 2.  **Install ArgoCD:**
     ```bash
     bash bootstrap/argocd/install.sh
     ```
-    *Verify: Open `http://argocd.192.168.68.210.nip.io` and login with the secret password.*
+    *Verify: Open `http://argocd.192.168.0.210.nip.io` and login with the secret password.*
 
 3.  **Deploy Gitea (via ArgoCD):**
     ```bash
     kubectl apply -f gitops/services/gitea.yaml
     ```
-    *Wait 5 minutes. Verify: Open `http://gitea.192.168.68.210.nip.io` and create your admin account.*
+    *Wait 5 minutes. Verify: Open `http://gitea.192.168.0.210.nip.io` and create your admin account.*
 
 4.  **The Pivot (Critical Step):**
     *   Create a repository in Gitea named `home-cluster`.
@@ -1312,7 +1312,7 @@ spec:
     ```bash
     kubectl apply -f gitops/app-of-apps.yaml
     ```
-    *Verify: Open `http://grafana.192.168.68.210.nip.io`.*
+    *Verify: Open `http://grafana.192.168.0.210.nip.io`.*
 
 ## 10. Phase 5: Security & Management Stack
 
@@ -1324,7 +1324,7 @@ Now that the GitOps engine is running, we utilize it to deploy the infrastructur
 Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. Since we are on bare metal, we self-host **MinIO** to provide this API.
 *   **Storage:** Uses Longhorn (HDD) for the data backing.
 *   **Buckets:** Automatically provisions buckets for `velero`, `loki`, `harbor`, and `thanos`.
-*   **Access:** Exposed via Console Ingress (`minio.192.168.68.210.nip.io`).
+*   **Access:** Exposed via Console Ingress (`minio.192.168.0.210.nip.io`).
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -1375,7 +1375,7 @@ spec:
           enabled: true
           ingressClassName: traefik
           hosts:
-            - minio.192.168.68.210.nip.io
+            - minio.192.168.0.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
 
@@ -1452,7 +1452,7 @@ spec:
           type: ingress
           ingress:
             hosts:
-              core: harbor.192.168.68.210.nip.io
+              core: harbor.192.168.0.210.nip.io
             className: traefik
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
@@ -1673,7 +1673,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: http://gitea.192.168.68.210.nip.io/liviu/home-cluster.git
+    repoURL: http://gitea.192.168.0.210.nip.io/liviu/home-cluster.git
     targetRevision: main
     path: gitops
     directory:
@@ -1721,7 +1721,7 @@ fi
 
 # 3. Harbor Registry
 echo "Checking Harbor Registry..."
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.68.210.nip.io/api/v2.0/ping)
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.0.210.nip.io/api/v2.0/ping)
 if [ "$STATUS" -eq 200 ]; then
     echo "✅ Harbor API is Live (200 OK)"
 else
@@ -1746,8 +1746,8 @@ echo "=== SECURITY CHECK COMPLETE ==="
     kubectl apply -f gitops/root-app.yaml
     ```
 4.  **Verification:**
-    *   **MinIO Console:** `http://minio.192.168.68.210.nip.io` (User: `admin`, Pass: `password123`)
-    *   **Harbor Registry:** `http://harbor.192.168.68.210.nip.io` (Default User: `admin`, Pass: `Harbor12345`)
+    *   **MinIO Console:** `http://minio.192.168.0.210.nip.io` (User: `admin`, Pass: `password123`)
+    *   **Harbor Registry:** `http://harbor.192.168.0.210.nip.io` (Default User: `admin`, Pass: `Harbor12345`)
 
 ## 11. Phase 6: Advanced Observability
 
@@ -1906,7 +1906,7 @@ spec:
             enabled: true
             ingressClassName: traefik
             hosts:
-              - jaeger.192.168.68.210.nip.io
+              - jaeger.192.168.0.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
   destination:
@@ -1982,7 +1982,7 @@ spec:
           enabled: true
           className: traefik
           hosts:
-            - opencost.192.168.68.210.nip.io
+            - opencost.192.168.0.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
   destination:
@@ -2066,7 +2066,7 @@ spec:
             enabled: true
             className: traefik
             hosts:
-              - host: signoz.192.168.68.210.nip.io
+              - host: signoz.192.168.0.210.nip.io
                 paths:
                   - path: /
                     pathType: Prefix
@@ -2137,18 +2137,18 @@ echo "=== OBSERVABILITY CHECK COMPLETE ==="
     *(ArgoCD will pick up the changes if you configured the Root App, or you can apply them manually).*
 
 2.  **Verify Loki:**
-    *   Open Grafana (`http://grafana.192.168.68.210.nip.io`).
+    *   Open Grafana (`http://grafana.192.168.0.210.nip.io`).
     *   Go to **Data Sources**.
     *   Add Data Source -> **Loki**.
     *   URL: `http://loki-stack:3100`.
     *   Go to **Explore**, select **Loki**, and run query `{namespace="monitoring"}` to see logs.
 
 3.  **Verify OpenCost:**
-    *   Open `http://opencost.192.168.68.210.nip.io`.
+    *   Open `http://opencost.192.168.0.210.nip.io`.
     *   You should see a breakdown of costs per namespace.
 
 4.  **Verify SigNoz:**
-    *   Open `http://signoz.192.168.68.210.nip.io`.
+    *   Open `http://signoz.192.168.0.210.nip.io`.
     *   Create an admin account and view the "Services" dashboard.
 
 ## 12. Phase 7: CI/CD & Developer Experience
@@ -2176,9 +2176,9 @@ spec:
       values: |
         config:
           registries:
-            - name: harbor.192.168.68.210.nip.io
-              api_url: https://harbor.192.168.68.210.nip.io
-              prefix: harbor.192.168.68.210.nip.io/library
+            - name: harbor.192.168.0.210.nip.io
+              api_url: https://harbor.192.168.0.210.nip.io
+              prefix: harbor.192.168.0.210.nip.io/library
               ping: yes
               insecure: yes # Self-signed certs
               credentials: secret:argocd/harbor-creds#password
@@ -2220,7 +2220,7 @@ spec:
             enabled: true
             ingressClassName: traefik
             hosts:
-              - workflows.192.168.68.210.nip.io
+              - workflows.192.168.0.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
         
@@ -2351,7 +2351,7 @@ metadata:
   name: my-app
 build:
   artifacts:
-  - image: harbor.192.168.68.210.nip.io/library/my-app
+  - image: harbor.192.168.0.210.nip.io/library/my-app
     docker:
       dockerfile: Dockerfile
 manifests:
@@ -2411,7 +2411,7 @@ echo "=== CI/CD CHECK COMPLETE ==="
     ```
 
 2.  **Verify Jenkins:**
-    *   Open `http://jenkins.192.168.68.210.nip.io`.
+    *   Open `http://jenkins.192.168.0.210.nip.io`.
     *   **User:** `admin`.
     *   **Password:** Retrieve via:
         ```bash
