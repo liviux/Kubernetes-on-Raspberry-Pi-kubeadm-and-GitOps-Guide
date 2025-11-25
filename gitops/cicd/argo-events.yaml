@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-events
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-events
+    targetRevision: 2.4.0
+    helm:
+      values: |
+        controller:
+          replicas: 1
+        webhook:
+          replicas: 1
+        eventbus:
+          replicas: 1
+          nats:
+            native:
+              replicas: 3
+              auth:token: "argo-events-secret"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-events
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
