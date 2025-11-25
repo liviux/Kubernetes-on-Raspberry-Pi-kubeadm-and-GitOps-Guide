@@ -63,8 +63,9 @@
 13. [Phase 8: Day 2 Operations & Maintenance](#13-phase-8-day-2-operations--maintenance)
     *   [13.1 Upgrading Kubernetes](#131-upgrading-kubernetes)
     *   [13.2 OS Patching](#132-os-patching)
-    *   [13.3 Backup & Disaster Recovery](#133-backup--disaster-recovery)
-    *   [13.4 Troubleshooting Cheatsheet](#134-troubleshooting-cheatsheet)
+    *   [13.3 Cluster Reset (The Nuclear Option)](#133-cluster-reset-the-nuclear-option)
+    *   [13.4 Backup & Disaster Recovery](#134-backup--disaster-recovery)
+    *   [13.5 Troubleshooting Cheatsheet](#135-troubleshooting-cheatsheet)
 
 ---
 
@@ -2436,8 +2437,21 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml --limit rpi
 # 3. Uncordon (Allow workloads back)
 kubectl uncordon rpi4-2
 ```
+### 13.3 Cluster Reset (The Nuclear Option)
+**File:** `ansible/playbooks/05_reset_cluster.yml`
 
-### 13.3 Backup & Disaster Recovery
+This playbook is a safety net for your learning process. If you misconfigure the cluster or networking beyond repair, run this to wipe the nodes clean so you can restart from Phase 2 (Cluster Init) without re-flashing SD cards.
+
+*   **Action:** Runs `kubeadm reset`, cleans CNI configurations (`/etc/cni`), flushes IPtables, and removes local kube configs.
+*   **Safety:** By default, it *does not* wipe the Longhorn data on the HDD, preserving your persistent volumes.
+
+**Usage:**
+```bash
+ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml
+```
+
+
+### 13.4 Backup & Disaster Recovery
 We utilize **Velero** (installed in Phase 5).
 
 *   **Manual Backup:**
@@ -2452,7 +2466,7 @@ We utilize **Velero** (installed in Phase 5).
     velero restore create --from-backup manual-backup-2025-11-20
     ```
 
-### 13.4 Troubleshooting Cheatsheet
+### 13.5 Troubleshooting Cheatsheet
 *   **Cilium Connectivity:** `cilium connectivity test`
 *   **Longhorn Disk Pressure:** Check UI for "Schedulable" status on `rpi4-1`.
 *   **DNS Issues:** `kubectl run -it --rm --restart=Never busybox --image=busybox:1.28 -- nslookup kubernetes.default`
