@@ -142,14 +142,13 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 ├── README.md                        # This guide
 ├── ansible/                         # INFRASTRUCTURE (Imperative)
 │   ├── hosts                        # Inventory file
-│   ├── ansible.cfg                  # Local Ansible config
 │   ├── playbooks/
 │   │   ├── 01_node_prep.yml         # OS config, Cgroups, Kernel modules, Dependencies
 │   │   ├── 02_k8s_binaries.yml      # Installing Kubeadm/Kubelet/Kubectl/Helm
 │   │   ├── 03_cluster_init.yml      # Bootstrap CP, Join Workers, Taints, Labels
 │   │   ├── 04_storage_mount.yml     # Formats and mounts HDD on CP
-│   │   └── 05_reset_cluster.yml     # Tear down script
-│   └── roles/                       # Reusable roles
+│   │   └── 05_reset_cluster.yml     # Tear down script (for reproducibility)
+│   └── roles/                       # Reusable roles (if needed)
 ├── bootstrap/                       # BOOTSTRAP (Pre-GitOps)
 │   ├── cilium/                      # Helm scripts for CNI & L2 Announcements
 │   ├── longhorn/                    # Helm scripts for Storage (HDD constraints)
@@ -165,31 +164,34 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 │   │   └── longhorn-config/         # (Adoption config)
 │   ├── observability/               # Monitoring Stack
 │   │   ├── kube-prometheus-stack/   # Prom + Alertmanager + Grafana
-│   │   ├── thanos/                  # Long-term metrics
-│   │   ├── loki-stack/              # Logs (Loki + Promtail/Fluent-Bit)
-│   │   ├── fluent-bit/              # Log Collector (Lightweight replacement for Fluentd)
+│   │   ├── thanos/                  # Long-term metrics storage
+│   │   ├── loki-stack/              # Log Database (Loki + Promtail)
+│   │   ├── fluent-bit/              # Log Collector (C-based, lightweight)
 │   │   ├── opentelemetry/           # Tracing Operator
-│   │   ├── jaeger/                  # Tracing Backend
-│   │   ├── signoz/                  # Full-stack APM
-│   │   ├── opencost/                # Cost allocation
-│   │   ├── k8sgpt/                  # AI Diagnostics
+│   │   ├── jaeger/                  # Tracing UI/Backend
+│   │   ├── signoz/                  # Full-stack APM (Metrics/Logs/Traces)
+│   │   ├── opencost/                # Cloud Cost allocation
+│   │   ├── k8sgpt/                  # AI Cluster Diagnostics
 │   │   └── kubeshark/               # API Traffic Analyzer
 │   ├── security/                    # Security Stack
 │   │   ├── harbor/                  # Container Registry
 │   │   ├── openbao/                 # Secrets Management (Vault)
-│   │   ├── falco/                   # Runtime Threat Detection
-│   │   ├── kyverno/                 # Policy Engine
+│   │   ├── falco/                   # Runtime Threat Detection (eBPF)
+│   │   ├── kyverno/                 # Policy Enforcement Engine
 │   │   └── trivy-operator/          # Vulnerability Scanner
 │   ├── cicd/                        # Build Pipelines
 │   │   ├── jenkins-x/               # CI/CD Platform
-│   │   └── argo-image-updater/      # GitOps Image Automation
+│   │   └── argo-image-updater/      # Automated Container Updates
 │   └── management/                  # Ops Tools
-│       ├── velero/                  # Backup & Restore
-│       └── portainer/               # Visual Dashboard
+│       ├── velero/                  # Backup & Disaster Recovery
+│       └── portainer/               # Visual Container Dashboard
 └── tests/                           # VALIDATION
-    ├── 01_infra_test.sh
-    ├── 02_network_test.sh
-    └── 03_storage_test.sh
+    ├── 01_infra_test.sh             # Verifies Nodes, RAM, HDD mounts
+    ├── 02_network_test.sh           # Verifies Cilium L2, DNS, Ingress
+    ├── 03_storage_test.sh           # Verifies PVC creation on HDD
+    ├── 04_security_test.sh          # Verifies Kyverno, Falco, Harbor
+    ├── 05_observability_test.sh     # Verifies Prom, Loki, K8sGPT
+    └── 06_cicd_test.sh              # Verifies Jenkins, Trivy
 ```
 
 ---
