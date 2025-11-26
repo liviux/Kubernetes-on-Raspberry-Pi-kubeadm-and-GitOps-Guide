@@ -235,8 +235,8 @@ flowchart TB
         end
     end
     
-    subgraph ExternalGit["📂 Git Repository"]
-        GITHUB[("🐱 GitHub<br/>GitOps Source")]
+    subgraph GitRepo["📂 Source Control"]
+        GITEA[("🍵 Gitea<br/>GitOps Source")]
     end
 
     %% Traffic Flow
@@ -247,7 +247,7 @@ flowchart TB
     GWAPI -->|"Route to Services"| Workers
     
     %% GitOps Flow
-    GITHUB -->|"Sync"| ARGOCD
+    GITEA -->|"Sync"| ARGOCD
     ARGOCD -->|"Deploy"| K8sCluster
     IMGUPD -->|"Watch Tags"| HARBOR
     
@@ -302,7 +302,7 @@ flowchart TB
     class ARGOCD,IMGUPD gitops
     class PROM,THANOS,GRAFANA,LOKI,FLUENTBIT,OTEL,JAEGER,METRICS observe
     class CERTMGR,HARBOR,OPENBAO,KYVERNO,FALCO,TRIVY security
-    class USER,ROUTER,GITHUB external
+    class USER,ROUTER,GITEA external
 ```
 
 ### Deployment Sequence Diagram
@@ -317,7 +317,7 @@ sequenceDiagram
     participant K8s as ⎈ Kubernetes
     participant Cilium as 🐝 Cilium
     participant ArgoCD as 🐙 ArgoCD
-    participant GitHub as 🐱 GitHub
+    participant Gitea as 🍵 Gitea
 
     rect rgb(50, 108, 229, 0.1)
         Note over User,Nodes: Phase 1: Infrastructure Provisioning
@@ -348,21 +348,21 @@ sequenceDiagram
     end
 
     rect rgb(231, 76, 60, 0.1)
-        Note over User,GitHub: Phase 4: GitOps Bootstrap
+        Note over User,Gitea: Phase 4: GitOps Bootstrap
         User->>K8s: helm install traefik
         User->>K8s: helm install argocd
         User->>K8s: kubectl apply -f root-app.yaml
         K8s->>ArgoCD: Root Application Created
-        ArgoCD->>GitHub: Watch Repository
-        GitHub-->>ArgoCD: Sync gitops/ manifests
+        ArgoCD->>Gitea: Watch Repository
+        Gitea-->>ArgoCD: Sync gitops/ manifests
         ArgoCD->>K8s: Deploy All Applications
     end
 
     rect rgb(155, 89, 182, 0.1)
-        Note over GitHub,K8s: Continuous GitOps Loop
+        Note over Gitea,K8s: Continuous GitOps Loop
         loop Every 3 minutes
-            ArgoCD->>GitHub: Check for changes
-            GitHub-->>ArgoCD: New commit detected
+            ArgoCD->>Gitea: Check for changes
+            Gitea-->>ArgoCD: New commit detected
             ArgoCD->>K8s: Apply changes
             K8s-->>ArgoCD: Sync complete ✓
         end
