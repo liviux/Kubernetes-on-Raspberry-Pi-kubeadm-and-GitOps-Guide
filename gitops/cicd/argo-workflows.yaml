@@ -1,8 +1,58 @@
+# ============================================================================
+# ARGO WORKFLOWS - Kubernetes-Native CI/CD Engine
+# ============================================================================
+# Component: Argo Workflows v0.41.0
+# Purpose: Container-native workflow engine for CI/CD pipelines
+# Dependencies: MinIO (artifact storage), Harbor (image registry)
+# ============================================================================
+#
+# ARCHITECTURE:
+#   Trigger ──▶ Workflow Controller ──▶ Pods ──▶ Artifacts (MinIO)
+#
+# COMPONENTS:
+#   - Controller: Orchestrates workflow execution
+#   - Server: Web UI and API (workflows.192.168.0.210.nip.io)
+#   - Executor: Runs workflow steps (pns mode for ARM64)
+#
+# EXECUTOR MODES:
+#   - pns (Process Namespace Sharing): Best for ARM64, low overhead ✓
+#   - emissary: Feature-rich, higher memory
+#   - docker: Requires DinD, security concerns
+#
+# ARTIFACT STORAGE:
+#   Uses MinIO S3-compatible storage for:
+#   - Build logs
+#   - Test results
+#   - Compiled binaries
+#   - Security scan reports
+#
+# RESOURCE USAGE (ARM64):
+#   - Controller: ~100MB
+#   - Server: ~50MB
+#   - Per Workflow Pod: Varies by step
+#
+# PREREQUISITES:
+#   # Create MinIO credentials secret
+#   kubectl create namespace argo-workflows
+#   kubectl create secret generic argo-artifacts-creds \
+#     --from-literal=accessKey=minioadmin \
+#     --from-literal=secretKey=<minio-password> \
+#     -n argo-workflows
+#
+#   # Create artifacts bucket
+#   kubectl exec -n storage deploy/minio -- mc mb myminio/argo-artifacts
+#
+# ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: argo-workflows
   namespace: argocd
+  labels:
+    app.kubernetes.io/component: ci-engine
+    app.kubernetes.io/part-of: cicd-pipeline
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   project: default
   source:
@@ -11,22 +61,58 @@ spec:
     targetRevision: 0.41.0
     helm:
       values: |
+        # ──────────────────────────────────────────────────────────────────────
+        # SERVER CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         server:
-          # Insecure mode handled by Traefik
+          # Authentication mode
+          # Options: server (internal), client (external), sso
           extraArgs: ["--auth-mode=server"]
+          
+          # Disable built-in ingress - we use Gateway API HTTPRoute
           ingress:
-            enabled: true
-            ingressClassName: traefik
-            hosts:
-              - workflows.192.168.0.210.nip.io
-            annotations:
-              traefik.ingress.kubernetes.io/router.entrypoints: web
-        
+            enabled: false
+          
+          # Resource limits for server component
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # CONTROLLER CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         controller:
+          # Resource limits for controller
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          
+          # Workflow defaults applied to all workflows
           workflowDefaults:
             spec:
-              # Use MinIO for artifact storage
+              # TTL cleanup for completed workflows
+              ttlStrategy:
+                secondsAfterCompletion: 3600   # 1 hour
+                secondsAfterSuccess: 3600      # 1 hour
+                secondsAfterFailure: 86400     # Keep failed for 24h
+              
+              # Pod garbage collection
+              podGC:
+                strategy: OnPodCompletion
+              
+              # ────────────────────────────────────────────────────────────────
+              # ARTIFACT REPOSITORY (MinIO S3)
+              # ────────────────────────────────────────────────────────────────
               artifactRepository:
+                archiveLogs: true
                 s3:
                   bucket: argo-artifacts
                   endpoint: minio.storage.svc.cluster.local:9000
@@ -38,10 +124,23 @@ spec:
                     name: argo-artifacts-creds
                     key: secretKey
 
-        # Efficient executor for Docker-in-Docker builds
+        # ──────────────────────────────────────────────────────────────────────
+        # EXECUTOR CONFIGURATION (ARM64 Optimized)
+        # ──────────────────────────────────────────────────────────────────────
+        # PNS executor is optimal for Raspberry Pi:
+        # - No Docker daemon required
+        # - Lower memory overhead
+        # - Better process isolation
         useDefaultArtifactRepo: true
         executor:
-          pns: true
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+
   destination:
     server: https://kubernetes.default.svc
     namespace: argo-workflows
@@ -51,3 +150,32 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+---
+# ============================================================================
+# GATEWAY API HTTPROUTE - Argo Workflows UI Access
+# ============================================================================
+# Provides external access to Argo Workflows UI via Traefik Gateway
+# URL: http://workflows.192.168.0.210.nip.io
+# ============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argo-workflows-route
+  namespace: argo-workflows
+  labels:
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: cicd-pipeline
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik
+  hostnames:
+    - "workflows.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argo-workflows-server
+          port: 2746

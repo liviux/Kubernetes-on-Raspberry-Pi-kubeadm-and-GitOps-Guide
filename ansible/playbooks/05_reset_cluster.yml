@@ -1,34 +1,257 @@
 ---
+# ============================================================================
+# CLUSTER RESET PLAYBOOK - THE NUCLEAR OPTION
+# ============================================================================
+# Description: Complete Kubernetes cluster reset without reflashing SD cards
+# Use Case:    Unrecoverable cluster state, testing, or fresh start needed
+#
+# What gets RESET:
+#   - All Kubernetes objects (pods, services, deployments, etc.)
+#   - CNI configuration and network state (Cilium)
+#   - IPtables/ip6tables rules
+#   - Kube configs and certificates
+#   - Kubelet data
+#
+# What gets PRESERVED:
+#   - OS configuration (Ansible-managed settings)
+#   - Longhorn data on USB drives (unless wipe_storage_data=true)
+#   - Container image cache (speeds up rebuild)
+#   - SSH keys and user accounts
+#
+# Usage:
+#   # Standard reset (preserves storage data)
+#   ansible-playbook -i hosts playbooks/05_reset_cluster.yml
+#
+#   # Reset with storage wipe (DANGER: loses all PV data!)
+#   ansible-playbook -i hosts playbooks/05_reset_cluster.yml -e "wipe_storage_data=true"
+#
+#   # Reset single node only
+#   ansible-playbook -i hosts playbooks/05_reset_cluster.yml --limit rpi4-2
+#
+# Post-Reset Steps:
+#   1. ansible-playbook -i hosts playbooks/03_cluster_init.yml
+#   2. ./bootstrap/argocd/install.sh
+#   3. kubectl apply -f gitops/root-app.yaml
+#   4. (Optional) velero restore create --from-backup <backup-name>
+#
+# Author: Kubernetes on Raspberry Pi Guide
+# ============================================================================
+
 - name: Phase 8 - Cluster Reset (The Nuclear Option)
   hosts: all
   become: true
+
+  vars:
+    # Safety switch - set to true to also wipe Longhorn/storage data
+    wipe_storage_data: false
+    # Path to Longhorn data directory
+    longhorn_data_path: /mnt/usb-data/longhorn
+    # Enable verbose output
+    verbose_output: true
+
   tasks:
-    - name: Confirm Reset
-      pause:
-        prompt: "WARNING: This will reset the Kubernetes cluster on all nodes. Press Enter to continue or Ctrl+C to abort."
+    # =========================================================================
+    # SAFETY CONFIRMATION
+    # =========================================================================
+    - name: Display Reset Warning Banner
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════╗
+          ║                    ⚠️  CLUSTER RESET WARNING ⚠️                       ║
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║                                                                      ║
+          ║  This playbook will DESTROY the Kubernetes cluster!                  ║
+          ║                                                                      ║
+          ║  The following will be RESET:                                        ║
+          ║    • All Kubernetes objects and state                                ║
+          ║    • CNI configuration (Cilium)                                      ║
+          ║    • All iptables/ip6tables rules                                    ║
+          ║    • Kube configs and certificates                                   ║
+          ║                                                                      ║
+          ║  Storage data will be: {{ 'WIPED ⚠️' if wipe_storage_data else 'PRESERVED ✓' }}
+          ║                                                                      ║
+          ╚══════════════════════════════════════════════════════════════════════╝
+      run_once: true
 
+    - name: Confirm Reset Operation
+      ansible.builtin.pause:
+        prompt: |
+
+          ═══════════════════════════════════════════════════════════════════════
+                               CONFIRMATION REQUIRED
+          ═══════════════════════════════════════════════════════════════════════
+
+          You are about to reset the Kubernetes cluster on: {{ ansible_play_hosts | join(', ') }}
+
+          This action CANNOT be undone!
+
+          Press ENTER to continue or Ctrl+C to abort...
+      run_once: true
+
+    # =========================================================================
+    # KUBERNETES RESET
+    # =========================================================================
     - name: Reset Kubeadm
-      command: kubeadm reset -f
-      ignore_errors: yes
+      ansible.builtin.command: kubeadm reset -f
+      register: kubeadm_reset
+      ignore_errors: true
+      changed_when: kubeadm_reset.rc == 0
 
-    - name: Flush IPtables
-      shell: |
-        iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
-      ignore_errors: yes
+    - name: Report Kubeadm Reset Status
+      ansible.builtin.debug:
+        msg: "Kubeadm reset {{ 'completed successfully ✓' if kubeadm_reset.rc == 0 else 'had errors (continuing anyway)' }}"
+      when: verbose_output
 
-    - name: Cleanup CNI Config
-      file:
+    # =========================================================================
+    # NETWORK CLEANUP - IPTABLES
+    # =========================================================================
+    - name: Flush iptables - Filter Table
+      ansible.builtin.command: iptables -F
+      ignore_errors: true
+      changed_when: false
+
+    - name: Flush iptables - NAT Table
+      ansible.builtin.command: iptables -t nat -F
+      ignore_errors: true
+      changed_when: false
+
+    - name: Flush iptables - Mangle Table
+      ansible.builtin.command: iptables -t mangle -F
+      ignore_errors: true
+      changed_when: false
+
+    - name: Flush iptables - Raw Table
+      ansible.builtin.command: iptables -t raw -F
+      ignore_errors: true
+      changed_when: false
+
+    - name: Delete iptables User-Defined Chains
+      ansible.builtin.command: iptables -X
+      ignore_errors: true
+      changed_when: false
+
+    - name: Flush ip6tables Rules
+      ansible.builtin.shell: |
+        ip6tables -F 2>/dev/null || true
+        ip6tables -t nat -F 2>/dev/null || true
+        ip6tables -t mangle -F 2>/dev/null || true
+        ip6tables -X 2>/dev/null || true
+      ignore_errors: true
+      changed_when: false
+
+    # =========================================================================
+    # NETWORK CLEANUP - CNI
+    # =========================================================================
+    - name: Remove CNI Configuration Directory
+      ansible.builtin.file:
         path: /etc/cni/net.d
         state: absent
 
-    - name: Cleanup Kube Config
-      file:
+    - name: Remove Cilium CNI Binary
+      ansible.builtin.file:
+        path: /opt/cni/bin/cilium-cni
+        state: absent
+      ignore_errors: true
+
+    - name: Remove CNI Network Interfaces
+      ansible.builtin.shell: |
+        # Cilium interfaces
+        ip link delete cilium_host 2>/dev/null || true
+        ip link delete cilium_net 2>/dev/null || true
+        ip link delete cilium_vxlan 2>/dev/null || true
+        # IPVS interface (kube-proxy replacement)
+        ip link delete kube-ipvs0 2>/dev/null || true
+        # Legacy interfaces (Flannel, bridge CNI)
+        ip link delete flannel.1 2>/dev/null || true
+        ip link delete cni0 2>/dev/null || true
+        ip link delete docker0 2>/dev/null || true
+        # Cleanup any orphaned veth pairs
+        for iface in $(ip link show | grep -oP 'lxc[a-f0-9]+@' | tr -d '@' || true); do
+          ip link delete "$iface" 2>/dev/null || true
+        done
+        for iface in $(ip link show | grep -oP 'veth[a-f0-9]+@' | tr -d '@' || true); do
+          ip link delete "$iface" 2>/dev/null || true
+        done
+      ignore_errors: true
+      changed_when: false
+
+    # =========================================================================
+    # KUBE CONFIG CLEANUP
+    # =========================================================================
+    - name: Remove Root Kube Config
+      ansible.builtin.file:
         path: /root/.kube
         state: absent
 
-    - name: Remove CNI Interfaces
-      shell: |
-        ip link delete cilium_host || true
-        ip link delete cilium_net || true
-        ip link delete kube-ipvs0 || true
-      ignore_errors: yes
+    - name: Find User Home Directories
+      ansible.builtin.find:
+        paths: /home
+        file_type: directory
+        recurse: false
+      register: home_dirs
+
+    - name: Remove User Kube Configs
+      ansible.builtin.file:
+        path: "{{ item.path }}/.kube"
+        state: absent
+      loop: "{{ home_dirs.files }}"
+      ignore_errors: true
+
+    - name: Remove Kubernetes Configuration Directory
+      ansible.builtin.file:
+        path: /etc/kubernetes
+        state: absent
+      ignore_errors: true
+
+    - name: Remove Kubelet Data Directory
+      ansible.builtin.file:
+        path: /var/lib/kubelet
+        state: absent
+      ignore_errors: true
+
+    - name: Remove etcd Data Directory (Control Plane Only)
+      ansible.builtin.file:
+        path: /var/lib/etcd
+        state: absent
+      when: "'control_plane' in group_names or inventory_hostname == groups['all'][0]"
+      ignore_errors: true
+
+    # =========================================================================
+    # OPTIONAL: STORAGE DATA CLEANUP
+    # =========================================================================
+    - name: Wipe Longhorn Data Directory
+      ansible.builtin.file:
+        path: "{{ longhorn_data_path }}"
+        state: absent
+      when: wipe_storage_data | bool
+
+    - name: Recreate Longhorn Data Directory
+      ansible.builtin.file:
+        path: "{{ longhorn_data_path }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+      when: wipe_storage_data | bool
+
+    # =========================================================================
+    # CLEANUP COMPLETION
+    # =========================================================================
+    - name: Display Reset Complete Message
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════╗
+          ║                    ✅ CLUSTER RESET COMPLETE                         ║
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║                                                                      ║
+          ║  Node: {{ inventory_hostname }}
+          ║  Storage Data: {{ 'WIPED' if wipe_storage_data else 'PRESERVED' }}
+          ║                                                                      ║
+          ║  Next Steps:                                                         ║
+          ║    1. ansible-playbook -i hosts playbooks/03_cluster_init.yml        ║
+          ║    2. ./bootstrap/argocd/install.sh                                  ║
+          ║    3. kubectl apply -f gitops/root-app.yaml                          ║
+          ║    4. (Optional) velero restore create --from-backup <backup>        ║
+          ║                                                                      ║
+          ╚══════════════════════════════════════════════════════════════════════╝
+

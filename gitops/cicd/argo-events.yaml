@@ -1,8 +1,53 @@
+# ============================================================================
+# ARGO EVENTS - Event-Driven Workflow Automation
+# ============================================================================
+# Component: Argo Events v2.4.0
+# Purpose: Listens for external events and triggers Argo Workflows
+# Dependencies: Argo Workflows, NATS Jetstream (embedded)
+# ============================================================================
+#
+# ARCHITECTURE:
+#   External Event ──▶ EventSource ──▶ EventBus ──▶ Sensor ──▶ Workflow
+#
+# COMPONENTS:
+#   - Controller: Manages EventSources, Sensors, EventBus CRDs
+#   - EventSource: Receives external events (webhook, S3, Kafka, etc.)
+#   - Sensor: Filters events and triggers actions
+#   - EventBus: Message broker (Jetstream/NATS for persistence)
+#
+# SUPPORTED EVENT SOURCES:
+#   - Webhook: HTTP endpoints for Gitea, Harbor, etc.
+#   - S3/MinIO: Bucket event notifications
+#   - Kafka: Message queue subscriptions
+#   - Calendar: Cron-scheduled triggers
+#   - Resource: Kubernetes resource watchers
+#   - GitHub/GitLab: Native Git provider integrations
+#
+# EVENT FLOW EXAMPLE:
+#   1. Developer pushes code to Gitea
+#   2. Gitea sends webhook to EventSource
+#   3. EventSource publishes to EventBus
+#   4. Sensor receives event, filters by branch
+#   5. Sensor triggers Argo Workflow
+#   6. Workflow builds and pushes image
+#
+# RESOURCE USAGE (ARM64):
+#   - Controller: ~80MB
+#   - EventBus (3x NATS): ~150MB total
+#   - EventSource: ~30MB per source
+#   - Sensor: ~30MB per sensor
+#
+# ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: argo-events
   namespace: argocd
+  labels:
+    app.kubernetes.io/component: event-bus
+    app.kubernetes.io/part-of: cicd-pipeline
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   project: default
   source:
@@ -11,16 +56,70 @@ spec:
     targetRevision: 2.4.0
     helm:
       values: |
+        # ──────────────────────────────────────────────────────────────────────
+        # CONTROLLER CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         controller:
           replicas: 1
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # WEBHOOK CONTROLLER
+        # ──────────────────────────────────────────────────────────────────────
+        # Handles incoming HTTP webhooks from Gitea, Harbor, etc.
         webhook:
+          enabled: true
           replicas: 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "50m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # EVENTBUS (JETSTREAM/NATS)
+        # ──────────────────────────────────────────────────────────────────────
+        # Jetstream provides persistent event storage and at-least-once delivery
+        # 3 NATS replicas for high availability message persistence
         eventbus:
           replicas: 1
           nats:
             native:
               replicas: 3
-              auth:token: "argo-events-secret"
+              # Authentication for NATS connections
+              auth: token
+              # Container security (run as non-root)
+              containerSecurityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+              # Resource limits for each NATS pod
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "10m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "100m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # CONFIGS (Event Stream Settings)
+        # ──────────────────────────────────────────────────────────────────────
+        configs:
+          jetstream:
+            # Stream configuration for event persistence
+            streamConfig: |
+              maxAge: 72h
+              replicas: 1
+              storage: file
+
   destination:
     server: https://kubernetes.default.svc
     namespace: argo-events

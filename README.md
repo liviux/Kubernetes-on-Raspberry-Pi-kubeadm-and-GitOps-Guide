@@ -7243,20 +7243,238 @@ kubectl get results -n observability
 
 In this final phase, we establish the machinery that builds, tests, and releases code. We replace manual `docker build` commands with an automated pipeline and ensure every change is scanned for security vulnerabilities before reaching production.
 
+### CI/CD Pipeline Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                          COMPLETE CI/CD PIPELINE FLOW                                   │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  DEVELOPER                    EVENT-DRIVEN PIPELINE                    GITOPS DEPLOY   │
+│  ─────────                    ─────────────────────                    ────────────────│
+│                                                                                         │
+│  ┌─────────┐    git push    ┌─────────────┐                                            │
+│  │ Skaffold│───────────────▶│   Gitea     │                                            │
+│  │ (local) │                │ Git Server  │                                            │
+│  └─────────┘                └──────┬──────┘                                            │
+│       │                           │                                                    │
+│       │ dev mode                  │ webhook                                            │
+│       │ (hot reload)              ▼                                                    │
+│       │                    ┌─────────────┐     ┌──────────────┐                        │
+│       │                    │Argo Events  │────▶│ EventBus     │                        │
+│       │                    │  (Webhook)  │     │ (Jetstream)  │                        │
+│       │                    └─────────────┘     └──────┬───────┘                        │
+│       │                                               │                                │
+│       │                                               │ trigger                        │
+│       │                                               ▼                                │
+│       │                                        ┌─────────────┐                         │
+│       │                                        │Argo Events  │                         │
+│       │                                        │  (Sensor)   │                         │
+│       │                                        └──────┬──────┘                         │
+│       │                                               │                                │
+│       │                                               │ create workflow                │
+│       │                                               ▼                                │
+│  ┌────┴────────────────────────────────────────────────────────────────────────┐       │
+│  │                         ARGO WORKFLOWS PIPELINE                             │       │
+│  │  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐  │       │
+│  │  │  Clone   │──▶│  Build   │──▶│  Test    │──▶│  Scan    │──▶│  Push    │  │       │
+│  │  │   Repo   │   │  Image   │   │  (Unit)  │   │ (Trivy)  │   │ (Harbor) │  │       │
+│  │  └──────────┘   └──────────┘   └──────────┘   └──────────┘   └──────────┘  │       │
+│  │       │                                              │             │        │       │
+│  │       ▼                                              ▼             ▼        │       │
+│  │  ┌──────────────────────────────────────────────────────────────────────┐  │       │
+│  │  │                      MinIO (Artifact Storage)                        │  │       │
+│  │  │    Logs • Build Cache • Test Results • Security Reports • Binaries   │  │       │
+│  │  └──────────────────────────────────────────────────────────────────────┘  │       │
+│  └─────────────────────────────────────────────────────────────────────────────┘       │
+│                                               │                                        │
+│                                               │ new image tag                          │
+│                                               ▼                                        │
+│                                        ┌─────────────┐                                 │
+│                                        │   Harbor    │                                 │
+│                                        │  Registry   │                                 │
+│                                        └──────┬──────┘                                 │
+│                                               │                                        │
+│                                               │ watches registry                       │
+│                                               ▼                                        │
+│                                    ┌───────────────────┐                               │
+│                                    │ Argo Image        │                               │
+│                                    │ Updater           │                               │
+│                                    └─────────┬─────────┘                               │
+│                                              │                                         │
+│                                              │ updates git                             │
+│                                              ▼                                         │
+│                                        ┌─────────────┐                                 │
+│                                        │   Gitea     │◀───────────────────────┐        │
+│                                        │ (GitOps)    │                        │        │
+│                                        └──────┬──────┘                        │        │
+│                                               │                               │        │
+│                                               │ sync                          │        │
+│                                               ▼                               │        │
+│                                        ┌─────────────┐   manifest changes     │        │
+│                                        │   ArgoCD    │────────────────────────┘        │
+│                                        │             │                                 │
+│                                        └──────┬──────┘                                 │
+│                                               │                                        │
+│                                               │ deploy                                 │
+│                                               ▼                                        │
+│                                  ┌─────────────────────────┐                           │
+│                                  │     Kubernetes          │                           │
+│                                  │   (Production Pods)     │                           │
+│                                  └─────────────────────────┘                           │
+│                                                                                        │
+│  SECURITY LAYER (Continuous Scanning)                                                  │
+│  ─────────────────────────────────────                                                 │
+│  ┌────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                         TRIVY OPERATOR                                         │   │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                 │   │
+│  │  │ VulnerabilityRpt│  │ ConfigAuditRpt  │  │ ExposedSecretRpt│                 │   │
+│  │  │  (Image CVEs)   │  │ (Misconfig)     │  │ (Leaked Secrets)│                 │   │
+│  │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘                 │   │
+│  │           │                    │                    │                          │   │
+│  │           └────────────────────┼────────────────────┘                          │   │
+│  │                                ▼                                               │   │
+│  │                    ┌─────────────────────┐                                     │   │
+│  │                    │   Prometheus        │──▶ Grafana Dashboards               │   │
+│  │                    │   (Metrics)         │──▶ Alert Manager                    │   │
+│  │                    └─────────────────────┘                                     │   │
+│  └────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### CI/CD Component Stack
+
+| Component | Version | Purpose | Memory | ARM64 |
+|-----------|---------|---------|--------|-------|
+| **Argo Workflows** | 0.41.0 | Kubernetes-native CI engine | ~150MB | ✅ |
+| **Argo Events** | 2.4.0 | Event-driven workflow triggers | ~100MB | ✅ |
+| **Argo Image Updater** | 0.9.1 | Automatic image tag updates | ~50MB | ✅ |
+| **Trivy Operator** | 0.19.1 | Runtime security scanning | ~100MB | ✅ |
+| **Skaffold** | Latest | Local development workflow | Local | ✅ |
+
+### Why This CI/CD Stack?
+
+| Alternative | Why We Chose Argo |
+|------------|-------------------|
+| **Jenkins** | Heavy JVM footprint (~1GB+), complex plugin management, not cloud-native |
+| **GitLab CI** | Requires GitLab server, heavy resource usage |
+| **GitHub Actions** | Cloud-based, not self-hosted on Pi (unless using runners) |
+| **Tekton** | More complex CRD model, steeper learning curve |
+| **Drone CI** | Good alternative, but Argo has better ecosystem integration |
+
+**Argo Benefits:**
+- Native Kubernetes integration (Workflows run as Pods)
+- DAG-based pipeline definitions
+- Shared ecosystem with ArgoCD
+- Excellent UI for workflow visualization
+- MinIO integration for artifact storage
+
+---
+
 ### 11.1 Image Automation (Argo Image Updater)
 **File:** `gitops/cicd/argo-image-updater.yaml`
 
-This component watches your **Harbor** registry. When a CI pipeline pushes a new image tag (e.g., `v1.0.1`), this tool automatically updates the Git repository (modifying the ArgoCD Application) to reflect the new version.
+This component watches your **Harbor** registry. When a CI pipeline pushes a new image tag (e.g., `v1.0.1`), this tool automatically updates the Git repository (modifying the ArgoCD Application) to reflect the new version—completing the **GitOps loop**.
+
+#### How Image Updater Works
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                     IMAGE UPDATER AUTOMATION FLOW                            │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                      HARBOR REGISTRY                                   │  │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐      │  │
+│  │  │ my-app:v1.0 │ │ my-app:v1.1 │ │ my-app:v1.2 │ │ my-app:v1.3 │      │  │
+│  │  └─────────────┘ └─────────────┘ └─────────────┘ └──────┬──────┘      │  │
+│  └────────────────────────────────────────────────────────│──────────────┘  │
+│                                                           │ NEW TAG!        │
+│                                                           ▼                 │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                     ARGO IMAGE UPDATER                                 │  │
+│  │                                                                        │  │
+│  │  1. Poll Harbor every 2 minutes                                        │  │
+│  │  2. Detect new tag v1.3 (semver strategy)                             │  │
+│  │  3. Update Git repository with new image tag                          │  │
+│  │  4. Commit: "chore: update my-app to v1.3"                            │  │
+│  │                                                                        │  │
+│  └────────────────────────────────────────────────────────┬───────────────┘  │
+│                                                           │                 │
+│                                                           │ git commit      │
+│                                                           ▼                 │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                         GITEA REPOSITORY                               │  │
+│  │                                                                        │  │
+│  │  gitops/apps/my-app.yaml:                                              │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐     │  │
+│  │  │  spec:                                                        │     │  │
+│  │  │    source:                                                    │     │  │
+│  │  │      helm:                                                    │     │  │
+│  │  │        parameters:                                            │     │  │
+│  │  │        - name: image.tag                                      │     │  │
+│  │  │          value: "v1.3"  ◀── UPDATED AUTOMATICALLY             │     │  │
+│  │  └──────────────────────────────────────────────────────────────┘     │  │
+│  │                                                                        │  │
+│  └────────────────────────────────────────────────────────┬───────────────┘  │
+│                                                           │                 │
+│                                                           │ sync            │
+│                                                           ▼                 │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                           ARGOCD                                       │  │
+│  │                                                                        │  │
+│  │  Detects drift → Syncs → Deploys new version                          │  │
+│  │                                                                        │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Image Update Strategies
+
+| Strategy | Example | Use Case |
+|----------|---------|----------|
+| **semver** | `~1.0` matches 1.0.x | Production releases |
+| **latest** | Always newest | Dev environments |
+| **digest** | SHA-based | Immutable deployments |
+| **name** | Alphabetical sort | Custom naming schemes |
 
 <details>
 <summary>📄 Click to expand full gitops/cicd/argo-image-updater.yaml</summary>
 
 ```yaml
+# ============================================================================
+# ARGO IMAGE UPDATER - Automated Image Tag Management
+# ============================================================================
+# Component: Argo Image Updater v0.9.1
+# Purpose: Watches Harbor registry for new image tags and automatically
+#          updates Git repository to trigger GitOps deployments
+# Dependencies: ArgoCD, Harbor registry, Git repository access
+# ============================================================================
+#
+# ARCHITECTURE:
+#   Harbor Registry ──▶ Image Updater ──▶ Git Commit ──▶ ArgoCD Sync
+#
+# UPDATE STRATEGIES:
+#   - semver: Semantic versioning (recommended for production)
+#   - latest: Always use the newest tag
+#   - digest: Update based on SHA digest changes
+#   - name: Alphabetical sorting
+#
+# RESOURCE USAGE (ARM64):
+#   - Memory: ~50MB
+#   - CPU: Minimal (polling-based)
+#
+# ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: argo-image-updater
   namespace: argocd
+  labels:
+    app.kubernetes.io/component: image-automation
+    app.kubernetes.io/part-of: cicd-pipeline
 spec:
   project: default
   source:
@@ -7265,14 +7483,52 @@ spec:
     targetRevision: 0.9.1
     helm:
       values: |
+        # ──────────────────────────────────────────────────────────────────────
+        # REGISTRY CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         config:
           registries:
+            # Harbor private registry
             - name: harbor.192.168.0.210.nip.io
               api_url: https://harbor.192.168.0.210.nip.io
               prefix: harbor.192.168.0.210.nip.io/library
               ping: yes
-              insecure: yes # Self-signed certs
+              # Allow self-signed certificates (home lab)
+              insecure: yes
+              # Credentials stored in argocd namespace
+              # Create: kubectl create secret generic harbor-creds \
+              #         --from-literal=username=admin \
+              #         --from-literal=password=<harbor-password> \
+              #         -n argocd
               credentials: secret:argocd/harbor-creds#password
+          
+          # Application configuration (annotations on ArgoCD Applications)
+          # Example annotations for your app:
+          #   argocd-image-updater.argoproj.io/image-list: myapp=harbor.192.168.0.210.nip.io/library/myapp
+          #   argocd-image-updater.argoproj.io/myapp.update-strategy: semver
+          #   argocd-image-updater.argoproj.io/myapp.allow-tags: regexp:^v[0-9]+\.[0-9]+\.[0-9]+$
+          #   argocd-image-updater.argoproj.io/write-back-method: git
+
+        # ──────────────────────────────────────────────────────────────────────
+        # RESOURCE LIMITS (ARM64 Optimized)
+        # ──────────────────────────────────────────────────────────────────────
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "10m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # POLLING CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
+        # Check for new images every 2 minutes
+        # Adjust based on CI frequency and Harbor load
+        extraArgs:
+          - --interval=2m
+          - --loglevel=info
+
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -7285,22 +7541,203 @@ spec:
 </details>
 
 ### 11.2 CI Engine (Argo Workflows)
+
 **File:** `gitops/cicd/argo-workflows.yaml`
 
 Argo Workflows is a Kubernetes-native workflow engine. It creates Pods to run your build steps (clone, build, push, test).
-*   **UI:** Exposed via Gateway API HTTPRoute.
-*   **Persistence:** Uses MinIO (S3) to store build artifacts (logs, compiled binaries).
-*   **Executor:** Uses `pns` (Process Namespace Sharing) for efficiency on Raspberry Pi.
+
+* **UI:** Exposed via Gateway API HTTPRoute
+* **Persistence:** Uses MinIO (S3) to store build artifacts (logs, compiled binaries)
+* **Executor:** Uses `pns` (Process Namespace Sharing) for efficiency on Raspberry Pi
+
+#### Workflow Execution Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                        ARGO WORKFLOWS INTERNALS                                │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  USER/TRIGGER                                                                  │
+│       │                                                                        │
+│       │ submit workflow                                                        │
+│       ▼                                                                        │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                    WORKFLOW CONTROLLER                                   │  │
+│  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐               │  │
+│  │  │ Workflow CRD  │  │  DAG Engine   │  │ Pod Scheduler │               │  │
+│  │  │   Parser      │  │  (Steps/DAG)  │  │               │               │  │
+│  │  └───────────────┘  └───────────────┘  └───────────────┘               │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                        │
+│                                      │ creates pods                           │
+│                                      ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                    WORKFLOW EXECUTION (DAG)                              │  │
+│  │                                                                          │  │
+│  │    ┌─────────┐                                                          │  │
+│  │    │  Clone  │─────────────────────────────────────────┐                │  │
+│  │    │  Repo   │                                         │                │  │
+│  │    └────┬────┘                                         │                │  │
+│  │         │                                              │                │  │
+│  │         ▼                                              ▼                │  │
+│  │    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐           │  │
+│  │    │  Lint   │    │  Build  │    │ Security│    │  Test   │           │  │
+│  │    │  Code   │    │  Image  │    │  Scan   │    │  Unit   │           │  │
+│  │    └────┬────┘    └────┬────┘    └────┬────┘    └────┬────┘           │  │
+│  │         │              │              │              │                │  │
+│  │         └──────────────┴──────────────┴──────────────┘                │  │
+│  │                                       │                                │  │
+│  │                                       ▼                                │  │
+│  │                              ┌─────────────┐                           │  │
+│  │                              │    Push     │                           │  │
+│  │                              │   Harbor    │                           │  │
+│  │                              └─────────────┘                           │  │
+│  │                                                                          │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                        │
+│                                      │ store artifacts                        │
+│                                      ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                          MinIO S3 STORAGE                                │  │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐   │  │
+│  │  │ Build Logs   │ │ Test Results │ │ Scan Reports │ │   Binaries   │   │  │
+│  │  │   /logs/     │ │   /tests/    │ │ /security/   │ │  /outputs/   │   │  │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘   │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                │
+│  UI ACCESS (workflows.192.168.0.210.nip.io)                                    │
+│  ─────────────────────────────────────────                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │  │
+│  │  │  Workflow   │  │    Live     │  │  Artifact   │  │    Logs     │    │  │
+│  │  │   List      │  │  DAG View   │  │   Browser   │  │   Stream    │    │  │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘    │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Executor Comparison
+
+| Executor | Pros | Cons | Use Case |
+|----------|------|------|----------|
+| **pns** ✅ | Low overhead, no Docker needed | Limited capabilities | Best for Raspberry Pi |
+| **emissary** | Feature-rich, no Docker daemon | Higher memory | Cloud environments |
+| **docker** | Full Docker support | Requires DinD, security concerns | Legacy workflows |
+| **k8sapi** | API-based, works anywhere | Slower artifact handling | Air-gapped clusters |
+
+#### Sample Build Workflow
+
+```yaml
+# Example WorkflowTemplate for building a Go application
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: build-go-app
+  namespace: argo-workflows
+spec:
+  entrypoint: build-and-push
+  arguments:
+    parameters:
+    - name: repo
+      value: "https://gitea.192.168.0.210.nip.io/home/my-app.git"
+    - name: image
+      value: "harbor.192.168.0.210.nip.io/library/my-app"
+    - name: tag
+      value: "latest"
+
+  templates:
+  - name: build-and-push
+    dag:
+      tasks:
+      - name: clone
+        template: git-clone
+      - name: build
+        template: docker-build
+        dependencies: [clone]
+      - name: scan
+        template: trivy-scan
+        dependencies: [build]
+      - name: push
+        template: harbor-push
+        dependencies: [scan]
+
+  - name: git-clone
+    container:
+      image: alpine/git:latest
+      command: [git, clone, "{{workflow.parameters.repo}}", /workspace]
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+
+  - name: docker-build
+    container:
+      image: gcr.io/kaniko-project/executor:latest
+      args:
+      - --context=/workspace
+      - --destination={{workflow.parameters.image}}:{{workflow.parameters.tag}}
+      - --no-push
+      - --tarPath=/workspace/image.tar
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+
+  - name: trivy-scan
+    container:
+      image: aquasec/trivy:latest
+      args: ["image", "--input", "/workspace/image.tar", "--severity", "HIGH,CRITICAL"]
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+
+  - name: harbor-push
+    container:
+      image: gcr.io/go-containerregistry/crane:latest
+      command: [crane, push, /workspace/image.tar, "{{workflow.parameters.image}}:{{workflow.parameters.tag}}"]
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+```
 
 <details>
 <summary>📄 Click to expand full gitops/cicd/argo-workflows.yaml</summary>
 
 ```yaml
+# ============================================================================
+# ARGO WORKFLOWS - Kubernetes-Native CI/CD Engine
+# ============================================================================
+# Component: Argo Workflows v0.41.0
+# Purpose: Container-native workflow engine for CI/CD pipelines
+# Dependencies: MinIO (artifact storage), Harbor (image registry)
+# ============================================================================
+#
+# ARCHITECTURE:
+#   Trigger ──▶ Workflow Controller ──▶ Pods ──▶ Artifacts (MinIO)
+#
+# COMPONENTS:
+#   - Controller: Orchestrates workflow execution
+#   - Server: Web UI and API
+#   - Executor: Runs workflow steps (pns mode for ARM64)
+#
+# EXECUTOR MODES:
+#   - pns (Process Namespace Sharing): Best for ARM64, low overhead
+#   - emissary: Feature-rich, higher memory
+#   - docker: Requires DinD, security concerns
+#
+# RESOURCE USAGE (ARM64):
+#   - Controller: ~100MB
+#   - Server: ~50MB
+#   - Per Workflow Pod: Varies by step
+#
+# ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: argo-workflows
   namespace: argocd
+  labels:
+    app.kubernetes.io/component: ci-engine
+    app.kubernetes.io/part-of: cicd-pipeline
 spec:
   project: default
   source:
@@ -7309,22 +7746,69 @@ spec:
     targetRevision: 0.41.0
     helm:
       values: |
+        # ──────────────────────────────────────────────────────────────────────
+        # SERVER CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         server:
-          # Insecure mode handled by Traefik Gateway
+          # Authentication handled by Gateway/Traefik
+          # Options: server, client, sso
           extraArgs: ["--auth-mode=server"]
+          
           # Disable built-in ingress - we use Gateway API HTTPRoute
           ingress:
             enabled: false
-        
+          
+          # Resource limits for server component
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # CONTROLLER CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         controller:
+          # Resource limits for controller
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          
+          # Default workflow settings
           workflowDefaults:
             spec:
-              # Use MinIO for artifact storage
+              # TTL for completed workflows (cleanup after 1 hour)
+              ttlStrategy:
+                secondsAfterCompletion: 3600
+                secondsAfterSuccess: 3600
+                secondsAfterFailure: 86400  # Keep failed for 24h
+              
+              # Pod garbage collection
+              podGC:
+                strategy: OnPodCompletion
+              
+              # ────────────────────────────────────────────────────────────────
+              # ARTIFACT REPOSITORY (MinIO S3)
+              # ────────────────────────────────────────────────────────────────
+              # All workflows use MinIO for artifact storage
+              # Create bucket: mc mb minio/argo-artifacts
               artifactRepository:
+                archiveLogs: true
                 s3:
                   bucket: argo-artifacts
                   endpoint: minio.storage.svc.cluster.local:9000
-                  insecure: true
+                  insecure: true  # Internal cluster traffic
+                  # Create secret:
+                  # kubectl create secret generic argo-artifacts-creds \
+                  #   --from-literal=accessKey=minioadmin \
+                  #   --from-literal=secretKey=<minio-password> \
+                  #   -n argo-workflows
                   accessKeySecret:
                     name: argo-artifacts-creds
                     key: accessKey
@@ -7332,10 +7816,38 @@ spec:
                     name: argo-artifacts-creds
                     key: secretKey
 
-        # Efficient executor for Docker-in-Docker builds
+        # ──────────────────────────────────────────────────────────────────────
+        # EXECUTOR CONFIGURATION (ARM64 Optimized)
+        # ──────────────────────────────────────────────────────────────────────
+        # PNS executor is optimal for Raspberry Pi:
+        # - No Docker daemon required
+        # - Lower memory overhead
+        # - Better process isolation
         useDefaultArtifactRepo: true
         executor:
-          pns: true
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # WORKFLOW ARCHIVE (Optional PostgreSQL)
+        # ──────────────────────────────────────────────────────────────────────
+        # Enable for workflow history persistence
+        # Requires PostgreSQL database
+        # artifactRepository:
+        #   archiveLogs: true
+        # persistence:
+        #   archive: true
+        #   postgresql:
+        #     host: postgresql.database.svc
+        #     port: 5432
+        #     database: argo_workflows
+        #     tableName: argo_workflows
+
   destination:
     server: https://kubernetes.default.svc
     namespace: argo-workflows
@@ -7345,26 +7857,234 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+---
+# ============================================================================
+# GATEWAY API HTTPROUTE - Argo Workflows UI Access
+# ============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argo-workflows-route
+  namespace: argo-workflows
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik
+  hostnames:
+    - "workflows.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argo-workflows-server
+          port: 2746
 ```
 
 </details>
 
 ### 11.3 Event Bus (Argo Events)
+
 **File:** `gitops/cicd/argo-events.yaml`
 
 Argo Events listens for external triggers (like a `git push` to your Gitea repo) and triggers an Argo Workflow.
-*   **Sensor:** Listens for the event.
-*   **EventBus:** Manages the message queue (Jetstream).
+
+* **EventSource:** Receives external events (webhooks, S3, Kafka, etc.)
+* **Sensor:** Matches events to triggers and creates workflows
+* **EventBus:** Manages the message queue (Jetstream/NATS)
+
+#### Event-Driven Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                        ARGO EVENTS ARCHITECTURE                                │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  EXTERNAL TRIGGERS                                                             │
+│  ─────────────────                                                             │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐             │
+│  │  Gitea   │ │  Harbor  │ │   S3     │ │  Kafka   │ │   Cron   │             │
+│  │ Webhook  │ │ Webhook  │ │ Events   │ │ Messages │ │ Schedule │             │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘             │
+│       │            │            │            │            │                   │
+│       └────────────┴────────────┴────────────┴────────────┘                   │
+│                                 │                                              │
+│                                 ▼                                              │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                       EVENT SOURCES                                      │  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │  │
+│  │  │   webhook   │  │   minio     │  │   kafka     │  │   calendar  │     │  │
+│  │  │ EventSource │  │ EventSource │  │ EventSource │  │ EventSource │     │  │
+│  │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘     │  │
+│  └─────────│────────────────│────────────────│────────────────│────────────┘  │
+│            │                │                │                │               │
+│            └────────────────┴────────────────┴────────────────┘               │
+│                                    │                                          │
+│                                    │ publish events                           │
+│                                    ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                         EVENT BUS (Jetstream)                           │  │
+│  │  ┌────────────────────────────────────────────────────────────────────┐ │  │
+│  │  │                    NATS Jetstream Cluster                          │ │  │
+│  │  │  ┌─────────┐    ┌─────────┐    ┌─────────┐                        │ │  │
+│  │  │  │ nats-0  │◀──▶│ nats-1  │◀──▶│ nats-2  │                        │ │  │
+│  │  │  └─────────┘    └─────────┘    └─────────┘                        │ │  │
+│  │  │       │              │              │                              │ │  │
+│  │  │       └──────────────┼──────────────┘                              │ │  │
+│  │  │                      │                                             │ │  │
+│  │  │              Event Persistence                                     │ │  │
+│  │  │              & Delivery Guarantee                                  │ │  │
+│  │  └────────────────────────────────────────────────────────────────────┘ │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    │ subscribe                                │
+│                                    ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                            SENSORS                                       │  │
+│  │  ┌─────────────────────────────────────────────────────────────────┐    │  │
+│  │  │                    build-pipeline-sensor                        │    │  │
+│  │  │                                                                 │    │  │
+│  │  │  Dependencies:                    Triggers:                     │    │  │
+│  │  │  ┌─────────────────────────┐     ┌─────────────────────────┐   │    │  │
+│  │  │  │ - name: git-push        │     │ - template: workflow    │   │    │  │
+│  │  │  │   eventSourceName: gitea│     │   name: ci-build        │   │    │  │
+│  │  │  │   eventName: push       │     │   source: inline        │   │    │  │
+│  │  │  │                         │────▶│   parameters:           │   │    │  │
+│  │  │  │  Filters:               │     │     repo: event.body.   │   │    │  │
+│  │  │  │  - branch: main         │     │       repository.url    │   │    │  │
+│  │  │  │  - path: "src/**"       │     │     branch: event.body. │   │    │  │
+│  │  │  │                         │     │       ref               │   │    │  │
+│  │  │  └─────────────────────────┘     └─────────────────────────┘   │    │  │
+│  │  └─────────────────────────────────────────────────────────────────┘    │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    │ create workflow                          │
+│                                    ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                      ARGO WORKFLOWS                                      │  │
+│  │                                                                          │  │
+│  │  Workflow: ci-build-abc123                                               │  │
+│  │  Status: Running                                                         │  │
+│  │  Triggered By: gitea/push (commit: def456)                               │  │
+│  │                                                                          │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Supported Event Sources
+
+| Source | Use Case | Configuration |
+|--------|----------|---------------|
+| **Webhook** | Git push, Harbor scan complete | HTTP endpoint |
+| **S3/MinIO** | New artifact uploaded | Bucket notifications |
+| **Kafka** | Message queue events | Topic subscription |
+| **Calendar** | Scheduled builds | Cron expression |
+| **Resource** | K8s resource changes | Watch API |
+| **SNS/SQS** | AWS events | ARN subscription |
+
+#### Example: Gitea Webhook EventSource
+
+```yaml
+# EventSource: Receives webhooks from Gitea
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: gitea-webhook
+  namespace: argo-events
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    push:
+      port: "12000"
+      endpoint: /push
+      method: POST
+---
+# Sensor: Triggers workflow on push events
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: build-sensor
+  namespace: argo-events
+spec:
+  dependencies:
+    - name: gitea-push
+      eventSourceName: gitea-webhook
+      eventName: push
+      filters:
+        data:
+          - path: ref
+            type: string
+            value:
+              - "refs/heads/main"
+  triggers:
+    - template:
+        name: build-workflow
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: ci-build-
+              spec:
+                workflowTemplateRef:
+                  name: build-go-app
+          parameters:
+            - src:
+                dependencyName: gitea-push
+                dataKey: body.repository.clone_url
+              dest: spec.arguments.parameters.0.value
+```
 
 <details>
 <summary>📄 Click to expand full gitops/cicd/argo-events.yaml</summary>
 
 ```yaml
+# ============================================================================
+# ARGO EVENTS - Event-Driven Workflow Automation
+# ============================================================================
+# Component: Argo Events v2.4.0
+# Purpose: Listens for external events and triggers Argo Workflows
+# Dependencies: Argo Workflows, NATS Jetstream (embedded)
+# ============================================================================
+#
+# ARCHITECTURE:
+#   External Event ──▶ EventSource ──▶ EventBus ──▶ Sensor ──▶ Workflow
+#
+# COMPONENTS:
+#   - Controller: Manages EventSources, Sensors, EventBus
+#   - EventSource: Receives external events (webhook, S3, etc.)
+#   - Sensor: Filters events and triggers actions
+#   - EventBus: Message broker (Jetstream/NATS)
+#
+# SUPPORTED SOURCES:
+#   - Webhook: HTTP endpoints for Git, Harbor, etc.
+#   - S3/MinIO: Bucket event notifications
+#   - Kafka: Message queue subscriptions
+#   - Calendar: Cron-scheduled triggers
+#   - Resource: Kubernetes resource watchers
+#
+# RESOURCE USAGE (ARM64):
+#   - Controller: ~80MB
+#   - EventBus (3x NATS): ~150MB total
+#   - EventSource: ~30MB per source
+#   - Sensor: ~30MB per sensor
+#
+# ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: argo-events
   namespace: argocd
+  labels:
+    app.kubernetes.io/component: event-bus
+    app.kubernetes.io/part-of: cicd-pipeline
 spec:
   project: default
   source:
@@ -7373,16 +8093,71 @@ spec:
     targetRevision: 2.4.0
     helm:
       values: |
+        # ──────────────────────────────────────────────────────────────────────
+        # CONTROLLER CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         controller:
           replicas: 1
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # WEBHOOK CONTROLLER
+        # ──────────────────────────────────────────────────────────────────────
+        # Handles incoming HTTP webhooks from Gitea, Harbor, etc.
         webhook:
+          enabled: true
           replicas: 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "50m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # EVENTBUS (JETSTREAM/NATS)
+        # ──────────────────────────────────────────────────────────────────────
+        # Jetstream provides persistent event storage and at-least-once delivery
+        # 3 replicas for high availability (can run on all worker nodes)
         eventbus:
-          replicas: 1
+          replicas: 1  # Single replica for home lab (use 3 for HA)
           nats:
             native:
-              replicas: 3
-              auth:token: "argo-events-secret"
+              replicas: 3  # NATS cluster for message persistence
+              # Authentication token for NATS connections
+              auth: token
+              # Container security context (non-root)
+              containerSecurityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+              # Resource limits for each NATS pod
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "10m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "100m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # CONFIGS (Event Routing)
+        # ──────────────────────────────────────────────────────────────────────
+        # Default configurations for EventSources and Sensors
+        configs:
+          jetstream:
+            # Stream configuration for event persistence
+            streamConfig: |
+              maxAge: 72h
+              replicas: 1
+              storage: file
+
   destination:
     server: https://kubernetes.default.svc
     namespace: argo-events
@@ -7396,22 +8171,194 @@ spec:
 
 </details>
 
-### 11.4 Security Tooling (Trivy)
-
-Rather than installing these as standalone long-running services, we install the **Trivy Operator** to scan the running cluster, and we provide the configurations to run ZAP/Trivy inside CI pipelines.
+### 11.4 Security Tooling (Trivy Operator)
 
 **File:** `gitops/security/trivy-operator.yaml`
-Scans running pods and generates "VulnerabilityReports" visible in the cluster.
+
+Rather than installing standalone scanners, we deploy the **Trivy Operator** which continuously scans the running cluster and generates Kubernetes-native security reports.
+
+#### Security Scanning Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                      TRIVY OPERATOR SECURITY SCANNING                          │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  SCAN TRIGGERS                                                                 │
+│  ─────────────                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │  • New Pod Created                                                       │  │
+│  │  • ConfigMap/Secret Changed                                              │  │
+│  │  • Scheduled Rescan (24h default)                                        │  │
+│  │  • Image Tag Updated                                                     │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                      TRIVY OPERATOR CONTROLLER                           │  │
+│  │                                                                          │  │
+│  │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐            │  │
+│  │  │ Vulnerability  │  │ ConfigAudit    │  │ ExposedSecret  │            │  │
+│  │  │   Scanner      │  │   Scanner      │  │   Scanner      │            │  │
+│  │  └───────┬────────┘  └───────┬────────┘  └───────┬────────┘            │  │
+│  │          │                   │                   │                      │  │
+│  └──────────│───────────────────│───────────────────│──────────────────────┘  │
+│             │                   │                   │                        │
+│             │                   │                   │                        │
+│             ▼                   ▼                   ▼                        │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                     SCAN JOB PODS (Ephemeral)                           │  │
+│  │                                                                          │  │
+│  │  ┌─────────────────────────────────────────────────────────────────┐    │  │
+│  │  │  scan-vulnerabilityreport-nginx-abc123                          │    │  │
+│  │  │  ┌──────────────────────────────────────────────────────────┐   │    │  │
+│  │  │  │  trivy image nginx:1.25 --format json                    │   │    │  │
+│  │  │  │  → Downloads vulnerability DB                            │   │    │  │
+│  │  │  │  → Scans image layers                                    │   │    │  │
+│  │  │  │  → Reports CVEs                                          │   │    │  │
+│  │  │  └──────────────────────────────────────────────────────────┘   │    │  │
+│  │  └─────────────────────────────────────────────────────────────────┘    │  │
+│  │                                                                          │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    │ creates CRDs                             │
+│                                    ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                     CUSTOM RESOURCE REPORTS                              │  │
+│  │                                                                          │  │
+│  │  ┌────────────────────────────────────────────────────────────────────┐ │  │
+│  │  │ VulnerabilityReport (per container)                                │ │  │
+│  │  │ ───────────────────────────────────────────────────────────────    │ │  │
+│  │  │ metadata:                                                          │ │  │
+│  │  │   name: replicaset-nginx-7bf8c77b5b-nginx                          │ │  │
+│  │  │   namespace: default                                               │ │  │
+│  │  │ report:                                                            │ │  │
+│  │  │   critical: 2                                                      │ │  │
+│  │  │   high: 5                                                          │ │  │
+│  │  │   medium: 12                                                       │ │  │
+│  │  │   vulnerabilities:                                                 │ │  │
+│  │  │   - vulnerabilityID: CVE-2023-44487                                │ │  │
+│  │  │     severity: CRITICAL                                             │ │  │
+│  │  │     title: HTTP/2 Rapid Reset Attack                               │ │  │
+│  │  └────────────────────────────────────────────────────────────────────┘ │  │
+│  │                                                                          │  │
+│  │  ┌────────────────────────────────────────────────────────────────────┐ │  │
+│  │  │ ConfigAuditReport (per workload)                                   │ │  │
+│  │  │ ───────────────────────────────────────────────────────────────    │ │  │
+│  │  │ report:                                                            │ │  │
+│  │  │   checks:                                                          │ │  │
+│  │  │   - checkID: KSV001                                                │ │  │
+│  │  │     severity: MEDIUM                                               │ │  │
+│  │  │     title: Process can elevate its own privileges                  │ │  │
+│  │  │   - checkID: KSV003                                                │ │  │
+│  │  │     severity: HIGH                                                 │ │  │
+│  │  │     title: Default capabilities not dropped                        │ │  │
+│  │  └────────────────────────────────────────────────────────────────────┘ │  │
+│  │                                                                          │  │
+│  │  ┌────────────────────────────────────────────────────────────────────┐ │  │
+│  │  │ ExposedSecretReport (per container)                                │ │  │
+│  │  │ ───────────────────────────────────────────────────────────────    │ │  │
+│  │  │ report:                                                            │ │  │
+│  │  │   secrets:                                                         │ │  │
+│  │  │   - target: /app/config.yaml                                       │ │  │
+│  │  │     category: AWS                                                  │ │  │
+│  │  │     title: AWS Access Key ID                                       │ │  │
+│  │  └────────────────────────────────────────────────────────────────────┘ │  │
+│  │                                                                          │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    │ scrape metrics                           │
+│                                    ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │                   PROMETHEUS / GRAFANA                                   │  │
+│  │                                                                          │  │
+│  │  Metrics:                                                                │  │
+│  │  • trivy_image_vulnerabilities{severity="Critical"} 42                  │  │
+│  │  • trivy_image_vulnerabilities{severity="High"} 156                     │  │
+│  │  • trivy_configauditreport_danger_count 8                               │  │
+│  │                                                                          │  │
+│  │  Alerts:                                                                 │  │
+│  │  • CriticalVulnerabilityDetected (severity: critical)                   │  │
+│  │  • MisconfiguredWorkload (severity: warning)                            │  │
+│  │                                                                          │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Report Types
+
+| Report Type | Scans | Example Finding |
+|-------------|-------|-----------------|
+| **VulnerabilityReport** | Container image CVEs | CVE-2023-44487 (HTTP/2 Rapid Reset) |
+| **ConfigAuditReport** | K8s misconfigurations | Container running as root |
+| **ExposedSecretReport** | Leaked secrets in images | AWS keys in config files |
+| **RbacAssessmentReport** | RBAC issues | Overly permissive ClusterRole |
+| **InfraAssessmentReport** | Node-level issues | Kernel vulnerabilities |
+
+#### Useful Commands
+
+```bash
+# List all vulnerability reports
+kubectl get vulnerabilityreports -A
+
+# Get detailed report for a specific pod
+kubectl get vulnerabilityreport -n default \
+  replicaset-nginx-7bf8c77b5b-nginx -o yaml
+
+# Count vulnerabilities by severity
+kubectl get vulnerabilityreports -A -o json | \
+  jq '[.items[].report.summary] | add'
+
+# Find pods with critical vulnerabilities
+kubectl get vulnerabilityreports -A -o json | \
+  jq -r '.items[] | select(.report.summary.criticalCount > 0) | 
+    "\(.metadata.namespace)/\(.metadata.name)"'
+
+# Get config audit failures
+kubectl get configauditreports -A
+
+# Check for exposed secrets
+kubectl get exposedsecretreports -A
+```
 
 <details>
 <summary>📄 Click to expand full gitops/security/trivy-operator.yaml</summary>
 
 ```yaml
+# ============================================================================
+# TRIVY OPERATOR - Continuous Security Scanning
+# ============================================================================
+# Component: Trivy Operator v0.19.1
+# Purpose: Continuously scans cluster for vulnerabilities, misconfigurations,
+#          and exposed secrets. Generates Kubernetes CRD reports.
+# Dependencies: Prometheus (optional, for metrics)
+# ============================================================================
+#
+# REPORT TYPES:
+#   - VulnerabilityReport: Image CVE scanning
+#   - ConfigAuditReport: K8s misconfigurations
+#   - ExposedSecretReport: Secrets in container images
+#   - RbacAssessmentReport: RBAC permission analysis
+#
+# SCAN TRIGGERS:
+#   - New workload created
+#   - Image tag updated
+#   - Scheduled rescan (configurable)
+#
+# RESOURCE USAGE (ARM64):
+#   - Operator: ~100MB
+#   - Scan Jobs: ~200MB (ephemeral)
+#
+# ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: trivy-operator
   namespace: argocd
+  labels:
+    app.kubernetes.io/component: security-scanner
+    app.kubernetes.io/part-of: security-platform
 spec:
   project: default
   source:
@@ -7420,13 +8367,98 @@ spec:
     targetRevision: 0.19.1
     helm:
       values: |
+        # ──────────────────────────────────────────────────────────────────────
+        # TRIVY SCANNER CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         trivy:
+          # Only report vulnerabilities with available fixes
+          # Reduces noise from unfixable CVEs
           ignoreUnfixed: true
+          
+          # Severity levels to report (remove LOW for less noise)
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          
+          # Skip scanning of specific namespaces
+          # Add more as needed (e.g., kube-system)
+          skipDirs: "/proc,/sys,/dev"
+          
+          # Resource limits for scan jobs
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 500m
+              memory: 500Mi
+          
+          # Database update settings
+          # Trivy downloads vulnerability DB on first scan
+          dbRepository: ghcr.io/aquasecurity/trivy-db
+          dbRepositoryInsecure: false
+
+        # ──────────────────────────────────────────────────────────────────────
+        # OPERATOR CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
+        operator:
+          # Namespaces to scan (empty = all namespaces)
+          # Exclude system namespaces for faster scans
+          # targetNamespaces: "default,apps,services"
+          
+          # Scan schedule (cron expression)
+          # Default: Daily at 3 AM
+          vulnerabilityScannerScanOnlyCurrentRevisions: true
+          
+          # Resource limits for operator
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 256Mi
+
+        # ──────────────────────────────────────────────────────────────────────
+        # REPORT CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
+        # Enable/disable specific report types
+        scanJob:
+          # Vulnerability scanning (CVEs)
+          vulnerabilityReports:
+            scanner: Trivy
+          
+          # Configuration auditing (K8s best practices)
+          configAuditReports:
+            scanner: Trivy
+          
+          # Exposed secrets detection
+          exposedSecretReports:
+            scanner: Trivy
+          
+          # RBAC assessment
+          rbacAssessmentReports:
+            scanner: Trivy
+
+        # ──────────────────────────────────────────────────────────────────────
+        # PROMETHEUS INTEGRATION
+        # ──────────────────────────────────────────────────────────────────────
         serviceMonitor:
-          enabled: true # Integration with Prometheus
+          # Enable ServiceMonitor for Prometheus scraping
+          enabled: true
+          # Scrape interval
+          interval: 60s
+          # Additional labels for ServiceMonitor
+          labels:
+            release: prometheus
+        
+        # Trivy metrics endpoint
+        # Exposes: trivy_image_vulnerabilities, trivy_configauditreport_*
+        trivyOperator:
+          metricsVulnerabilityId:
+            enabled: true
+
   destination:
     server: https://kubernetes.default.svc
-    namespace: security
+    namespace: trivy-system
   syncPolicy:
     automated:
       prune: true
@@ -7444,276 +8476,1984 @@ spec:
 
 To enable rapid iteration on your local machine without pushing git commits for every line of code change, use **Skaffold**.
 
-**Setup Instructions (Run on Local Machine):**
-1.  Install Skaffold: `choco install skaffold` (Windows) or `brew install skaffold`.
-2.  Create a `skaffold.yaml` in your application source code repo:
+#### Development Workflow Comparison
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                   TRADITIONAL vs SKAFFOLD WORKFLOW                             │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  TRADITIONAL (Slow - 5-10 minutes per change)                                  │
+│  ─────────────────────────────────────────────                                 │
+│                                                                                │
+│  ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐ │
+│  │ Edit │──▶│ git  │──▶│ Push │──▶│ CI   │──▶│Harbor│──▶│ArgoCD│──▶│Deploy│ │
+│  │ Code │   │commit│   │      │   │Build │   │      │   │Sync  │   │      │ │
+│  └──────┘   └──────┘   └──────┘   └──────┘   └──────┘   └──────┘   └──────┘ │
+│     │                                                                   ▲      │
+│     │◀──────────────────── Wait 5-10 minutes ──────────────────────────│      │
+│                                                                                │
+│                                                                                │
+│  SKAFFOLD (Fast - 10-30 seconds per change)                                    │
+│  ───────────────────────────────────────────                                   │
+│                                                                                │
+│  ┌──────────────────────────────────────────────────────────────────────────┐ │
+│  │                    DEVELOPER MACHINE                                     │ │
+│  │                                                                          │ │
+│  │  ┌──────┐   save   ┌──────────────────────────────────────────────────┐ │ │
+│  │  │ Edit │────────▶ │              SKAFFOLD DEV MODE                   │ │ │
+│  │  │ Code │          │  ┌───────┐   ┌───────┐   ┌───────┐   ┌───────┐  │ │ │
+│  │  └──────┘          │  │Detect │──▶│ Build │──▶│ Push  │──▶│Deploy │  │ │ │
+│  │     ▲              │  │Change │   │ Image │   │Harbor │   │  K8s  │  │ │ │
+│  │     │              │  └───────┘   └───────┘   └───────┘   └───────┘  │ │ │
+│  │     │              │       │                                    │    │ │ │
+│  │     │              │       └────────────────────────────────────┘    │ │ │
+│  │     │◀─────────────│                  ~10-30 seconds                 │ │ │
+│  │                    └──────────────────────────────────────────────────┘ │ │
+│  │                                                                          │ │
+│  └──────────────────────────────────────────────────────────────────────────┘ │
+│                                     │                                         │
+│                                     │ kubectl apply                           │
+│                                     ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────────┐ │
+│  │                    RASPBERRY PI CLUSTER                                  │ │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐ │ │
+│  │  │  Pod: my-app-dev-abc123                                             │ │ │
+│  │  │  Image: harbor.192.168.0.210.nip.io/library/my-app:dev-abc123       │ │ │
+│  │  │  Status: Running                                                    │ │ │
+│  │  └─────────────────────────────────────────────────────────────────────┘ │ │
+│  └──────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Skaffold Setup Instructions
+
+**1. Install Skaffold:**
+
+```powershell
+# Windows (PowerShell)
+choco install skaffold
+
+# macOS
+brew install skaffold
+
+# Linux
+curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-arm64
+chmod +x skaffold && sudo mv skaffold /usr/local/bin
+```
+
+**2. Create `skaffold.yaml` in your application repo:**
 
 <details>
 <summary>📄 Click to expand full skaffold.yaml</summary>
 
 ```yaml
+# ============================================================================
+# SKAFFOLD - Local Development Configuration
+# ============================================================================
+# Purpose: Rapid iteration development workflow
+# Usage: skaffold dev (watch mode) or skaffold run (one-time build/deploy)
+# ============================================================================
 apiVersion: skaffold/v4beta3
 kind: Config
 metadata:
   name: my-app
 build:
+  # Build artifacts (container images)
   artifacts:
-  - image: harbor.192.168.0.210.nip.io/library/my-app
-    docker:
-      dockerfile: Dockerfile
+    - image: harbor.192.168.0.210.nip.io/library/my-app
+      docker:
+        dockerfile: Dockerfile
+        # Build arguments (optional)
+        buildArgs:
+          GO_VERSION: "1.21"
+      # Sync files without rebuilding (hot reload)
+      sync:
+        manual:
+          - src: "src/**/*.go"
+            dest: /app
+  
+  # Local build configuration
+  local:
+    # Push to Harbor registry
+    push: true
+    # Use Docker build cache
+    useBuildkit: true
+
+# Kubernetes manifests to deploy
 manifests:
   rawYaml:
-  - k8s/deployment.yaml
+    - k8s/deployment.yaml
+    - k8s/service.yaml
+
+# Deploy configuration
 deploy:
   kubectl:
     manifests:
-    - k8s/deployment.yaml
+      - k8s/deployment.yaml
+      - k8s/service.yaml
+
+# Port forwarding for local access
+portForward:
+  - resourceType: service
+    resourceName: my-app
+    port: 8080
+    localPort: 8080
+
+# Development profiles
+profiles:
+  # Debug profile with delve debugger
+  - name: debug
+    activation:
+      - command: debug
+    patches:
+      - op: add
+        path: /build/artifacts/0/docker/buildArgs/DEBUG
+        value: "true"
+  
+  # Production-like profile
+  - name: prod
+    activation:
+      - command: run
+      - env: SKAFFOLD_PROFILE=prod
+    build:
+      tagPolicy:
+        gitCommit:
+          prefix: "prod-"
 ```
 
 </details>
 
-3.  Run `skaffold dev`.
-    *   Skaffold will watch your source files.
-    *   On save, it builds the image, pushes to Harbor, and redeploys to the Raspberry Pi cluster in seconds.
+**3. Run Skaffold:**
+
+```bash
+# Development mode (watch for changes)
+skaffold dev
+
+# One-time build and deploy
+skaffold run
+
+# Build only (don't deploy)
+skaffold build
+
+# Debug mode (with delve)
+skaffold debug
+```
+
+#### Skaffold Commands Reference
+
+| Command | Purpose | Use Case |
+|---------|---------|----------|
+| `skaffold dev` | Watch mode, continuous deploy | Active development |
+| `skaffold run` | One-time build and deploy | Testing before commit |
+| `skaffold build` | Build images only | CI/CD integration |
+| `skaffold debug` | Deploy with debugger attached | Troubleshooting |
+| `skaffold render` | Output K8s manifests | Preview changes |
+| `skaffold delete` | Remove deployed resources | Cleanup |
+
+---
 
 ### 11.6 CI/CD Verification Script
+
 **File:** `tests/06_cicd_test.sh`
 
-Verifies the build machinery components.
-1.  **Argo Workflows:** Checks controller availability.
-2.  **Argo Events:** Checks controller availability.
-3.  **Trivy:** Checks if vulnerability reports are being generated for running pods.
+Comprehensive verification script for CI/CD pipeline components.
+
+**Verification Checklist:**
+
+* **Argo Workflows:** Controller, server, artifact repository
+* **Argo Events:** Controller, EventBus, webhook endpoint
+* **Argo Image Updater:** Connection to Harbor registry
+* **Trivy Operator:** Vulnerability report generation
 
 <details>
 <summary>📄 Click to expand full tests/06_cicd_test.sh</summary>
 
 ```bash
 #!/bin/bash
-echo "=== CI/CD PIPELINE VERIFICATION ==="
+# =============================================================================
+# PHASE 7: CI/CD PIPELINE COMPREHENSIVE VERIFICATION
+# =============================================================================
+# Verifies all CI/CD and developer experience components:
+#   - Argo Workflows (CI engine)
+#   - Argo Events (Event-driven triggers)
+#   - Argo Image Updater (GitOps automation)
+#   - Trivy Operator (Security scanning)
+#
+# Prerequisites:
+#   - Phase 7 components deployed via ArgoCD
+#   - kubectl configured for the cluster
+#   - curl available for HTTP checks
+#
+# Usage: bash tests/06_cicd_test.sh
+# =============================================================================
 
-# 1. Argo Workflows Status
-echo "Checking Argo Workflows Controller..."
-kubectl get pods -n argo-workflows -l app.kubernetes.io/name=argo-workflows-controller | grep Running > /dev/null
-if [ $? -eq 0 ]; then
-    echo "✅ Argo Workflows Controller is Running"
+set -euo pipefail
+
+# Configuration
+CLUSTER_IP="${CLUSTER_IP:-192.168.0.210}"
+WORKFLOWS_URL="http://workflows.${CLUSTER_IP}.nip.io"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Counters
+TESTS_PASSED=0
+TESTS_FAILED=0
+TESTS_WARNED=0
+
+# Print functions
+print_header() {
+    echo ""
+    echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}          $1"
+    echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+print_test() {
+    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│${NC} Test $1: $2"
+    echo -e "${BLUE}└─────────────────────────────────────────────────────────────────────┘${NC}"
+}
+
+pass() {
+    echo -e "${GREEN}✅ $1${NC}"
+    ((TESTS_PASSED++))
+}
+
+fail() {
+    echo -e "${RED}❌ $1${NC}"
+    ((TESTS_FAILED++))
+}
+
+warn() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+    ((TESTS_WARNED++))
+}
+
+info() {
+    echo -e "   ${BLUE}ℹ${NC}  $1"
+}
+
+# =============================================================================
+print_header "PHASE 7: CI/CD PIPELINE VERIFICATION"
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Test 1: Argo Workflows Controller
+# -----------------------------------------------------------------------------
+print_test "1" "Argo Workflows Controller"
+
+WF_CONTROLLER=$(kubectl get pods -n argo-workflows \
+    -l app.kubernetes.io/name=argo-workflows-controller \
+    --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+
+if [ "$WF_CONTROLLER" -ge 1 ]; then
+    pass "Argo Workflows Controller is running"
+    
+    # Check controller version
+    WF_VERSION=$(kubectl get deployment -n argo-workflows \
+        argo-workflows-workflow-controller \
+        -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | \
+        cut -d: -f2 || echo "unknown")
+    info "Controller version: $WF_VERSION"
 else
-    echo "❌ Argo Workflows is down"
+    fail "Argo Workflows Controller is not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 2: Argo Workflows Server
+# -----------------------------------------------------------------------------
+print_test "2" "Argo Workflows Server & UI"
+
+WF_SERVER=$(kubectl get pods -n argo-workflows \
+    -l app.kubernetes.io/name=argo-workflows-server \
+    --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+
+if [ "$WF_SERVER" -ge 1 ]; then
+    pass "Argo Workflows Server is running"
+    
+    # Check UI accessibility
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$WORKFLOWS_URL" 2>/dev/null || echo "000")
+    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+        pass "Workflows UI accessible at $WORKFLOWS_URL"
+    else
+        warn "Workflows UI not accessible (HTTP $HTTP_CODE)"
+    fi
+else
+    fail "Argo Workflows Server is not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 3: Argo Workflows Artifact Repository
+# -----------------------------------------------------------------------------
+print_test "3" "Argo Workflows Artifact Repository (MinIO)"
+
+# Check if artifact repository is configured
+ARTIFACT_REPO=$(kubectl get configmap -n argo-workflows \
+    workflow-controller-configmap \
+    -o jsonpath='{.data.artifactRepository}' 2>/dev/null || echo "")
+
+if [ -n "$ARTIFACT_REPO" ]; then
+    pass "Artifact repository configured"
+    
+    # Check MinIO connectivity
+    MINIO_SVC=$(kubectl get svc -n storage minio --no-headers 2>/dev/null || echo "")
+    if [ -n "$MINIO_SVC" ]; then
+        info "MinIO service found in storage namespace"
+    else
+        warn "MinIO service not found - artifacts may not persist"
+    fi
+else
+    warn "Artifact repository not configured"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 4: Argo Events Controller
+# -----------------------------------------------------------------------------
+print_test "4" "Argo Events Controller"
+
+AE_CONTROLLER=$(kubectl get pods -n argo-events \
+    -l app.kubernetes.io/name=argo-events-controller \
+    --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+
+if [ "$AE_CONTROLLER" -ge 1 ]; then
+    pass "Argo Events Controller is running"
+else
+    fail "Argo Events Controller is not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 5: Argo Events EventBus
+# -----------------------------------------------------------------------------
+print_test "5" "Argo Events EventBus (Jetstream)"
+
+EVENTBUS=$(kubectl get eventbus -n argo-events --no-headers 2>/dev/null | wc -l || echo "0")
+
+if [ "$EVENTBUS" -gt 0 ]; then
+    pass "EventBus configured"
+    
+    # Check EventBus status
+    EB_STATUS=$(kubectl get eventbus -n argo-events default \
+        -o jsonpath='{.status.conditions[?(@.type=="Deployed")].status}' 2>/dev/null || echo "")
+    if [ "$EB_STATUS" = "True" ]; then
+        info "EventBus status: Deployed"
+        
+        # Count NATS pods
+        NATS_PODS=$(kubectl get pods -n argo-events \
+            -l eventbus-name=default \
+            --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+        info "NATS replicas running: $NATS_PODS"
+    else
+        warn "EventBus not fully deployed"
+    fi
+else
+    warn "No EventBus found - event-driven pipelines won't work"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 6: Argo Events EventSources
+# -----------------------------------------------------------------------------
+print_test "6" "Argo Events EventSources"
+
+EVENT_SOURCES=$(kubectl get eventsources -A --no-headers 2>/dev/null | wc -l || echo "0")
+
+if [ "$EVENT_SOURCES" -gt 0 ]; then
+    pass "Found $EVENT_SOURCES EventSource(s)"
+    
+    # List EventSources
+    echo ""
+    kubectl get eventsources -A --no-headers 2>/dev/null | \
+        awk '{printf "   • %-25s %-20s %s\n", $1, $2, $4}'
+else
+    warn "No EventSources configured yet"
+    info "Create EventSources to trigger workflows from external events"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 7: Argo Image Updater
+# -----------------------------------------------------------------------------
+print_test "7" "Argo Image Updater"
+
+IMAGE_UPDATER=$(kubectl get pods -n argocd \
+    -l app.kubernetes.io/name=argocd-image-updater \
+    --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+
+if [ "$IMAGE_UPDATER" -ge 1 ]; then
+    pass "Argo Image Updater is running"
+    
+    # Check recent logs for Harbor connectivity
+    HARBOR_ERROR=$(kubectl logs -n argocd \
+        -l app.kubernetes.io/name=argocd-image-updater \
+        --tail=50 2>/dev/null | grep -i "error.*harbor" || echo "")
+    
+    if [ -z "$HARBOR_ERROR" ]; then
+        info "No Harbor connectivity errors in recent logs"
+    else
+        warn "Harbor connectivity issues detected in logs"
+    fi
+    
+    # List watched applications
+    WATCHED_APPS=$(kubectl get applications -n argocd \
+        -o jsonpath='{range .items[*]}{.metadata.annotations.argocd-image-updater\.argoproj\.io/image-list}{"\n"}{end}' 2>/dev/null | \
+        grep -v "^$" | wc -l || echo "0")
+    info "Applications with image update annotations: $WATCHED_APPS"
+else
+    fail "Argo Image Updater is not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 8: Trivy Operator
+# -----------------------------------------------------------------------------
+print_test "8" "Trivy Operator"
+
+TRIVY_OPERATOR=$(kubectl get pods -n trivy-system \
+    -l app.kubernetes.io/name=trivy-operator \
+    --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+
+if [ "$TRIVY_OPERATOR" -ge 1 ]; then
+    pass "Trivy Operator is running"
+else
+    # Try alternate namespace
+    TRIVY_OPERATOR=$(kubectl get pods -n security \
+        -l app.kubernetes.io/name=trivy-operator \
+        --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+    
+    if [ "$TRIVY_OPERATOR" -ge 1 ]; then
+        pass "Trivy Operator is running (in security namespace)"
+    else
+        fail "Trivy Operator is not running"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# Test 9: Trivy Vulnerability Reports
+# -----------------------------------------------------------------------------
+print_test "9" "Trivy Vulnerability Reports"
+
+VULN_REPORTS=$(kubectl get vulnerabilityreports -A --no-headers 2>/dev/null | wc -l || echo "0")
+
+if [ "$VULN_REPORTS" -gt 0 ]; then
+    pass "Trivy is generating vulnerability reports ($VULN_REPORTS found)"
+    
+    # Count by severity
+    CRITICAL=$(kubectl get vulnerabilityreports -A -o json 2>/dev/null | \
+        jq '[.items[].report.summary.criticalCount // 0] | add' || echo "0")
+    HIGH=$(kubectl get vulnerabilityreports -A -o json 2>/dev/null | \
+        jq '[.items[].report.summary.highCount // 0] | add' || echo "0")
+    
+    info "Critical vulnerabilities: $CRITICAL"
+    info "High vulnerabilities: $HIGH"
+    
+    if [ "$CRITICAL" -gt 0 ]; then
+        warn "Critical vulnerabilities detected - review reports!"
+    fi
+else
+    warn "No vulnerability reports yet (Trivy may still be scanning)"
+    info "Reports will appear as pods are scanned"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 10: ArgoCD Application Health (CI/CD Apps)
+# -----------------------------------------------------------------------------
+print_test "10" "ArgoCD CI/CD Application Health"
+
+CICD_APPS=("argo-workflows" "argo-events" "argo-image-updater" "trivy-operator")
+HEALTHY_COUNT=0
+
+for app in "${CICD_APPS[@]}"; do
+    STATUS=$(kubectl get application -n argocd "$app" \
+        -o jsonpath='{.status.health.status}' 2>/dev/null || echo "NotFound")
+    SYNC=$(kubectl get application -n argocd "$app" \
+        -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "NotFound")
+    
+    if [ "$STATUS" = "Healthy" ] && [ "$SYNC" = "Synced" ]; then
+        info "✓ $app: Healthy/Synced"
+        ((HEALTHY_COUNT++))
+    elif [ "$STATUS" = "NotFound" ]; then
+        info "○ $app: Not deployed"
+    else
+        warn "! $app: $STATUS/$SYNC"
+    fi
+done
+
+if [ "$HEALTHY_COUNT" -ge 2 ]; then
+    pass "Core CI/CD applications healthy ($HEALTHY_COUNT/${#CICD_APPS[@]})"
+else
+    warn "Some CI/CD applications not healthy"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+echo ""
+echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║${NC}                    VERIFICATION SUMMARY                                "
+echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "   Tests Passed:  ${GREEN}$TESTS_PASSED${NC}"
+echo -e "   Tests Failed:  ${RED}$TESTS_FAILED${NC}"
+echo -e "   Warnings:      ${YELLOW}$TESTS_WARNED${NC}"
+echo ""
+
+if [ $TESTS_FAILED -eq 0 ]; then
+    echo -e "   ${GREEN}✅ All Phase 7 CI/CD tests passed!${NC}"
+    echo ""
+    echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}                       ACCESS URLS                                     "
+    echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "   • Argo Workflows:  $WORKFLOWS_URL"
+    echo "   • ArgoCD:          http://argocd.${CLUSTER_IP}.nip.io"
+    echo "   • Harbor:          https://harbor.${CLUSTER_IP}.nip.io"
+    echo ""
+    echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}                       NEXT STEPS                                      "
+    echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "   1. Create a WorkflowTemplate for your build pipeline"
+    echo "   2. Configure Gitea webhook to trigger Argo Events"
+    echo "   3. Annotate ArgoCD Applications for Image Updater"
+    echo "   4. Review Trivy vulnerability reports"
+    echo "   5. Set up Skaffold for local development"
+    echo ""
+    exit 0
+else
+    echo -e "   ${RED}❌ Some tests failed. Check component status above.${NC}"
+    echo ""
+    echo "   Troubleshooting:"
+    echo "   • Check ArgoCD sync status: kubectl get applications -n argocd"
+    echo "   • View pod logs: kubectl logs -n <namespace> -l app.kubernetes.io/name=<component>"
+    echo "   • Verify secrets exist: kubectl get secrets -n argocd"
+    echo ""
     exit 1
 fi
-
-# 2. Argo Events Status
-echo "Checking Argo Events..."
-kubectl get pods -n argo-events -l app.kubernetes.io/name=argo-events-controller | grep Running > /dev/null
-if [ $? -eq 0 ]; then
-    echo "✅ Argo Events Controller is Running"
-else
-    echo "❌ Argo Events is down"
-    exit 1
-fi
-
-# 3. Trivy Scanning
-echo "Checking Security Scans..."
-REPORTS=$(kubectl get vulnerabilityreports -A | wc -l)
-if [ "$REPORTS" -gt 0 ]; then
-    echo "✅ Trivy is generating reports ($REPORTS found)"
-else
-    echo "⚠️  No Vulnerability Reports found yet (Trivy might still be scanning)"
-fi
-
-echo "=== CI/CD CHECK COMPLETE ==="
 ```
 
 </details>
 
 ### 11.7 Phase 7 Execution Steps
 
-1.  **Commit & Push:**
-    Save the YAML files to `gitops/cicd/` and `gitops/security/`.
-    ```bash
-    git add .
-    git commit -m "Add Argo Workflows, Image Updater, and Security Scanners"
-    git push origin main
-    ```
+#### Deployment Checklist
 
-2.  **Verify Argo Workflows:**
-    *   Open `http://workflows.192.168.0.210.nip.io`.
-    *   Ensure you can see the Workflows dashboard.
-    *   *(Authentication is handled via the Server auth mode or Traefik, depending on config).*
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                    PHASE 7 DEPLOYMENT CHECKLIST                                │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  PRE-REQUISITES                                                                │
+│  ─────────────                                                                 │
+│  ☐ Phase 5 complete (Harbor registry deployed)                                 │
+│  ☐ Phase 6 complete (MinIO storage available)                                  │
+│  ☐ ArgoCD accessible and healthy                                               │
+│  ☐ Gitea repository configured                                                 │
+│                                                                                │
+│  SECRETS TO CREATE                                                             │
+│  ────────────────                                                              │
+│  ☐ harbor-creds (argocd namespace) - for Image Updater                         │
+│  ☐ argo-artifacts-creds (argo-workflows namespace) - for MinIO                 │
+│                                                                                │
+│  COMPONENTS TO DEPLOY                                                          │
+│  ───────────────────                                                           │
+│  ☐ Argo Workflows (CI engine)                                                  │
+│  ☐ Argo Events (Event triggers)                                                │
+│  ☐ Argo Image Updater (GitOps automation)                                      │
+│  ☐ Trivy Operator (Security scanning)                                          │
+│                                                                                │
+│  VERIFICATION                                                                  │
+│  ────────────                                                                  │
+│  ☐ Workflows UI accessible                                                     │
+│  ☐ Image Updater connected to Harbor                                           │
+│  ☐ Vulnerability reports generating                                            │
+│  ☐ EventBus deployed and healthy                                               │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
 
-3.  **Verify Image Updater:**
-    Check the logs to ensure it can connect to Harbor:
-    ```bash
-    kubectl logs -n argocd -l app.kubernetes.io/name=argocd-image-updater
-    ```
+#### Step-by-Step Deployment
 
-4.  **Verify Trivy Operator:**
-    Check for security reports generated for your existing pods:
-    ```bash
-    kubectl get vulnerabilityreports -A
-    ```
+**Step 1: Create Required Secrets**
+
+```bash
+# Harbor credentials for Image Updater
+kubectl create secret generic harbor-creds \
+  --from-literal=username=admin \
+  --from-literal=password='<your-harbor-password>' \
+  -n argocd
+
+# MinIO credentials for Argo Workflows artifacts
+kubectl create namespace argo-workflows
+kubectl create secret generic argo-artifacts-creds \
+  --from-literal=accessKey=minioadmin \
+  --from-literal=secretKey='<your-minio-password>' \
+  -n argo-workflows
+
+# Create argo-artifacts bucket in MinIO
+kubectl exec -n storage deploy/minio -- \
+  mc alias set myminio http://localhost:9000 minioadmin '<your-minio-password>'
+kubectl exec -n storage deploy/minio -- \
+  mc mb myminio/argo-artifacts
+```
+
+**Step 2: Commit & Push GitOps Files**
+
+```bash
+# Save all YAML files to gitops/ directories
+git add gitops/cicd/argo-image-updater.yaml
+git add gitops/cicd/argo-workflows.yaml
+git add gitops/cicd/argo-events.yaml
+git add gitops/security/trivy-operator.yaml
+git commit -m "Add Phase 7: CI/CD Pipeline Components"
+git push origin main
+```
+
+**Step 3: Verify ArgoCD Sync**
+
+```bash
+# Watch ArgoCD sync the new applications
+kubectl get applications -n argocd -w
+
+# Force sync if needed
+argocd app sync argo-workflows
+argocd app sync argo-events
+argocd app sync argo-image-updater
+argocd app sync trivy-operator
+```
+
+**Step 4: Verify Component Health**
+
+```bash
+# Argo Workflows
+kubectl get pods -n argo-workflows
+kubectl logs -n argo-workflows -l app.kubernetes.io/name=argo-workflows-controller --tail=20
+
+# Argo Events
+kubectl get pods -n argo-events
+kubectl get eventbus -n argo-events
+
+# Argo Image Updater
+kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-image-updater
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-image-updater --tail=20
+
+# Trivy Operator
+kubectl get pods -n trivy-system
+kubectl get vulnerabilityreports -A | head -10
+```
+
+**Step 5: Access Workflows UI**
+
+Open `http://workflows.192.168.0.210.nip.io` in your browser. You should see the Argo Workflows dashboard.
+
+**Step 6: Configure First Pipeline (Optional)**
+
+```bash
+# Create a test workflow
+cat <<EOF | kubectl apply -f -
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-world-
+  namespace: argo-workflows
+spec:
+  entrypoint: whalesay
+  templates:
+  - name: whalesay
+    container:
+      image: docker/whalesay:latest
+      command: [cowsay]
+      args: ["Hello from Raspberry Pi!"]
+EOF
+
+# Watch the workflow
+kubectl get workflows -n argo-workflows -w
+
+# View workflow logs
+argo logs -n argo-workflows @latest
+```
+
+**Step 7: Run Verification Script**
+
+```bash
+bash tests/06_cicd_test.sh
+```
+
+#### Post-Deployment Configuration
+
+| Task | Command | Description |
+|------|---------|-------------|
+| **Configure Gitea Webhook** | Gitea UI → Settings → Webhooks | Point to Argo Events EventSource |
+| **Annotate Apps for Image Updates** | Add annotations to ArgoCD Applications | Enable automatic image updates |
+| **Create WorkflowTemplates** | `kubectl apply -f workflow-templates/` | Define reusable build pipelines |
+| **Set up Skaffold** | Create `skaffold.yaml` in app repos | Local development workflow |
+| **Review Trivy Reports** | `kubectl get vulnerabilityreports -A` | Address critical vulnerabilities |
+
+#### Troubleshooting
+
+| Issue | Diagnostic Command | Solution |
+|-------|-------------------|----------|
+| Workflows not starting | `kubectl logs -n argo-workflows -l app.kubernetes.io/name=argo-workflows-controller` | Check RBAC, resource limits |
+| Image Updater not detecting new images | `kubectl logs -n argocd -l app.kubernetes.io/name=argocd-image-updater` | Verify Harbor credentials |
+| EventBus not ready | `kubectl get eventbus -n argo-events -o yaml` | Check NATS pod status |
+| No vulnerability reports | `kubectl get pods -n trivy-system` | Trivy may still be initializing |
+| MinIO artifact errors | `kubectl exec -n storage deploy/minio -- mc ls myminio/` | Verify bucket exists |
 
 ## 12. Phase 8: Day 2 Operations & Maintenance
 
-This section outlines the routine tasks required to keep the cluster secure and up-to-date.
+This section outlines the routine tasks required to keep the cluster secure, up-to-date, and operational. Day 2 operations are what separate a "project" from a "production system."
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     DAY 2 OPERATIONS LIFECYCLE                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    PROACTIVE MAINTENANCE                            │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │   │
+│  │  │ Security │  │    OS    │  │   K8s    │  │    Capacity      │   │   │
+│  │  │ Patching │  │ Updates  │  │ Upgrades │  │    Planning      │   │   │
+│  │  │ (Weekly) │  │(Monthly) │  │(Quarterly)│  │   (Ongoing)      │   │   │
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘   │   │
+│  │       │             │             │                  │             │   │
+│  └───────┼─────────────┼─────────────┼──────────────────┼─────────────┘   │
+│          │             │             │                  │                  │
+│          ▼             ▼             ▼                  ▼                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         MONITORING                                  │   │
+│  │    Prometheus ──► Grafana ──► Alertmanager ──► Notification        │   │
+│  │         │             │              │                              │   │
+│  │         ▼             ▼              ▼                              │   │
+│  │   [Metrics]     [Dashboards]   [PagerDuty/Slack]                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    BACKUP & DISASTER RECOVERY                       │   │
+│  │                                                                     │   │
+│  │   Velero ─────► MinIO S3 ─────► Offsite Backup                     │   │
+│  │      │              │               │                               │   │
+│  │      ▼              ▼               ▼                               │   │
+│  │  [Scheduled]   [Replicated]   [Disaster Recovery]                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    INCIDENT RESPONSE                                │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │   │
+│  │  │  Alert   │─►│  Triage  │─►│  Resolve │─►│   Post-Mortem    │   │   │
+│  │  │ Received │  │  Impact  │  │   Issue  │  │   & Document     │   │   │
+│  │  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Day 2 Operations Summary
+
+| Operation | Frequency | Downtime | Automation | Risk Level |
+|-----------|-----------|----------|------------|------------|
+| **Security Patches** | Weekly | None (rolling) | Ansible | Low |
+| **OS Updates** | Monthly | Per-node (5min) | Ansible + drain | Low |
+| **K8s Minor Upgrade** | Quarterly | None (rolling) | Manual + Ansible | Medium |
+| **K8s Major Upgrade** | Yearly | Possible | Manual | High |
+| **Velero Backup** | Nightly | None | Scheduled | None |
+| **Certificate Renewal** | Yearly | Brief | cert-manager | Low |
+| **Storage Cleanup** | Monthly | None | Manual/Script | Low |
+| **Log Rotation** | Daily | None | Loki retention | None |
 
 ### 12.1 Upgrading Kubernetes
-Since we pinned versions in Ansible, upgrades must be deliberate.
-**Upgrade Order:** Control Plane -> Workers.
 
-1.  **Un-hold packages (Ansible):**
-    Update `ansible/hosts` vars to the new version (e.g., `1.32`) and run a playbook to unhold and update `kubeadm`.
-2.  **Upgrade Control Plane:**
-    ```bash
-    # On rpi4-1
-    sudo kubeadm upgrade plan
-    sudo kubeadm upgrade apply v1.32.x
-    ```
-3.  **Upgrade Kubelet:**
-    ```bash
-    # On all nodes (via Ansible)
-    sudo apt-get install -y kubelet=1.32.x-1.1 kubectl=1.32.x-1.1
-    sudo systemctl daemon-reload
-    sudo systemctl restart kubelet
-    ```
+Since we pinned versions in Ansible, upgrades must be deliberate. Kubernetes follows semantic versioning: `MAJOR.MINOR.PATCH`.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    KUBERNETES UPGRADE WORKFLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────┐                                                       │
+│  │ 1. PRE-UPGRADE  │                                                       │
+│  │    CHECKLIST    │                                                       │
+│  └────────┬────────┘                                                       │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌────────────────────────────────────────────────────────────────┐        │
+│  │  □ Review Release Notes for Breaking Changes                    │        │
+│  │  □ Check API Deprecations (kubectl deprecations)               │        │
+│  │  □ Verify etcd Backup Exists (Velero)                          │        │
+│  │  □ Test Upgrade in Staging First                               │        │
+│  │  □ Ensure All Nodes are Ready                                  │        │
+│  │  □ Verify Sufficient Cluster Resources                         │        │
+│  └────────────────────────────────────────────────────────────────┘        │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐        │
+│  │ 2. UPGRADE      │───►│ 3. UPGRADE      │───►│ 4. UPGRADE      │        │
+│  │    KUBEADM      │    │    CONTROL      │    │    WORKERS      │        │
+│  │                 │    │    PLANE        │    │    (Rolling)    │        │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘        │
+│           │                      │                      │                  │
+│           ▼                      ▼                      ▼                  │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐        │
+│  │ apt install     │    │ kubeadm upgrade │    │ drain → upgrade │        │
+│  │ kubeadm=1.32.x  │    │ apply v1.32.x   │    │ → uncordon      │        │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘        │
+│                                                         │                  │
+│                                                         ▼                  │
+│                               ┌─────────────────────────────────────┐      │
+│                               │ 5. POST-UPGRADE VERIFICATION        │      │
+│                               │    □ All nodes Ready                │      │
+│                               │    □ All pods Running               │      │
+│                               │    □ Cilium connectivity test       │      │
+│                               │    □ Application health checks      │      │
+│                               └─────────────────────────────────────┘      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Upgrade Order:** Control Plane → Workers (always!)
+
+#### Version Compatibility Matrix
+
+| Component | Current | Target | Skew Allowed |
+|-----------|---------|--------|--------------|
+| **kubeadm** | 1.31.x | 1.32.x | Same as kubelet |
+| **kubelet** | 1.31.x | 1.32.x | n-2 from API server |
+| **kubectl** | 1.31.x | 1.32.x | ±1 from API server |
+| **Cilium** | 1.16.x | Check matrix | Per Cilium docs |
+| **containerd** | 1.7.x | 1.7.x | Usually stable |
+
+#### Step-by-Step Upgrade Process
+
+**Step 1: Pre-Upgrade Backup**
+```bash
+# Create backup before any upgrade
+velero backup create pre-upgrade-$(date +%F) --wait
+
+# Verify backup completed
+velero backup describe pre-upgrade-$(date +%F)
+```
+
+**Step 2: Un-hold and Update kubeadm (Ansible)**
+
+Update `ansible/hosts` vars to the new version (e.g., `1.32`) and run a playbook to unhold and update `kubeadm`.
+
+```bash
+# Update ansible/hosts with new version
+# k8s_version: "1.32"
+
+# Or manually on control plane
+sudo apt-mark unhold kubeadm
+sudo apt-get update && sudo apt-get install -y kubeadm=1.32.0-1.1
+sudo apt-mark hold kubeadm
+```
+
+**Step 3: Upgrade Control Plane**
+```bash
+# On rpi4-1 (control plane)
+# Check upgrade plan first
+sudo kubeadm upgrade plan
+
+# Apply the upgrade
+sudo kubeadm upgrade apply v1.32.0
+
+# Upgrade kubelet and kubectl
+sudo apt-mark unhold kubelet kubectl
+sudo apt-get install -y kubelet=1.32.0-1.1 kubectl=1.32.0-1.1
+sudo apt-mark hold kubelet kubectl
+
+# Restart kubelet
+sudo systemctl daemon-reload
+sudo systemctl restart kubelet
+```
+
+**Step 4: Upgrade Worker Nodes (Rolling)**
+```bash
+# For each worker (rpi4-2, rpi4-3, rpi4-4)
+# First drain the node
+kubectl drain rpi4-2 --ignore-daemonsets --delete-emptydir-data
+
+# SSH to worker and upgrade
+ssh rpi4-2
+sudo apt-mark unhold kubeadm kubelet kubectl
+sudo apt-get update
+sudo apt-get install -y kubeadm=1.32.0-1.1 kubelet=1.32.0-1.1 kubectl=1.32.0-1.1
+sudo apt-mark hold kubeadm kubelet kubectl
+sudo kubeadm upgrade node
+sudo systemctl daemon-reload
+sudo systemctl restart kubelet
+exit
+
+# Uncordon the node
+kubectl uncordon rpi4-2
+
+# Verify node is ready before proceeding to next
+kubectl get nodes
+```
+
+**Step 5: Post-Upgrade Verification**
+```bash
+# Verify all nodes upgraded
+kubectl get nodes -o wide
+
+# Check component versions
+kubectl version --short
+
+# Run connectivity test
+cilium connectivity test
+
+# Verify all pods healthy
+kubectl get pods -A | grep -v Running | grep -v Completed
+```
 
 ### 12.2 OS Patching
-To apply Linux security patches without downtime, drain nodes one by one.
+
+To apply Linux security patches without downtime, drain nodes one by one using a rolling update strategy.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      ROLLING OS PATCH WORKFLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐                │
+│   │ rpi4-1  │    │ rpi4-2  │    │ rpi4-3  │    │ rpi4-4  │                │
+│   │ Control │    │ Worker  │    │ Worker  │    │ Worker  │                │
+│   │  Plane  │    │         │    │         │    │         │                │
+│   └────┬────┘    └────┬────┘    └────┬────┘    └────┬────┘                │
+│        │              │              │              │                      │
+│   ─────┼──────────────┼──────────────┼──────────────┼─────────────────     │
+│        │              │              │              │                      │
+│   T=0  │◄── DRAIN ────┤              │              │  Workloads move      │
+│        │              │              │              │  to other nodes      │
+│        │         ┌────┴────┐         │              │                      │
+│   T=1  │         │ PATCHING│         │              │  apt upgrade +       │
+│        │         │ REBOOT  │         │              │  reboot              │
+│        │         └────┬────┘         │              │                      │
+│   T=2  │◄─ UNCORDON ──┤              │              │  Node rejoins        │
+│        │              │              │              │                      │
+│   T=3  │              │◄── DRAIN ────┤              │  Repeat for          │
+│        │              │         ┌────┴────┐        │  next node           │
+│   T=4  │              │         │ PATCHING│        │                      │
+│        │              │         │ REBOOT  │        │                      │
+│        │              │         └────┬────┘        │                      │
+│   T=5  │              │◄─ UNCORDON ──┤              │                      │
+│        │              │              │              │                      │
+│        ▼              ▼              ▼              ▼                      │
+│   [CONTINUES UNTIL ALL NODES PATCHED]                                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Automated Rolling Patch Script
+
+```bash
+#!/bin/bash
+# rolling-patch.sh - Safe rolling OS updates
+
+NODES="rpi4-2 rpi4-3 rpi4-4"  # Workers first
+CONTROL_PLANE="rpi4-1"
+
+for NODE in $NODES; do
+    echo "═══════════════════════════════════════════"
+    echo "Patching $NODE"
+    echo "═══════════════════════════════════════════"
+    
+    # Step 1: Drain the node
+    echo "[1/4] Draining $NODE..."
+    kubectl drain $NODE --ignore-daemonsets --delete-emptydir-data --timeout=120s
+    
+    # Step 2: Run updates via Ansible
+    echo "[2/4] Running OS updates on $NODE..."
+    ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml \
+        --limit $NODE \
+        --tags "update"
+    
+    # Step 3: Reboot if kernel updated
+    echo "[3/4] Rebooting $NODE if needed..."
+    ssh $NODE 'if [ -f /var/run/reboot-required ]; then sudo reboot; fi'
+    
+    # Wait for node to come back
+    sleep 60
+    kubectl wait --for=condition=Ready node/$NODE --timeout=300s
+    
+    # Step 4: Uncordon
+    echo "[4/4] Uncordoning $NODE..."
+    kubectl uncordon $NODE
+    
+    echo "✓ $NODE patched successfully"
+    echo ""
+done
+
+# Patch control plane last
+echo "═══════════════════════════════════════════"
+echo "Patching Control Plane: $CONTROL_PLANE"
+echo "═══════════════════════════════════════════"
+ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml \
+    --limit $CONTROL_PLANE \
+    --tags "update"
+
+echo "✓ All nodes patched!"
+```
+
+#### Manual Patching Steps
 
 ```bash
 # 1. Drain Node (Move workloads elsewhere)
 kubectl drain rpi4-2 --ignore-daemonsets --delete-emptydir-data
 
-# 2. Run Ansible Update
-ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml --limit rpi4-2
+# 2. SSH and Update
+ssh rpi4-2
+sudo apt-get update && sudo apt-get upgrade -y
+sudo apt-get autoremove -y
+# Reboot if kernel was updated
+if [ -f /var/run/reboot-required ]; then sudo reboot; fi
+exit
 
-# 3. Uncordon (Allow workloads back)
+# 3. Wait for node to rejoin (if rebooted)
+kubectl wait --for=condition=Ready node/rpi4-2 --timeout=300s
+
+# 4. Uncordon (Allow workloads back)
 kubectl uncordon rpi4-2
+
+# 5. Verify health before moving to next node
+kubectl get pods -A -o wide | grep rpi4-2
 ```
 ### 12.3 Cluster Reset (The Nuclear Option)
+
 **File:** `ansible/playbooks/05_reset_cluster.yml`
 
 This playbook is a safety net for your learning process. If you misconfigure the cluster or networking beyond repair, run this to wipe the nodes clean so you can restart from Phase 2 (Cluster Init) without re-flashing SD cards.
 
-*   **Action:** Runs `kubeadm reset`, cleans CNI configurations (`/etc/cni`), flushes IPtables, and removes local kube configs.
-*   **Safety:** By default, it *does not* wipe the Longhorn data on the HDD, preserving your persistent volumes.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       CLUSTER RESET DECISION TREE                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                    ┌─────────────────────────┐                              │
+│                    │   Cluster Problem?      │                              │
+│                    └───────────┬─────────────┘                              │
+│                                │                                            │
+│              ┌─────────────────┼─────────────────┐                          │
+│              ▼                 ▼                 ▼                          │
+│     ┌────────────────┐ ┌────────────────┐ ┌────────────────┐               │
+│     │  Pod Issues?   │ │ Network Issues?│ │ Node Corrupted?│               │
+│     └───────┬────────┘ └───────┬────────┘ └───────┬────────┘               │
+│             │                  │                  │                         │
+│             ▼                  ▼                  ▼                         │
+│     ┌────────────────┐ ┌────────────────┐ ┌────────────────┐               │
+│     │ kubectl delete │ │ cilium status  │ │ kubeadm reset  │               │
+│     │ pod --force    │ │ hubble observe │ │ (single node)  │               │
+│     └────────────────┘ └───────┬────────┘ └────────────────┘               │
+│                                │                                            │
+│                     ┌──────────┴──────────┐                                 │
+│                     ▼                     ▼                                 │
+│            ┌────────────────┐    ┌────────────────┐                         │
+│            │  CNI Fixable?  │    │  etcd Corrupt? │                         │
+│            │  Reinstall     │    │  or Total Loss │                         │
+│            │  Cilium        │    └───────┬────────┘                         │
+│            └────────────────┘            │                                  │
+│                                          ▼                                  │
+│                               ┌──────────────────────┐                      │
+│                               │   ⚠️ NUCLEAR OPTION  │                      │
+│                               │   Full Cluster Reset │                      │
+│                               │   05_reset_cluster   │                      │
+│                               └──────────────────────┘                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Pre-Reset Checklist
+
+| Check | Command | Purpose |
+|-------|---------|---------|
+| **Backup Exists** | `velero backup get` | Ensure you can restore |
+| **Data Exported** | `kubectl get all -A -o yaml > cluster-export.yaml` | Emergency export |
+| **Longhorn Data** | Check `/mnt/usb-data/longhorn` | PV data location |
+| **GitOps Repo** | `git status` | All configs committed |
+| **Document State** | Screenshot/notes | What broke and why |
+
+#### What Gets Reset vs Preserved
+
+| Component | Reset? | Location | Notes |
+|-----------|--------|----------|-------|
+| **Kubernetes State** | ✅ Yes | etcd | All K8s objects gone |
+| **CNI Config** | ✅ Yes | `/etc/cni/net.d` | Cilium config wiped |
+| **IPtables Rules** | ✅ Yes | Memory | Flushed completely |
+| **Kube Configs** | ✅ Yes | `~/.kube` | Need new join tokens |
+| **Container Images** | ❌ No | containerd cache | Speeds up rebuild |
+| **Longhorn Data** | ❌ No | `/mnt/usb-data` | PVs preserved |
+| **OS Configuration** | ❌ No | `/etc/` | Ansible configs remain |
 
 <details>
 <summary>📄 Click to expand full ansible/playbooks/05_reset_cluster.yml</summary>
 
 ```yaml
 ---
+# ============================================================================
+# CLUSTER RESET PLAYBOOK - THE NUCLEAR OPTION
+# ============================================================================
+# Description: Complete cluster reset without reflashing SD cards
+# Use Case:    Unrecoverable cluster state, fresh start needed
+# Warning:     This will destroy all Kubernetes state!
+#
+# What gets RESET:
+#   - All Kubernetes objects (pods, services, deployments, etc.)
+#   - CNI configuration and network state
+#   - IPtables rules
+#   - Kube configs and certificates
+#
+# What gets PRESERVED:
+#   - OS configuration (Ansible-managed)
+#   - Longhorn data on USB drives (unless explicitly wiped)
+#   - Container image cache (speeds up rebuild)
+#
+# Usage:
+#   ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml
+#
+# Post-Reset:
+#   1. Re-run 03_cluster_init.yml to initialize new cluster
+#   2. Re-run bootstrap scripts for ArgoCD, etc.
+#   3. Restore from Velero backup if available
+# ============================================================================
+
 - name: Phase 8 - Cluster Reset (The Nuclear Option)
   hosts: all
   become: true
+
+  vars:
+    # Set to true to also wipe Longhorn data
+    wipe_storage_data: false
+    longhorn_data_path: /mnt/usb-data/longhorn
+
   tasks:
+    # =========================================================================
+    # SAFETY CONFIRMATION
+    # =========================================================================
+    - name: Display Reset Warning
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║                    ⚠️  CLUSTER RESET WARNING ⚠️                  ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  This playbook will:                                             ║
+          ║    • Reset kubeadm on ALL nodes                                  ║
+          ║    • Flush ALL iptables rules                                    ║
+          ║    • Delete ALL CNI configurations                               ║
+          ║    • Remove ALL kube configs                                     ║
+          ║                                                                  ║
+          ║  Longhorn data will be: {{ 'WIPED' if wipe_storage_data else 'PRESERVED' }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
     - name: Confirm Reset
       pause:
-        prompt: "WARNING: This will reset the Kubernetes cluster on all nodes. Press Enter to continue or Ctrl+C to abort."
+        prompt: |
+          
+          ⚠️  WARNING: This will DESTROY the Kubernetes cluster on ALL nodes!
+          
+          Press ENTER to continue or Ctrl+C to abort...
 
+    # =========================================================================
+    # KUBERNETES RESET
+    # =========================================================================
     - name: Reset Kubeadm
       command: kubeadm reset -f
       ignore_errors: yes
+      register: kubeadm_reset
 
-    - name: Flush IPtables
-      shell: |
-        iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+    - name: Display Kubeadm Reset Result
+      debug:
+        msg: "Kubeadm reset {{ 'succeeded' if kubeadm_reset.rc == 0 else 'had errors (continuing anyway)' }}"
+
+    # =========================================================================
+    # NETWORK CLEANUP
+    # =========================================================================
+    - name: Flush IPtables - Filter Table
+      command: iptables -F
       ignore_errors: yes
 
-    - name: Cleanup CNI Config
+    - name: Flush IPtables - NAT Table
+      command: iptables -t nat -F
+      ignore_errors: yes
+
+    - name: Flush IPtables - Mangle Table
+      command: iptables -t mangle -F
+      ignore_errors: yes
+
+    - name: Delete IPtables Chains
+      command: iptables -X
+      ignore_errors: yes
+
+    - name: Flush ip6tables (if exists)
+      shell: |
+        ip6tables -F || true
+        ip6tables -t nat -F || true
+        ip6tables -X || true
+      ignore_errors: yes
+
+    # =========================================================================
+    # CNI CLEANUP
+    # =========================================================================
+    - name: Remove CNI Configuration Directory
       file:
         path: /etc/cni/net.d
         state: absent
 
-    - name: Cleanup Kube Config
+    - name: Remove Cilium CNI Binary
+      file:
+        path: /opt/cni/bin/cilium-cni
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove CNI Network Interfaces
+      shell: |
+        # Cilium interfaces
+        ip link delete cilium_host 2>/dev/null || true
+        ip link delete cilium_net 2>/dev/null || true
+        ip link delete cilium_vxlan 2>/dev/null || true
+        # IPVS interface
+        ip link delete kube-ipvs0 2>/dev/null || true
+        # Flannel (if ever used)
+        ip link delete flannel.1 2>/dev/null || true
+        ip link delete cni0 2>/dev/null || true
+        # Any remaining veth interfaces
+        for iface in $(ip link show | grep -oP 'lxc[a-f0-9]+' || true); do
+          ip link delete $iface 2>/dev/null || true
+        done
+      ignore_errors: yes
+
+    # =========================================================================
+    # KUBE CONFIG CLEANUP
+    # =========================================================================
+    - name: Remove Root Kube Config
       file:
         path: /root/.kube
         state: absent
 
-    - name: Remove CNI Interfaces
+    - name: Remove User Kube Configs
       shell: |
-        ip link delete cilium_host || true
-        ip link delete cilium_net || true
-        ip link delete kube-ipvs0 || true
+        # Remove kube configs for common users
+        rm -rf /home/*/.kube 2>/dev/null || true
       ignore_errors: yes
+
+    - name: Remove Kubelet Config
+      file:
+        path: /etc/kubernetes
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove Kubelet Data
+      file:
+        path: /var/lib/kubelet
+        state: absent
+      ignore_errors: yes
+
+    # =========================================================================
+    # OPTIONAL: STORAGE DATA CLEANUP
+    # =========================================================================
+    - name: Wipe Longhorn Data (if requested)
+      file:
+        path: "{{ longhorn_data_path }}"
+        state: absent
+      when: wipe_storage_data | bool
+
+    - name: Recreate Longhorn Directory (if wiped)
+      file:
+        path: "{{ longhorn_data_path }}"
+        state: directory
+        mode: '0755'
+      when: wipe_storage_data | bool
+
+    # =========================================================================
+    # CLEANUP COMPLETION
+    # =========================================================================
+    - name: Clear containerd State (optional - keeps images)
+      shell: |
+        # Stop containerd temporarily
+        systemctl stop containerd || true
+        # Remove container state but keep images
+        rm -rf /var/lib/containerd/io.containerd.runtime.v2.task/* || true
+        # Restart containerd
+        systemctl start containerd
+      ignore_errors: yes
+      when: false  # Disabled by default - enable if needed
+
+    - name: Display Reset Complete Message
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║                    ✅ CLUSTER RESET COMPLETE                     ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Next Steps:                                                     ║
+          ║    1. Run: ansible-playbook -i hosts playbooks/03_cluster_init.yml
+          ║    2. Run: ./bootstrap/argocd/install.sh                         ║
+          ║    3. Apply: kubectl apply -f gitops/root-app.yaml              ║
+          ║    4. (Optional) Restore: velero restore create --from-backup   ║
+          ╚══════════════════════════════════════════════════════════════════╝
 ```
 
 </details>
 
-**Usage:**
+#### Usage
+
 ```bash
+# Standard reset (preserves Longhorn data)
 ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml
+
+# Reset with storage wipe (DANGER: loses all PV data!)
+ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml \
+    -e "wipe_storage_data=true"
+
+# Reset single node only
+ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml \
+    --limit rpi4-2
 ```
 
+#### Post-Reset Recovery
+
+```bash
+# 1. Re-initialize the cluster
+ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
+
+# 2. Install ArgoCD
+./bootstrap/argocd/install.sh
+
+# 3. Apply GitOps root application
+kubectl apply -f gitops/root-app.yaml
+
+# 4. Wait for applications to sync
+watch argocd app list
+
+# 5. (Optional) Restore from backup
+velero restore create --from-backup <backup-name>
+```
 
 ### 12.4 Backup & Disaster Recovery
-We utilize **Velero** (installed in Phase 5).
 
-*   **Manual Backup:**
-    ```bash
-    velero backup create manual-backup-$(date +%F) --from-schedule=nightly
-    ```
-*   **Restore:**
-    ```bash
-    # Disaster scenario: Cluster wiped.
-    # 1. Re-install Infrastructure & Velero.
-    # 2. Run restore:
-    velero restore create --from-backup manual-backup-2025-11-20
-    ```
+We utilize **Velero** (installed in Phase 5) for comprehensive backup and disaster recovery capabilities.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    VELERO BACKUP ARCHITECTURE                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         KUBERNETES CLUSTER                          │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │   │
+│  │  │   Pods   │  │ Services │  │ ConfigMaps│  │    Secrets       │   │   │
+│  │  │          │  │          │  │          │  │   (encrypted)    │   │   │
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘   │   │
+│  │       │             │             │                  │             │   │
+│  │       └─────────────┴─────────────┴──────────────────┘             │   │
+│  │                              │                                      │   │
+│  │                              ▼                                      │   │
+│  │                    ┌──────────────────┐                            │   │
+│  │                    │     VELERO       │                            │   │
+│  │                    │   Controller     │                            │   │
+│  │                    └────────┬─────────┘                            │   │
+│  └─────────────────────────────┼───────────────────────────────────────┘   │
+│                                │                                            │
+│                                ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         MINIO S3 STORAGE                            │   │
+│  │                                                                     │   │
+│  │   ┌─────────────────┐    ┌─────────────────┐                       │   │
+│  │   │  Cluster State  │    │  Volume Snapshots│                       │   │
+│  │   │    Backups      │    │    (Longhorn)    │                       │   │
+│  │   │                 │    │                  │                       │   │
+│  │   │  • Deployments  │    │  • PVC Data      │                       │   │
+│  │   │  • Services     │    │  • Database      │                       │   │
+│  │   │  • ConfigMaps   │    │  • User Files    │                       │   │
+│  │   │  • Secrets      │    │                  │                       │   │
+│  │   └─────────────────┘    └─────────────────┘                       │   │
+│  │            │                      │                                 │   │
+│  │            └──────────┬───────────┘                                 │   │
+│  │                       ▼                                             │   │
+│  │            ┌──────────────────┐                                     │   │
+│  │            │  velero-backups  │  ◄── S3 Bucket                     │   │
+│  │            │     bucket       │                                     │   │
+│  │            └──────────────────┘                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                │                                            │
+│                                ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    OFFSITE REPLICATION (Optional)                   │   │
+│  │   MinIO ──► mc mirror ──► Cloud S3 / NAS / Remote MinIO            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Velero Commands Reference
+
+| Operation | Command | Description |
+|-----------|---------|-------------|
+| **List Backups** | `velero backup get` | Show all backups |
+| **Create Backup** | `velero backup create <name>` | Manual backup |
+| **Describe Backup** | `velero backup describe <name>` | Backup details |
+| **Download Backup** | `velero backup download <name>` | Get backup tarball |
+| **Delete Backup** | `velero backup delete <name>` | Remove backup |
+| **List Restores** | `velero restore get` | Show all restores |
+| **Create Restore** | `velero restore create --from-backup <name>` | Restore from backup |
+| **List Schedules** | `velero schedule get` | Show backup schedules |
+| **Create Schedule** | `velero schedule create <name> --schedule="0 2 * * *"` | Create schedule |
+
+#### Backup Strategies
+
+**Strategy 1: Namespace-Based Backups**
+```bash
+# Backup specific namespace
+velero backup create gitea-backup \
+    --include-namespaces gitea \
+    --ttl 720h
+
+# Backup multiple namespaces
+velero backup create apps-backup \
+    --include-namespaces gitea,harbor,minio \
+    --ttl 720h
+```
+
+**Strategy 2: Label-Based Backups**
+```bash
+# Backup resources with specific label
+velero backup create critical-backup \
+    --selector app.kubernetes.io/part-of=critical \
+    --ttl 720h
+```
+
+**Strategy 3: Scheduled Backups**
+```bash
+# Nightly full cluster backup at 2 AM
+velero schedule create nightly-backup \
+    --schedule="0 2 * * *" \
+    --ttl 168h
+
+# Weekly namespace backup on Sundays
+velero schedule create weekly-apps \
+    --schedule="0 3 * * 0" \
+    --include-namespaces gitea,harbor \
+    --ttl 720h
+```
+
+**Strategy 4: Pre-Upgrade Backup**
+```bash
+# Full backup before any upgrade
+velero backup create pre-upgrade-$(date +%F-%H%M) \
+    --wait \
+    --ttl 720h
+
+# Verify backup completed
+velero backup describe pre-upgrade-$(date +%F-%H%M) --details
+```
+
+#### Disaster Recovery Scenarios
+
+**Scenario 1: Single Application Recovery**
+```bash
+# Application accidentally deleted
+velero restore create gitea-restore \
+    --from-backup nightly-backup \
+    --include-namespaces gitea
+
+# Monitor restore progress
+velero restore describe gitea-restore
+```
+
+**Scenario 2: Full Cluster Recovery**
+```bash
+# Cluster completely wiped (ran 05_reset_cluster.yml)
+
+# Step 1: Re-initialize cluster
+ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
+
+# Step 2: Install Velero
+helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+helm install velero vmware-tanzu/velero \
+    --namespace velero \
+    --create-namespace \
+    -f velero-values.yaml
+
+# Step 3: Wait for Velero to connect to MinIO
+kubectl wait --for=condition=available deployment/velero -n velero --timeout=300s
+
+# Step 4: Restore from backup
+velero restore create full-restore --from-backup <latest-backup>
+
+# Step 5: Monitor restoration
+watch velero restore describe full-restore
+```
+
+**Scenario 3: Partial Restore (Specific Resources)**
+```bash
+# Restore only deployments and services
+velero restore create partial-restore \
+    --from-backup nightly-backup \
+    --include-resources deployments,services
+
+# Restore excluding certain namespaces
+velero restore create restore-except-monitoring \
+    --from-backup nightly-backup \
+    --exclude-namespaces monitoring,logging
+```
+
+#### Backup Verification Script
+
+```bash
+#!/bin/bash
+# verify-backups.sh - Check backup health
+
+echo "═══════════════════════════════════════════"
+echo "       VELERO BACKUP VERIFICATION          "
+echo "═══════════════════════════════════════════"
+
+# Check Velero is running
+echo -e "\n[1] Velero Status:"
+kubectl get pods -n velero
+
+# List recent backups
+echo -e "\n[2] Recent Backups:"
+velero backup get --output=table | head -10
+
+# Check for failed backups
+echo -e "\n[3] Failed Backups:"
+FAILED=$(velero backup get -o json | jq -r '.items[] | select(.status.phase=="Failed") | .metadata.name')
+if [ -z "$FAILED" ]; then
+    echo "✓ No failed backups"
+else
+    echo "⚠ Failed backups found:"
+    echo "$FAILED"
+fi
+
+# Check backup storage location
+echo -e "\n[4] Backup Storage Location:"
+velero backup-location get
+
+# Check latest backup age
+echo -e "\n[5] Latest Backup Age:"
+LATEST=$(velero backup get -o json | jq -r '.items | sort_by(.metadata.creationTimestamp) | last | .metadata.name')
+if [ -n "$LATEST" ]; then
+    velero backup describe "$LATEST" | grep -E "Started|Completed|Expiration"
+fi
+
+echo -e "\n═══════════════════════════════════════════"
+```
 
 ### 12.5 Troubleshooting Cheatsheet
-*   **Cilium Connectivity:** `cilium connectivity test`
-*   **Longhorn Disk Pressure:** Check UI for "Schedulable" status on `rpi4-1`.
-*   **DNS Issues:** `kubectl run -it --rm --restart=Never busybox --image=busybox:1.28 -- nslookup kubernetes.default`
-*   **ArgoCD Sync Stuck:** `argocd app sync <app-name> --prune --force`
 
----
+A comprehensive guide to diagnosing and resolving common issues in your Raspberry Pi Kubernetes cluster.
 
-## Final Deliverable: File Checklist
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TROUBLESHOOTING DECISION TREE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                         ┌──────────────────┐                                │
+│                         │  What's broken?  │                                │
+│                         └────────┬─────────┘                                │
+│                                  │                                          │
+│       ┌────────────┬─────────────┼─────────────┬────────────┐              │
+│       ▼            ▼             ▼             ▼            ▼              │
+│  ┌─────────┐ ┌─────────┐ ┌───────────┐ ┌──────────┐ ┌──────────┐          │
+│  │   Pod   │ │ Network │ │  Storage  │ │  Node    │ │  ArgoCD  │          │
+│  │ Issues  │ │ Issues  │ │  Issues   │ │ Issues   │ │  Issues  │          │
+│  └────┬────┘ └────┬────┘ └─────┬─────┘ └────┬─────┘ └────┬─────┘          │
+│       │           │            │            │            │                 │
+│       ▼           ▼            ▼            ▼            ▼                 │
+│  • describe   • cilium    • longhorn   • journalctl • app sync            │
+│  • logs         status      ui         • kubelet   • app diff             │
+│  • events     • hubble    • pvc        • dmesg     • refresh              │
+│  • exec         observe     status     • top       • hard-refresh         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-You should now have the following files created in your repository folder. **This is your complete Project Artifact.**
+#### Quick Reference Table
 
-### 1. Root
-*   `README.md` (The complete guide we generated)
+| Category | Symptom | Diagnostic Command | Common Fix |
+|----------|---------|-------------------|------------|
+| **Pods** | CrashLoopBackOff | `kubectl logs <pod> --previous` | Check app config/resources |
+| **Pods** | Pending | `kubectl describe pod <pod>` | Check resources/affinity |
+| **Pods** | ImagePullBackOff | `kubectl describe pod <pod>` | Check image name/registry |
+| **Network** | No connectivity | `cilium connectivity test` | Restart Cilium pods |
+| **Network** | DNS failures | `nslookup kubernetes.default` | Check CoreDNS pods |
+| **Network** | Service unreachable | `kubectl get endpoints` | Check selector/ports |
+| **Storage** | PVC Pending | `kubectl describe pvc` | Check Longhorn status |
+| **Storage** | Volume full | Longhorn UI | Expand PVC or cleanup |
+| **Node** | NotReady | `kubectl describe node` | Check kubelet logs |
+| **Node** | High CPU/Memory | `kubectl top nodes` | Drain and investigate |
+| **ArgoCD** | Sync failed | `argocd app sync --prune` | Check diff and resources |
+| **ArgoCD** | OutOfSync | `argocd app diff` | Review changes |
 
-### 2. Ansible (Infrastructure)
-*   `ansible/hosts`
-*   `ansible/playbooks/01_node_prep.yml`
-*   `ansible/playbooks/02_k8s_binaries.yml`
-*   `ansible/playbooks/03_cluster_init.yml`
-*   `ansible/playbooks/04_storage_mount.yml`
+#### Detailed Troubleshooting Commands
 
-### 3. Bootstrap (Shell Scripts)
-*   `bootstrap/cilium/install.sh` *(Embedded in playbook, but good to have standalone)*
-*   `bootstrap/longhorn/install.sh`
-*   `bootstrap/metrics-server/install.sh`
-*   `bootstrap/traefik/install.sh`
-*   `bootstrap/argocd/install.sh`
+**Pod Troubleshooting**
+```bash
+# Get pod status and events
+kubectl describe pod <pod-name> -n <namespace>
 
-### 4. GitOps (ArgoCD Manifests)
-*   `gitops/app-of-apps.yaml` (The Root)
-*   `gitops/infrastructure/cert-manager.yaml`
-*   `gitops/services/gitea.yaml`
-*   `gitops/storage/minio.yaml`
-*   `gitops/observability/kube-prometheus-stack.yaml` (Implicit in app-of-apps example, ensures monitoring)
-*   `gitops/observability/loki-stack.yaml`
-*   `gitops/observability/opencost.yaml`
-*   `gitops/observability/k8sgpt.yaml`
-*   `gitops/security/harbor.yaml`
-*   `gitops/security/trivy-operator.yaml`
-*   `gitops/cicd/argo-image-updater.yaml`
-*   `gitops/cicd/argo-workflows.yaml`
-*   `gitops/cicd/argo-events.yaml`
-*   `gitops/management/velero.yaml`
-*   `gitops/management/reloader.yaml`
-*   `gitops/management/descheduler.yaml`
+# View current logs
+kubectl logs <pod-name> -n <namespace>
 
-### 5. Tests (Validation)
-*   `tests/01_infra_test.sh`
-*   `tests/02_network_test.sh`
-*   `tests/03_storage_test.sh`
-*   `tests/04_security_test.sh`
-*   `tests/05_observability_test.sh`
-*   `tests/06_cicd_test.sh`
+# View previous container logs (if crashed)
+kubectl logs <pod-name> -n <namespace> --previous
 
+# Follow logs in real-time
+kubectl logs -f <pod-name> -n <namespace>
 
-***
+# Exec into pod for debugging
+kubectl exec -it <pod-name> -n <namespace> -- /bin/sh
+
+# Get all pods with issues
+kubectl get pods -A | grep -v Running | grep -v Completed
+
+# Check resource usage
+kubectl top pod <pod-name> -n <namespace>
+```
+
+**Network Troubleshooting**
+```bash
+# Cilium status
+cilium status
+
+# Full connectivity test
+cilium connectivity test
+
+# Watch network flows
+hubble observe --follow
+
+# DNS test
+kubectl run -it --rm debug --image=busybox:1.28 --restart=Never -- nslookup kubernetes.default
+
+# Test service connectivity
+kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- curl -v http://<service>.<namespace>.svc.cluster.local
+
+# Check Cilium endpoints
+kubectl get ciliumendpoints -A
+
+# View network policies
+kubectl get networkpolicies -A
+```
+
+**Storage Troubleshooting**
+```bash
+# Check PVC status
+kubectl get pvc -A
+
+# Describe problematic PVC
+kubectl describe pvc <pvc-name> -n <namespace>
+
+# Check Longhorn volumes
+kubectl get volumes.longhorn.io -n longhorn-system
+
+# Check Longhorn nodes
+kubectl get nodes.longhorn.io -n longhorn-system
+
+# Access Longhorn UI
+kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
+
+# Check disk pressure
+df -h /mnt/usb-data/longhorn
+
+# List Longhorn replicas
+kubectl get replicas.longhorn.io -n longhorn-system
+```
+
+**Node Troubleshooting**
+```bash
+# Get node status
+kubectl get nodes -o wide
+
+# Describe node issues
+kubectl describe node <node-name>
+
+# Check kubelet logs (on node)
+sudo journalctl -u kubelet -f
+
+# Check system logs
+sudo dmesg | tail -50
+
+# Check resource usage
+kubectl top nodes
+
+# Check node conditions
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+
+# Cordon node (prevent scheduling)
+kubectl cordon <node-name>
+
+# Drain node (evict pods)
+kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
+```
+
+**ArgoCD Troubleshooting**
+```bash
+# Check application status
+argocd app get <app-name>
+
+# View sync status
+argocd app list
+
+# Force sync with prune
+argocd app sync <app-name> --prune --force
+
+# View application diff
+argocd app diff <app-name>
+
+# Refresh application
+argocd app get <app-name> --refresh
+
+# Hard refresh (clear cache)
+argocd app get <app-name> --hard-refresh
+
+# View application logs
+argocd app logs <app-name>
+
+# Delete and recreate stuck app
+argocd app delete <app-name>
+kubectl apply -f gitops/<path-to-app>.yaml
+```
+
+**Certificate Troubleshooting**
+```bash
+# Check certificates
+kubectl get certificates -A
+
+# Describe certificate issues
+kubectl describe certificate <cert-name> -n <namespace>
+
+# Check certificate requests
+kubectl get certificaterequests -A
+
+# Check cert-manager logs
+kubectl logs -n cert-manager deployment/cert-manager
+
+# Check secret containing cert
+kubectl get secret <secret-name> -n <namespace> -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -text -noout
+```
+
+### 12.6 Operational Runbooks
+
+Standardized procedures for common operational tasks.
+
+#### Runbook: Adding a New Worker Node
+
+```bash
+# 1. Prepare the new node (rpi4-5)
+# Add to ansible/hosts under [workers]
+
+# 2. Run node preparation
+ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml --limit rpi4-5
+
+# 3. Install K8s binaries
+ansible-playbook -i ansible/hosts ansible/playbooks/02_k8s_binaries.yml --limit rpi4-5
+
+# 4. Get join command from control plane
+ssh rpi4-1 "sudo kubeadm token create --print-join-command"
+
+# 5. Run join command on new node
+ssh rpi4-5 "sudo <join-command>"
+
+# 6. Label the new node
+kubectl label node rpi4-5 node-role.kubernetes.io/worker=worker
+
+# 7. Verify node joined
+kubectl get nodes
+```
+
+#### Runbook: Replacing a Failed SD Card
+
+```bash
+# 1. Flash new SD card with Raspberry Pi OS Lite (64-bit)
+
+# 2. Boot node and configure SSH access
+
+# 3. Run Ansible playbooks
+ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml --limit <node>
+ansible-playbook -i ansible/hosts ansible/playbooks/02_k8s_binaries.yml --limit <node>
+
+# 4. If control plane - restore from etcd backup
+# If worker - rejoin cluster with new token
+
+# 5. Verify node health
+kubectl get nodes
+kubectl get pods -A -o wide | grep <node>
+```
+
+#### Runbook: Handling Memory Pressure
+
+```bash
+# 1. Identify high-memory pods
+kubectl top pods -A --sort-by=memory | head -20
+
+# 2. Check for memory leaks
+kubectl describe node <node> | grep -A5 "Allocated resources"
+
+# 3. Temporary relief - restart problematic pods
+kubectl rollout restart deployment/<deployment> -n <namespace>
+
+# 4. Long-term fix - adjust resource limits
+kubectl edit deployment <deployment> -n <namespace>
+# Increase limits.memory or add requests.memory
+
+# 5. Consider adding more workers or reducing replicas
+```
+
+### 12.7 Health Check Script
+
+A comprehensive cluster health verification script.
+
+```bash
+#!/bin/bash
+# cluster-health.sh - Comprehensive cluster health check
+# Usage: ./cluster-health.sh
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo "╔══════════════════════════════════════════════════════════════════╗"
+echo "║              KUBERNETES CLUSTER HEALTH CHECK                     ║"
+echo "╚══════════════════════════════════════════════════════════════════╝"
+echo ""
+
+PASSED=0
+FAILED=0
+WARNINGS=0
+
+check_pass() { ((PASSED++)); echo -e "${GREEN}✓ PASS${NC}: $1"; }
+check_fail() { ((FAILED++)); echo -e "${RED}✗ FAIL${NC}: $1"; }
+check_warn() { ((WARNINGS++)); echo -e "${YELLOW}⚠ WARN${NC}: $1"; }
+
+# ============================================================================
+echo -e "\n[1/8] NODE STATUS"
+echo "────────────────────────────────────────"
+NOT_READY=$(kubectl get nodes --no-headers | grep -v " Ready" | wc -l)
+if [ "$NOT_READY" -eq 0 ]; then
+    check_pass "All nodes are Ready"
+    kubectl get nodes -o wide
+else
+    check_fail "$NOT_READY node(s) not Ready"
+    kubectl get nodes | grep -v " Ready"
+fi
+
+# ============================================================================
+echo -e "\n[2/8] SYSTEM PODS (kube-system)"
+echo "────────────────────────────────────────"
+FAILED_PODS=$(kubectl get pods -n kube-system --no-headers | grep -v "Running\|Completed" | wc -l)
+if [ "$FAILED_PODS" -eq 0 ]; then
+    check_pass "All kube-system pods healthy"
+else
+    check_fail "$FAILED_PODS kube-system pod(s) unhealthy"
+    kubectl get pods -n kube-system | grep -v "Running\|Completed"
+fi
+
+# ============================================================================
+echo -e "\n[3/8] CILIUM CNI STATUS"
+echo "────────────────────────────────────────"
+if cilium status --wait=false 2>/dev/null | grep -q "OK"; then
+    check_pass "Cilium is healthy"
+else
+    check_fail "Cilium has issues"
+    cilium status 2>/dev/null || echo "Cilium CLI not available"
+fi
+
+# ============================================================================
+echo -e "\n[4/8] STORAGE (Longhorn)"
+echo "────────────────────────────────────────"
+LH_PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l)
+if [ "$LH_PODS" -eq 0 ]; then
+    check_pass "Longhorn pods healthy"
+else
+    check_warn "$LH_PODS Longhorn pod(s) unhealthy"
+fi
+
+PENDING_PVC=$(kubectl get pvc -A --no-headers 2>/dev/null | grep -i pending | wc -l)
+if [ "$PENDING_PVC" -eq 0 ]; then
+    check_pass "No pending PVCs"
+else
+    check_warn "$PENDING_PVC PVC(s) pending"
+fi
+
+# ============================================================================
+echo -e "\n[5/8] ARGOCD STATUS"
+echo "────────────────────────────────────────"
+ARGO_PODS=$(kubectl get pods -n argocd --no-headers 2>/dev/null | grep -v "Running" | wc -l)
+if [ "$ARGO_PODS" -eq 0 ]; then
+    check_pass "ArgoCD pods healthy"
+else
+    check_fail "$ARGO_PODS ArgoCD pod(s) unhealthy"
+fi
+
+# Check for OutOfSync apps
+OUTOFSYNC=$(argocd app list -o json 2>/dev/null | jq -r '.[] | select(.status.sync.status!="Synced") | .metadata.name' | wc -l)
+if [ "$OUTOFSYNC" -eq 0 ]; then
+    check_pass "All ArgoCD apps synced"
+else
+    check_warn "$OUTOFSYNC app(s) out of sync"
+fi
+
+# ============================================================================
+echo -e "\n[6/8] CERTIFICATES"
+echo "────────────────────────────────────────"
+CERT_ISSUES=$(kubectl get certificates -A -o json 2>/dev/null | jq -r '.items[] | select(.status.conditions[]?.status!="True") | .metadata.name' | wc -l)
+if [ "$CERT_ISSUES" -eq 0 ]; then
+    check_pass "All certificates valid"
+else
+    check_warn "$CERT_ISSUES certificate(s) have issues"
+fi
+
+# ============================================================================
+echo -e "\n[7/8] RESOURCE UTILIZATION"
+echo "────────────────────────────────────────"
+echo "Node Resources:"
+kubectl top nodes 2>/dev/null || echo "Metrics not available"
+
+# Check for nodes with high usage
+HIGH_CPU=$(kubectl top nodes --no-headers 2>/dev/null | awk '{gsub(/%/,"",$3); if($3>80) print $1}' | wc -l)
+if [ "$HIGH_CPU" -gt 0 ]; then
+    check_warn "$HIGH_CPU node(s) with CPU > 80%"
+else
+    check_pass "CPU utilization normal"
+fi
+
+# ============================================================================
+echo -e "\n[8/8] BACKUP STATUS (Velero)"
+echo "────────────────────────────────────────"
+VELERO_OK=$(kubectl get pods -n velero --no-headers 2>/dev/null | grep "Running" | wc -l)
+if [ "$VELERO_OK" -gt 0 ]; then
+    check_pass "Velero is running"
+    LAST_BACKUP=$(velero backup get -o json 2>/dev/null | jq -r '.items | sort_by(.status.completionTimestamp) | last | .metadata.name // "none"')
+    echo "  Last backup: $LAST_BACKUP"
+else
+    check_warn "Velero not running"
+fi
+
+# ============================================================================
+echo ""
+echo "╔══════════════════════════════════════════════════════════════════╗"
+echo "║                         SUMMARY                                  ║"
+echo "╠══════════════════════════════════════════════════════════════════╣"
+printf "║  ${GREEN}Passed: %2d${NC}  │  ${YELLOW}Warnings: %2d${NC}  │  ${RED}Failed: %2d${NC}                   ║\n" $PASSED $WARNINGS $FAILED
+echo "╚══════════════════════════════════════════════════════════════════╝"
+
+if [ "$FAILED" -gt 0 ]; then
+    exit 1
+elif [ "$WARNINGS" -gt 0 ]; then
+    exit 0
+else
+    exit 0
+fi
+```
+
+Save as `tests/07_operations_test.sh` and run regularly:
+```bash
+chmod +x tests/07_operations_test.sh
+./tests/07_operations_test.sh
+```

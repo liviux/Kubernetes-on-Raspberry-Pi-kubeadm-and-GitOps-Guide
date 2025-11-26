@@ -1,8 +1,48 @@
+# ============================================================================
+# ARGO IMAGE UPDATER - Automated Image Tag Management
+# ============================================================================
+# Component: Argo Image Updater v0.9.1
+# Purpose: Watches Harbor registry for new image tags and automatically
+#          updates Git repository to trigger GitOps deployments
+# Dependencies: ArgoCD, Harbor registry, Git repository access
+# ============================================================================
+#
+# ARCHITECTURE:
+#   Harbor Registry ──▶ Image Updater ──▶ Git Commit ──▶ ArgoCD Sync
+#
+# UPDATE STRATEGIES:
+#   - semver: Semantic versioning (recommended for production)
+#   - latest: Always use the newest tag
+#   - digest: Update based on SHA digest changes
+#   - name: Alphabetical sorting
+#
+# APPLICATION ANNOTATIONS (add to your ArgoCD Applications):
+#   argocd-image-updater.argoproj.io/image-list: myapp=harbor.x.x.x.nip.io/library/myapp
+#   argocd-image-updater.argoproj.io/myapp.update-strategy: semver
+#   argocd-image-updater.argoproj.io/myapp.allow-tags: regexp:^v[0-9]+\.[0-9]+\.[0-9]+$
+#   argocd-image-updater.argoproj.io/write-back-method: git
+#
+# RESOURCE USAGE (ARM64):
+#   - Memory: ~50MB
+#   - CPU: Minimal (polling-based)
+#
+# PREREQUISITES:
+#   kubectl create secret generic harbor-creds \
+#     --from-literal=username=admin \
+#     --from-literal=password=<harbor-password> \
+#     -n argocd
+#
+# ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: argo-image-updater
   namespace: argocd
+  labels:
+    app.kubernetes.io/component: image-automation
+    app.kubernetes.io/part-of: cicd-pipeline
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   project: default
   source:
@@ -11,14 +51,47 @@ spec:
     targetRevision: 0.9.1
     helm:
       values: |
+        # ──────────────────────────────────────────────────────────────────────
+        # REGISTRY CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
         config:
           registries:
+            # Harbor private registry
             - name: harbor.192.168.0.210.nip.io
               api_url: https://harbor.192.168.0.210.nip.io
               prefix: harbor.192.168.0.210.nip.io/library
               ping: yes
-              insecure: yes # Self-signed certs
+              # Allow self-signed certificates (home lab)
+              insecure: yes
+              # Credentials stored in argocd namespace
               credentials: secret:argocd/harbor-creds#password
+
+        # ──────────────────────────────────────────────────────────────────────
+        # RESOURCE LIMITS (ARM64 Optimized)
+        # ──────────────────────────────────────────────────────────────────────
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "10m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+        # ──────────────────────────────────────────────────────────────────────
+        # POLLING CONFIGURATION
+        # ──────────────────────────────────────────────────────────────────────
+        # Check for new images every 2 minutes
+        extraArgs:
+          - --interval=2m
+          - --loglevel=info
+
+        # ──────────────────────────────────────────────────────────────────────
+        # SERVICE ACCOUNT
+        # ──────────────────────────────────────────────────────────────────────
+        serviceAccount:
+          create: true
+          name: argocd-image-updater
+
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
