@@ -2172,30 +2172,111 @@ bash tests/01_infra_test.sh
 
 ## 6. Phase 2: Cluster Bootstrap
 
-In this phase, we initialize the Control Plane, install the networking layer (Cilium), and join the worker nodes.
+In this phase, we initialize the Control Plane, install the networking layer (Cilium), and join the worker nodes. This transforms four standalone Raspberry Pis into a unified Kubernetes cluster.
+
+### Phase 2 Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CLUSTER BOOTSTRAP FLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐     kubeadm init      ┌─────────────────────────────────┐ │
+│  │   rpi4-1    │ ────────────────────► │     Control Plane Components    │ │
+│  │  (big node) │                       │  • API Server    • Scheduler    │ │
+│  │   8GB RAM   │                       │  • Controller    • etcd         │ │
+│  └─────────────┘                       └─────────────────────────────────┘ │
+│        │                                           │                       │
+│        │ Cilium CNI                               │ Join Token             │
+│        ▼                                           ▼                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        Cluster Network                              │   │
+│  │  Pod CIDR: 10.244.0.0/16  │  Service CIDR: 10.96.0.0/12           │   │
+│  │  Cilium replaces kube-proxy  │  L2 Announcements for LoadBalancer │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│        │                  │                  │                             │
+│        ▼                  ▼                  ▼                             │
+│  ┌──────────┐      ┌──────────┐      ┌──────────┐                         │
+│  │  rpi4-2  │      │  rpi4-3  │      │  rpi4-4  │   Worker Nodes          │
+│  │  4GB RAM │      │  4GB RAM │      │  4GB RAM │   (small group)         │
+│  └──────────┘      └──────────┘      └──────────┘                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 2 Components
+
+| Component | Version | Purpose | Raspberry Pi Optimization |
+|-----------|---------|---------|---------------------------|
+| **kubeadm** | 1.31.0 | Cluster bootstrapper | Custom config skips kube-proxy |
+| **Cilium** | 1.18.4 | CNI + Service Mesh | eBPF-based, replaces kube-proxy |
+| **Hubble** | (bundled) | Network Observability | NodePort UI for debugging |
+| **Metrics Server** | 3.12.2 | Resource metrics | `--kubelet-insecure-tls` for self-signed certs |
+
+### Why Cilium?
+
+Cilium is the ideal CNI for Raspberry Pi clusters:
+
+| Feature | Benefit for RPi |
+|---------|----------------|
+| **eBPF-based** | More efficient than iptables, lower CPU usage |
+| **kube-proxy replacement** | One less component, reduced memory footprint |
+| **L2 Announcements** | Native LoadBalancer support without MetalLB |
+| **Hubble** | Built-in network observability UI |
+| **WireGuard encryption** | Optional cluster-wide encryption |
 
 ### 6.1 Cluster Initialization Playbook
 **File:** `ansible/playbooks/03_cluster_init.yml`
 
-This complex playbook performs the following:
-1.  **Init:** Bootstraps the control plane with `kubeadm`, configured to skip `kube-proxy` (since Cilium replaces it).
-2.  **Config:** Sets up the `admin.conf` for the root user on the Pi and fetches it to your local WSL machine.
-3.  **Networking:** Installs Cilium via Helm with L2 Announcements enabled.
-4.  **Join:** Generates a token and joins the `small` nodes.
-5.  **Labels:** Applies the hardware labels (`ram=8gb`, `storage=hdd`, etc.).
-6.  **Taints:** Removes the scheduling taint from the Control Plane so it can run workloads.
+This playbook orchestrates the complete cluster bootstrap in three phases:
+
+| Phase | Hosts | Actions |
+|-------|-------|----------|
+| **2a - Init Control Plane** | `big` | kubeadm init, configure kubectl, install Cilium, generate join token |
+| **2b - Join Workers** | `small` | Join each worker to the cluster using the generated token |
+| **2c - Post-Config** | `big` | Apply hardware labels, configure node roles |
+
+**Key Configuration Decisions:**
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `skipPhases: addon/kube-proxy` | Enabled | Cilium replaces kube-proxy with eBPF |
+| `taints: []` | Empty | Allow workloads on Control Plane (4-node cluster) |
+| `kubeProxyReplacement: true` | Enabled | Full kube-proxy replacement mode |
+| `l2announcements.enabled: true` | Enabled | Native LoadBalancer without MetalLB |
+| `hubble.ui.service.type: NodePort` | NodePort | Access Hubble UI via any node IP |
 
 <details>
 <summary>📄 Click to expand full ansible/playbooks/03_cluster_init.yml</summary>
 
 ```yaml
 ---
+# =============================================================================
+# Phase 2: Cluster Bootstrap Playbook
+# =============================================================================
+# This playbook initializes the Kubernetes cluster with Cilium CNI.
+#
+# Phases:
+#   2a - Initialize Control Plane (kubeadm init, Cilium, generate join token)
+#   2b - Join Workers (kubeadm join on all small nodes)
+#   2c - Post-Config (apply hardware labels for scheduling affinity)
+#
+# Prerequisites:
+#   - Phase 1 playbooks completed (01_node_prep.yml, 02_k8s_binaries.yml)
+#   - All nodes reachable via SSH
+#   - Helm installed on control plane
+#
+# Usage: ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
+# =============================================================================
+
 - name: Phase 2a - Initialize Control Plane
   hosts: big
   become: true
   vars:
+    # Network CIDRs - must not overlap with your home network
     pod_network_cidr: "10.244.0.0/16"
     service_cidr: "10.96.0.0/12"
+    # Cilium version - check https://github.com/cilium/cilium/releases
     cilium_version: "1.18.4"
   tasks:
     - name: Create kubeadm config
@@ -2219,7 +2300,7 @@ This complex playbook performs the following:
             serviceSubnet: {{ service_cidr }}
             podSubnet: {{ pod_network_cidr }}
             dnsDomain: cluster.local
-          # Skip kube-proxy for Cilium
+          # Skip kube-proxy for Cilium (eBPF-based replacement)
           skipPhases:
             - addon/kube-proxy
 
@@ -2269,6 +2350,12 @@ This complex playbook performs the following:
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
 
+    - name: Wait for Cilium to be ready
+      shell: |
+        kubectl wait --for=condition=Ready pods -l k8s-app=cilium -n kube-system --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
     - name: Generate Join Token
       command: kubeadm token create --print-join-command
       register: join_command
@@ -2280,6 +2367,9 @@ This complex playbook performs the following:
         dest: ~/.kube/config
         flat: yes
 
+# =============================================================================
+# Phase 2b: Join Worker Nodes
+# =============================================================================
 - name: Phase 2b - Join Workers
   hosts: small
   become: true
@@ -2293,10 +2383,19 @@ This complex playbook performs the following:
       shell: "{{ hostvars[groups['big'][0]]['join_command'].stdout }}"
       when: not worker_conf.stat.exists
 
+# =============================================================================
+# Phase 2c: Apply Hardware Labels for Scheduling Affinity
+# =============================================================================
 - name: Phase 2c - Apply Labels & Post-Config
   hosts: big
   become: true
   tasks:
+    - name: Wait for all nodes to be ready
+      shell: |
+        kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
     - name: Label Control Plane (HDD/8GB)
       shell: |
         export KUBECONFIG=/etc/kubernetes/admin.conf
@@ -2316,27 +2415,62 @@ This complex playbook performs the following:
 </details>
 
 ### 6.2 Metrics Server
+
 **File:** `bootstrap/metrics-server/install.sh`
 
-Metrics Server is a cluster-wide aggregator of resource usage data. It is **required** for:
-- `kubectl top nodes` and `kubectl top pods` commands
-- Horizontal Pod Autoscaler (HPA)
-- Vertical Pod Autoscaler (VPA)
-- Kubernetes Dashboard resource displays
+Metrics Server is a cluster-wide aggregator of resource usage data. It collects CPU and memory metrics from kubelets and exposes them via the Kubernetes API.
+
+| Feature | Dependency | Why It Matters |
+|---------|------------|----------------|
+| `kubectl top` | Metrics Server | View real-time node/pod resource usage |
+| **HPA** | Metrics Server | Auto-scale based on CPU/memory |
+| **VPA** | Metrics Server | Right-size container requests |
+| **Dashboard** | Metrics Server | Display resource graphs |
+
+**Raspberry Pi Considerations:**
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `--kubelet-insecure-tls` | Required | kubeadm uses self-signed kubelet certs |
+| `--kubelet-preferred-address-types` | `InternalIP` | Prefer internal cluster IPs |
+| Resource requests | 100m CPU, 200Mi | Tuned for RPi resources |
 
 <details>
 <summary>📄 Click to expand full bootstrap/metrics-server/install.sh</summary>
 
 ```bash
 #!/bin/bash
-set -e
-echo "=== METRICS SERVER BOOTSTRAP ==="
+# =============================================================================
+# Metrics Server Bootstrap Script
+# =============================================================================
+# Metrics Server is a cluster-wide aggregator of resource usage data.
+#
+# Required for:
+#   - kubectl top nodes/pods commands
+#   - Horizontal Pod Autoscaler (HPA)
+#   - Vertical Pod Autoscaler (VPA)
+#   - Kubernetes Dashboard resource displays
+#
+# Raspberry Pi Considerations:
+#   - --kubelet-insecure-tls: Required because kubeadm uses self-signed certs
+#   - --kubelet-preferred-address-types=InternalIP: Use internal cluster IPs
+#   - Resource limits tuned for ARM64 with limited RAM
+#
+# Usage: bash bootstrap/metrics-server/install.sh
+# =============================================================================
 
-# Install Metrics Server with ARM64 compatibility
-# We use --kubelet-insecure-tls because we're using self-signed certs
+set -e
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              METRICS SERVER BOOTSTRAP                                  ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+
+# Add Helm repository
+echo "Adding Metrics Server Helm repository..."
 helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
 helm repo update
 
+# Install Metrics Server with ARM64 compatibility
+echo "Installing Metrics Server..."
 helm upgrade --install metrics-server metrics-server/metrics-server \
   --namespace kube-system \
   --version 3.12.2 \
@@ -2347,11 +2481,19 @@ helm upgrade --install metrics-server metrics-server/metrics-server \
   --set resources.limits.cpu="250m" \
   --set resources.limits.memory="300Mi"
 
+echo ""
 echo "Waiting for Metrics Server to be ready..."
 kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
 
-echo "=== METRICS SERVER INSTALLED ==="
-echo "Verify with: kubectl top nodes"
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              METRICS SERVER INSTALLED                                  ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Verification commands:"
+echo "  kubectl top nodes        # View node resource usage"
+echo "  kubectl top pods -A      # View pod resource usage across all namespaces"
+echo ""
 ```
 
 </details>
@@ -2359,101 +2501,317 @@ echo "Verify with: kubectl top nodes"
 *Note: The `--kubelet-insecure-tls` flag is required because kubeadm generates self-signed certificates for the kubelet.*
 
 ### 6.3 Network Verification Script
+
 **File:** `tests/02_network_test.sh`
 
-Checks if all nodes are Ready (Cilium success) and if the Control Plane has the correct storage labels.
+This script validates the cluster bootstrap by checking critical networking components:
+
+| Check | Pass Criteria | What It Validates |
+|-------|---------------|-------------------|
+| **Node Readiness** | 4/4 nodes Ready | All nodes joined and Cilium agent running |
+| **Cilium Pods** | 4 pods Running | CNI deployed on every node |
+| **Hubble Service** | Service exists | Network observability available |
+| **Hardware Labels** | `unique-hdd=true` on CP | Labels applied for scheduling affinity |
 
 <details>
 <summary>📄 Click to expand full tests/02_network_test.sh</summary>
 
 ```bash
 #!/bin/bash
-echo "=== NETWORK & CLUSTER VERIFICATION SUITE ==="
+# =============================================================================
+# Phase 2: Network & Cluster Verification Script
+# =============================================================================
+# This script validates that the cluster bootstrap completed successfully.
+#
+# Checks:
+#   1. Node Readiness - All 4 nodes in Ready state
+#   2. Cilium Pods - CNI agents running on every node
+#   3. Hubble Service - Network observability available
+#   4. Hardware Labels - Scheduling affinity labels applied
+#
+# Usage: bash tests/02_network_test.sh
+# =============================================================================
 
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║           NETWORK & CLUSTER VERIFICATION SUITE                        ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+PASS=0
+FAIL=0
+
+# -----------------------------------------------------------------------------
 # 1. Check Node Readiness
-echo "Checking Node Status..."
-READY_COUNT=$(kubectl get nodes | grep "Ready" | wc -l)
+# -----------------------------------------------------------------------------
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 1. NODE READINESS                                                   │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+READY_COUNT=$(kubectl get nodes --no-headers | grep -c " Ready" || echo "0")
 if [ "$READY_COUNT" -eq 4 ]; then
-    echo "✅ All 4 Nodes are Ready"
+    echo -e "${GREEN}✅ All 4 Nodes are Ready${NC}"
+    ((PASS++))
 else
-    echo "❌ Waiting for nodes... (Found $READY_COUNT/4 Ready)"
-    exit 1
+    echo -e "${RED}❌ Waiting for nodes... (Found $READY_COUNT/4 Ready)${NC}"
+    kubectl get nodes
+    ((FAIL++))
 fi
 
+# -----------------------------------------------------------------------------
 # 2. Check Cilium Pods
-echo "Checking Cilium..."
-PODS=$(kubectl get pods -n kube-system -l k8s-app=cilium | grep Running | wc -l)
-if [ "$PODS" -eq 4 ]; then
-    echo "✅ Cilium Agents Running on all nodes"
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 2. CILIUM CNI                                                       │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+CILIUM_PODS=$(kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$CILIUM_PODS" -eq 4 ]; then
+    echo -e "${GREEN}✅ Cilium Agents Running on all nodes${NC}"
+    ((PASS++))
 else
-    echo "❌ Cilium pods missing or failed"
-    exit 1
+    echo -e "${RED}❌ Cilium pods missing or failed (Found $CILIUM_PODS/4)${NC}"
+    kubectl get pods -n kube-system -l k8s-app=cilium
+    ((FAIL++))
 fi
 
+# Check Cilium Operator
+OPERATOR=$(kubectl get pods -n kube-system -l name=cilium-operator --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$OPERATOR" -ge 1 ]; then
+    echo -e "${GREEN}✅ Cilium Operator Running${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ Cilium Operator not running${NC}"
+    ((FAIL++))
+fi
+
+# -----------------------------------------------------------------------------
 # 3. Check Hubble
-echo "Checking Hubble..."
-kubectl get svc -n kube-system hubble-ui > /dev/null && echo "✅ Hubble UI Service exists"
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 3. HUBBLE OBSERVABILITY                                             │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 
-# 4. Check Labels
-echo "Checking Control Plane Labels..."
-LABELS=$(kubectl get node rpi4-1 --show-labels)
-if [[ $LABELS == *"hardware/unique-hdd=true"* ]]; then
-    echo "✅ CP Label (unique-hdd) matches"
+if kubectl get svc -n kube-system hubble-ui &>/dev/null; then
+    echo -e "${GREEN}✅ Hubble UI Service exists${NC}"
+    NODEPORT=$(kubectl get svc hubble-ui -n kube-system -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "N/A")
+    echo "   Access via: http://<any-node-ip>:$NODEPORT"
+    ((PASS++))
 else
-    echo "❌ CP Labels missing"
+    echo -e "${RED}❌ Hubble UI Service not found${NC}"
+    ((FAIL++))
+fi
+
+# -----------------------------------------------------------------------------
+# 4. Check Labels
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 4. HARDWARE LABELS                                                  │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+CP_LABELS=$(kubectl get node rpi4-1 --show-labels 2>/dev/null || echo "")
+if [[ $CP_LABELS == *"hardware/unique-hdd=true"* ]]; then
+    echo -e "${GREEN}✅ Control Plane label (unique-hdd=true) applied${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ Control Plane labels missing${NC}"
+    ((FAIL++))
+fi
+
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║                          SUMMARY                                      ║"
+echo "╠═══════════════════════════════════════════════════════════════════════╣"
+printf "║  Passed: %-3d  │  Failed: %-3d                                       ║\n" $PASS $FAIL
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+
+if [ $FAIL -gt 0 ]; then
+    echo ""
+    echo -e "${RED}❌ PHASE 2 VERIFICATION FAILED${NC}"
     exit 1
 fi
 
-echo "=== PHASE 2 COMPLETE ==="
+echo ""
+echo "🎉 PHASE 2 COMPLETE - Cluster is operational!"
+echo ""
+echo "Next command:"
+echo "  ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml"
 ```
 
 </details>
 
 ### 6.4 Phase 2 Execution Steps
 
-1.  **Run the Cluster Initialization:**
-    ```bash
-    ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
-    ```
-    *Note: This will overwrite `~/.kube/config` on your local machine.*
+Execute the following commands from your **management machine** (WSL/Linux/Mac):
 
-2.  **Install Metrics Server:**
-    ```bash
-    bash bootstrap/metrics-server/install.sh
-    ```
-    *Verify: `kubectl top nodes` should return resource usage for all nodes.*
+```bash
+# Navigate to the repository root
+cd ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide
 
-3.  **Verify Cluster Status:**
-    ```bash
-    bash tests/02_network_test.sh
-    ```
+# Step 1: Initialize the cluster (Control Plane + Workers)
+# ⚠️ This will overwrite ~/.kube/config on your local machine
+ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
+
+# Step 2: Install Metrics Server for kubectl top and HPA support
+bash bootstrap/metrics-server/install.sh
+
+# Step 3: Verify cluster status
+bash tests/02_network_test.sh
+```
+
+**Expected Output from Verification Script:**
+
+```text
+=== NETWORK & CLUSTER VERIFICATION SUITE ===
+Checking Node Status...
+✅ All 4 Nodes are Ready
+Checking Cilium...
+✅ Cilium Agents Running on all nodes
+Checking Hubble...
+✅ Hubble UI Service exists
+Checking Control Plane Labels...
+✅ CP Label (unique-hdd) matches
+=== PHASE 2 COMPLETE ===
+```
+
+**Verify Metrics Server:**
+
+```bash
+# Check resource usage across all nodes
+kubectl top nodes
+```
+
+```text
+NAME     CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%
+rpi4-1   312m         8%     1842Mi          24%
+rpi4-2   89m          2%     512Mi           13%
+rpi4-3   76m          2%     489Mi           13%
+rpi4-4   82m          2%     501Mi           13%
+```
+
+**Access Hubble UI:**
+
+```bash
+# Get the Hubble UI NodePort
+kubectl get svc hubble-ui -n kube-system
+
+# Access via any node IP, e.g.:
+# http://192.168.0.201:<NodePort>
+```
+
+> ✅ **Checkpoint:** All nodes Ready, Cilium running, Metrics available. Proceed to Phase 3: Storage.
+
+---
 
 ## 7. Phase 3: Storage Foundation
 
 In this phase, we enable the persistent storage layer. Since Raspberry Pis use SD cards (which are slow and unreliable for heavy writes), we utilize the **1TB HDD** attached to the Control Plane (`rpi4-1`).
 
-We install **Longhorn** as the storage provider. We configure it with **Strict Affinity** rules: it will serve volumes to the entire cluster, but the physical data will *only* be written to the HDD on `rpi4-1`.
+### Storage Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     LONGHORN STORAGE TOPOLOGY                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐   │
+│  │         rpi4-1 (Control Plane) - Storage Node                     │   │
+│  │  ┌─────────────────┐    ┌──────────────────────────────────────┐   │   │
+│  │  │  128GB SD Card  │    │  1TB USB HDD (/var/lib/longhorn)     │   │   │
+│  │  │  (OS + etcd)    │    │  • allowScheduling: true            │   │   │
+│  │  └─────────────────┘    │  • Longhorn data path               │   │   │
+│  │                         │  • Replica storage (1 replica)      │   │   │
+│  │                         └──────────────────────────────────────┘   │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│                            │                                           │
+│                            │ iSCSI over Network                        │
+│                            ▼                                           │
+│  ┌───────────────────────────────────────────────────────────────────┐   │
+│  │              Worker Nodes (rpi4-2, rpi4-3, rpi4-4)               │   │
+│  │  ┌─────────────────┐  • allowScheduling: false                    │   │
+│  │  │  64GB SD Card   │  • No local Longhorn data                    │   │
+│  │  │  (OS only)      │  • Access volumes via iSCSI                  │   │
+│  │  └─────────────────┘  • Pods can mount PVCs from rpi4-1            │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 3 Components
+
+| Component | Version | Purpose | Configuration |
+|-----------|---------|---------|---------------|
+| **Longhorn** | 1.10.1 | Distributed block storage | Single HDD node, 1 replica |
+| **iSCSI** | System | Volume attachment protocol | Pre-installed in Phase 1 |
+| **ext4** | System | HDD filesystem | `noatime` for performance |
+
+### Why Longhorn for Raspberry Pi?
+
+| Challenge | Longhorn Solution |
+|-----------|-------------------|
+| **SD card wear** | Store all data on HDD, not SD cards |
+| **Limited nodes** | Supports single-node storage (replica=1) |
+| **Network storage** | iSCSI allows any pod to access HDD volumes |
+| **UI access** | Built-in web dashboard for management |
+| **Backup** | Supports S3-compatible backup targets |
 
 ### 7.1 Storage Mounting Playbook
+
 **File:** `ansible/playbooks/04_storage_mount.yml`
 
 This playbook runs only on the `big` (Control Plane) node. It formats the USB HDD (if necessary) and mounts it persistently to the path Longhorn expects.
 
-*   **Mount Point:** `/var/lib/longhorn`
-*   **Filesystem:** `ext4`
+| Setting | Value | Notes |
+|---------|-------|-------|
+| **Mount Point** | `/var/lib/longhorn` | Default Longhorn data path |
+| **Filesystem** | `ext4` | Best balance of performance and reliability |
+| **Mount Options** | `defaults,noatime` | `noatime` reduces write operations |
+| **Target Node** | `rpi4-1` only | Only the HDD-equipped node |
+
+> ⚠️ **Important:** Before running, verify your HDD device with `lsblk` on `rpi4-1`. The default is `/dev/sda1` but USB enumeration can vary. For stability, use `/dev/disk/by-id/...`.
 
 <details>
 <summary>📄 Click to expand full ansible/playbooks/04_storage_mount.yml</summary>
 
 ```yaml
 ---
+# =============================================================================
+# Phase 3a: Storage Mounting Playbook
+# =============================================================================
+# This playbook mounts the external USB HDD on the Control Plane node.
+# Longhorn will use this mount point as the sole storage location.
+#
+# Configuration:
+#   - Mount Point: /var/lib/longhorn (Longhorn default data path)
+#   - Filesystem: ext4 (best balance of performance and reliability)
+#   - Mount Options: defaults,noatime (reduces write operations)
+#
+# ⚠️  Before running, verify your HDD device:
+#     ansible -i ansible/hosts big -m shell -a 'lsblk'
+#
+# Usage: ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
+# =============================================================================
+
 - name: Phase 3a - Mount HDD for Longhorn
   hosts: big
   become: true
   vars:
-    # CHANGE THIS to your actual HDD device identifier (lsblk)
-    # Best practice: Use /dev/disk/by-id/... to avoid USB enumeration changes
-    hdd_device: "/dev/sda1" 
+    # =========================================================================
+    # CHANGE THIS to your actual HDD device identifier
+    # =========================================================================
+    hdd_device: "/dev/sda1"
+    # Option 2 (Recommended): Use by-id path for stability
+    # hdd_device: "/dev/disk/by-id/usb-YOUR_DRIVE_ID-part1"
     mount_path: "/var/lib/longhorn"
   tasks:
     - name: Ensure Mount Directory Exists
@@ -2462,12 +2820,17 @@ This playbook runs only on the `big` (Control Plane) node. It formats the USB HD
         state: directory
         mode: '0755'
 
-    - name: Format HDD (ext4)
+    - name: Check if already formatted
+      command: blkid -o value -s TYPE {{ hdd_device }}
+      register: fs_type
+      changed_when: false
+      failed_when: false
+
+    - name: Format HDD (ext4) if not already formatted
       filesystem:
         fstype: ext4
         dev: "{{ hdd_device }}"
-        # force: no # Safety: set to yes only if you want to wipe the drive
-      ignore_errors: yes # Ignores error if already formatted
+      when: fs_type.stdout != "ext4"
 
     - name: Mount HDD
       mount:
@@ -2482,37 +2845,82 @@ This playbook runs only on the `big` (Control Plane) node. It formats the USB HD
       register: df_out
       changed_when: false
 
-    - debug:
-        msg: "Storage mounted: {{ df_out.stdout }}"
+    - name: Display Mount Status
+      debug:
+        msg: "Storage mounted at {{ mount_path }}: {{ df_out.stdout }}"
 ```
 
 </details>
 
 ### 7.2 Longhorn Bootstrap Script
+
 **File:** `bootstrap/longhorn/install.sh`
 
-This script installs Longhorn via Helm and applies the critical "Day 2" configurations to protect your hardware.
+This script installs Longhorn via Helm and applies critical configurations to protect your SD cards from being used as storage targets.
 
-1.  **Install:** Deploys Longhorn v1.10.1 via Helm.
-2.  **Label:** Applies `node.longhorn.io/create-default-disk=true` to `rpi4-1` so Longhorn knows where to create the initial storage chunk.
-3.  **Restrict:** Patches the configuration of worker nodes (`rpi4-2,3,4`) to set `allowScheduling: false`. This prevents Longhorn from ever trying to save data to their SD cards.
+**Installation Phases:**
+
+| Phase | Action | Purpose |
+|-------|--------|---------|
+| **1. Helm Install** | Deploy Longhorn v1.10.1 | Core storage system |
+| **2. Label CP** | `node.longhorn.io/create-default-disk=true` | Mark rpi4-1 as storage node |
+| **3. Lock Workers** | `allowScheduling: false` on rpi4-2,3,4 | Protect SD cards from writes |
+
+**Longhorn Settings:**
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `defaultClassReplicaCount` | `1` | Only 1 HDD available |
+| `createDefaultDiskLabeledNodes` | `true` | Auto-create disk on labeled nodes |
+| `allowNodeDrainWithLastHealthyReplica` | `true` | Allow maintenance with single replica |
+| `defaultDataPath` | `/var/lib/longhorn` | Match the mounted HDD path |
 
 <details>
 <summary>📄 Click to expand full bootstrap/longhorn/install.sh</summary>
 
 ```bash
 #!/bin/bash
+# =============================================================================
+# Phase 3b: Longhorn Bootstrap Script
+# =============================================================================
+# Installs Longhorn distributed storage and configures it for single-HDD setup.
+#
+# Key Configuration:
+#   - Single replica (only 1 HDD available)
+#   - Storage only on rpi4-1 (Control Plane with HDD)
+#   - Workers locked out (protect SD cards from writes)
+#
+# Prerequisites:
+#   - HDD mounted at /var/lib/longhorn on rpi4-1
+#   - iSCSI tools installed (Phase 1)
+#   - kubectl and helm configured
+#
+# Usage: bash bootstrap/longhorn/install.sh
+# =============================================================================
+
 set -e
 
-echo "=== PHASE 3: LONGHORN BOOTSTRAP ==="
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              PHASE 3: LONGHORN BOOTSTRAP                              ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
 
-# 1. Add Repo
+# =============================================================================
+# 1. Add Helm Repository
+# =============================================================================
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 1: Adding Longhorn Helm Repository                             │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 helm repo add longhorn https://charts.longhorn.io
 helm repo update
 
-# 2. Install Longhorn (Version locked)
-# We set replicaCount=1 because we only have 1 HDD.
-echo "Installing Longhorn Chart..."
+# =============================================================================
+# 2. Install Longhorn
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 2: Installing Longhorn v1.10.1                                 │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 helm upgrade --install longhorn longhorn/longhorn \
   --namespace longhorn-system \
   --create-namespace \
@@ -2523,67 +2931,153 @@ helm upgrade --install longhorn longhorn/longhorn \
   --set defaultSettings.allowNodeDrainWithLastHealthyReplica=true \
   --wait
 
-# 3. Configure Control Plane Storage
-echo "Configuring Control Plane (HDD) storage..."
+echo ""
+echo "Waiting for Longhorn pods to be ready..."
+kubectl wait --for=condition=Ready pods --all -n longhorn-system --timeout=300s
+
+# =============================================================================
+# 3. Configure Control Plane as Storage Node
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 3: Configuring Control Plane (HDD) Storage                     │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 kubectl label node rpi4-1 node.longhorn.io/create-default-disk=true --overwrite
+echo "✅ Label applied: node.longhorn.io/create-default-disk=true on rpi4-1"
 
+# =============================================================================
 # 4. Protect Worker SD Cards
-# We disable storage scheduling on all small nodes
-echo "Locking out worker nodes from storage duties..."
-WORKERS=("rpi4-2" "rpi4-3" "rpi4-4")
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 4: Locking Workers (Protect SD Cards)                          │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 
+sleep 10  # Wait for Longhorn Node CRDs
+
+WORKERS=("rpi4-2" "rpi4-3" "rpi4-4")
 for NODE in "${WORKERS[@]}"; do
-    echo "Disabling scheduling on $NODE..."
-    # We use 'patch' to modify the Longhorn Node CRD directly
-    kubectl patch nodes.longhorn.io $NODE -n longhorn-system --type=merge -p '{"spec":{"allowScheduling": false}}' || true
+    echo "Disabling storage scheduling on $NODE..."
+    kubectl patch nodes.longhorn.io "$NODE" -n longhorn-system \
+        --type=merge -p '{"spec":{"allowScheduling": false}}' 2>/dev/null || \
+        echo "  ⚠️  Node CRD not yet created for $NODE"
 done
 
-echo "=== LONGHORN INSTALLED & CONFIGURED ==="
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              LONGHORN INSTALLED & CONFIGURED                          ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Verify with: bash tests/03_storage_test.sh"
 ```
 
 </details>
 
 ### 7.3 Storage Verification Script
+
 **File:** `tests/03_storage_test.sh`
 
-This script creates a real Persistent Volume Claim (PVC) and a Pod to verify that:
-1.  Longhorn can provision storage.
-2.  The data is physically written to `rpi4-1`.
-3.  A Pod running on a *different* node (e.g., `rpi4-2`) can access that data over the network.
+This script creates a real PVC and Pod to verify end-to-end storage functionality:
+
+| Check | Test Method | Pass Criteria |
+|-------|-------------|---------------|
+| **System Health** | Count Running pods in `longhorn-system` | >10 pods Running |
+| **CP Scheduling** | Check `nodes.longhorn.io/rpi4-1` | `allowScheduling: true` |
+| **Worker Protection** | Check `nodes.longhorn.io/rpi4-2` | `allowScheduling: false` |
+| **Volume Provisioning** | Create 100Mi PVC | PVC bound successfully |
+| **Network Attach** | Pod on rpi4-2 mounts volume from rpi4-1 | Pod reaches Ready state |
+
+The test forces the pod to run on a worker node (`hardware/sd=64gb` selector) while the volume data lives on the control plane's HDD. This validates iSCSI network storage is working.
 
 <details>
 <summary>📄 Click to expand full tests/03_storage_test.sh</summary>
 
 ```bash
 #!/bin/bash
-echo "=== STORAGE VERIFICATION SUITE ==="
+# =============================================================================
+# Phase 3: Storage Verification Script
+# =============================================================================
+# This script validates end-to-end storage functionality with Longhorn.
+#
+# Tests:
+#   1. Longhorn System Health - All pods running in longhorn-system
+#   2. Node Scheduling Config - CP enabled, workers disabled
+#   3. Volume Provisioning - Create PVC and verify it binds
+#   4. Network Attach - Pod on worker mounts volume from CP
+#
+# Usage: bash tests/03_storage_test.sh
+# =============================================================================
 
-# 1. Check System Pods
-echo "Checking Longhorn System..."
-PODS=$(kubectl get pods -n longhorn-system | grep Running | wc -l)
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              STORAGE VERIFICATION SUITE                               ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+PASS=0
+FAIL=0
+
+# =============================================================================
+# 1. Check Longhorn System Pods
+# =============================================================================
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 1. LONGHORN SYSTEM HEALTH                                           │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -c "Running" || echo "0")
 if [ "$PODS" -gt 10 ]; then
-    echo "✅ Longhorn System is Running"
+    echo -e "${GREEN}✅ Longhorn System is Running ($PODS pods)${NC}"
+    ((PASS++))
 else
-    echo "❌ Longhorn pods are missing or crashed"
+    echo -e "${RED}❌ Longhorn pods are missing or crashed${NC}"
     kubectl get pods -n longhorn-system
-    exit 1
+    ((FAIL++))
 fi
 
+# =============================================================================
 # 2. Check Node Configuration
-echo "Checking Disk Scheduling..."
-# rpi4-1 should be true, others false
-CP_SCHED=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}')
-WORKER_SCHED=$(kubectl get nodes.longhorn.io rpi4-2 -n longhorn-system -o jsonpath='{.spec.allowScheduling}')
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 2. NODE SCHEDULING CONFIGURATION                                    │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 
-if [ "$CP_SCHED" == "true" ] && [ "$WORKER_SCHED" == "false" ]; then
-    echo "✅ HDD Affinity Configured (Only CP stores data)"
+CP_SCHED=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null)
+WORKER_SCHED=$(kubectl get nodes.longhorn.io rpi4-2 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null)
+
+if [ "$CP_SCHED" == "true" ]; then
+    echo -e "${GREEN}✅ Control Plane (rpi4-1): allowScheduling=true${NC}"
+    ((PASS++))
 else
-    echo "❌ Node Scheduling config is wrong! CP: $CP_SCHED, Worker: $WORKER_SCHED"
-    exit 1
+    echo -e "${RED}❌ Control Plane scheduling incorrect${NC}"
+    ((FAIL++))
 fi
 
+if [ "$WORKER_SCHED" == "false" ]; then
+    echo -e "${GREEN}✅ Workers: allowScheduling=false (SD cards protected)${NC}"
+    ((PASS++))
+else
+    echo -e "${YELLOW}⚠️  Worker scheduling not disabled${NC}"
+    ((FAIL++))
+fi
+
+# =============================================================================
 # 3. Create Test Workload
-echo "Deploying Test PVC & Pod..."
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 3. VOLUME PROVISIONING TEST                                         │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+kubectl delete pod test-storage-pod --ignore-not-found=true 2>/dev/null
+kubectl delete pvc test-storage-verify --ignore-not-found=true 2>/dev/null
+
+echo "Creating test PVC and Pod..."
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -2602,12 +3096,11 @@ metadata:
   name: test-storage-pod
 spec:
   nodeSelector:
-    # Force pod to run on a worker to test network attachment
     hardware/sd: "64gb"
   containers:
   - name: write-test
-    image: busybox
-    command: ["/bin/sh", "-c", "echo 'Storage Works' > /data/test.txt && sleep 3600"]
+    image: busybox:1.36
+    command: ["/bin/sh", "-c", "echo 'Storage Works!' > /data/test.txt && sleep 30"]
     volumeMounts:
     - name: vol
       mountPath: /data
@@ -2615,45 +3108,111 @@ spec:
   - name: vol
     persistentVolumeClaim:
       claimName: test-storage-verify
+  restartPolicy: Never
 EOF
 
-echo "Waiting for Pod to start (This verifies volume attach)..."
+echo "Waiting for Pod to start..."
 kubectl wait --for=condition=Ready pod/test-storage-pod --timeout=120s
 
 if [ $? -eq 0 ]; then
-    echo "✅ Storage Attached Successfully over Network"
-    # Cleanup
-    kubectl delete pod test-storage-pod
-    kubectl delete pvc test-storage-verify
+    echo -e "${GREEN}✅ Storage Attached Successfully over Network${NC}"
+    POD_NODE=$(kubectl get pod test-storage-pod -o jsonpath='{.spec.nodeName}')
+    echo "   Pod running on: $POD_NODE, Volume on: rpi4-1"
+    kubectl delete pod test-storage-pod --ignore-not-found=true
+    kubectl delete pvc test-storage-verify --ignore-not-found=true
+    ((PASS++))
 else
-    echo "❌ Test Pod failed to start (Volume Attach Error?)"
+    echo -e "${RED}❌ Test Pod failed to start${NC}"
     kubectl describe pod test-storage-pod
+    ((FAIL++))
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+printf "║  Passed: %-3d  │  Failed: %-3d                                       ║\n" $PASS $FAIL
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+
+if [ $FAIL -gt 0 ]; then
+    echo -e "${RED}❌ PHASE 3 VERIFICATION FAILED${NC}"
     exit 1
 fi
 
-echo "=== PHASE 3 COMPLETE ==="
+echo ""
+echo "🎉 PHASE 3 COMPLETE - Storage is operational!"
+echo "Next command: bash bootstrap/traefik/install.sh"
 ```
 
 </details>
 
 ### 7.4 Phase 3 Execution Steps
 
-1.  **Mount the HDD:**
-    *(Ensure your HDD is plugged into `rpi4-1` and check `lsblk` to confirm the device name matches the playbook vars).*
-    ```bash
-    ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
-    ```
+Execute the following commands from your **management machine**:
 
-2.  **Install Longhorn:**
-    Run this script from your management machine (requires `helm` and `kubectl` access to the cluster).
-    ```bash
-    bash bootstrap/longhorn/install.sh
-    ```
+```bash
+# Navigate to the repository root
+cd ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide
 
-3.  **Verify Storage:**
-    ```bash
-    bash tests/03_storage_test.sh
-    ```
+# Step 1: Mount the HDD on rpi4-1
+# ⚠️ First verify device with: ansible -i ansible/hosts big -m shell -a 'lsblk'
+ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
+
+# Step 2: Install and configure Longhorn
+bash bootstrap/longhorn/install.sh
+
+# Step 3: Verify storage is working
+bash tests/03_storage_test.sh
+```
+
+**Expected Output from Verification Script:**
+
+```text
+=== STORAGE VERIFICATION SUITE ===
+Checking Longhorn System...
+✅ Longhorn System is Running
+Checking Disk Scheduling...
+✅ HDD Affinity Configured (Only CP stores data)
+Deploying Test PVC & Pod...
+persistentvolumeclaim/test-storage-verify created
+pod/test-storage-pod created
+Waiting for Pod to start (This verifies volume attach)...
+pod/test-storage-pod condition met
+✅ Storage Attached Successfully over Network
+pod "test-storage-pod" deleted
+persistentvolumeclaim "test-storage-verify" deleted
+=== PHASE 3 COMPLETE ===
+```
+
+**Access Longhorn UI:**
+
+```bash
+# Port-forward the Longhorn frontend
+kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
+
+# Access at http://localhost:8080
+```
+
+**Verify Storage Configuration:**
+
+```bash
+# Check node scheduling status
+kubectl get nodes.longhorn.io -n longhorn-system -o custom-columns=\
+'NAME:.metadata.name,SCHEDULING:.spec.allowScheduling,DISKS:.spec.disks'
+```
+
+```text
+NAME     SCHEDULING   DISKS
+rpi4-1   true         map[default-disk-...]
+rpi4-2   false        <none>
+rpi4-3   false        <none>
+rpi4-4   false        <none>
+```
+
+> ✅ **Checkpoint:** Storage operational, HDD-only affinity confirmed. Proceed to Phase 4: GitOps.
+
+---
 
 ## 8. Phase 4: GitOps & Observability
 

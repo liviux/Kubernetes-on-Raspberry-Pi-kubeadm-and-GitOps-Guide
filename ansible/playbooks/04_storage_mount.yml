@@ -1,11 +1,39 @@
 ---
+# =============================================================================
+# Phase 3a: Storage Mounting Playbook
+# =============================================================================
+# This playbook mounts the external USB HDD on the Control Plane node.
+# Longhorn will use this mount point as the sole storage location.
+#
+# Configuration:
+#   - Mount Point: /var/lib/longhorn (Longhorn default data path)
+#   - Filesystem: ext4 (best balance of performance and reliability)
+#   - Mount Options: defaults,noatime (reduces write operations)
+#
+# ⚠️  Before running, verify your HDD device:
+#     ansible -i ansible/hosts big -m shell -a 'lsblk'
+#
+#     For stability, consider using /dev/disk/by-id/... instead of /dev/sda1
+#     to avoid issues if USB enumeration order changes.
+#
+# Usage: ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
+# =============================================================================
+
 - name: Phase 3a - Mount HDD for Longhorn
   hosts: big
   become: true
   vars:
-    # CHANGE THIS to your actual HDD device identifier (lsblk)
-    # Best practice: Use /dev/disk/by-id/... to avoid USB enumeration changes
-    hdd_device: "/dev/sda1" 
+    # =========================================================================
+    # CHANGE THIS to your actual HDD device identifier
+    # =========================================================================
+    # Option 1: Standard device path (can change if USB enumeration changes)
+    hdd_device: "/dev/sda1"
+    #
+    # Option 2 (Recommended): Use by-id path for stability
+    # Find with: ls -la /dev/disk/by-id/ | grep usb
+    # hdd_device: "/dev/disk/by-id/usb-YOUR_DRIVE_ID-part1"
+    #
+    # Longhorn data path (must match bootstrap/longhorn/install.sh settings)
     mount_path: "/var/lib/longhorn"
   tasks:
     - name: Ensure Mount Directory Exists
@@ -14,12 +42,17 @@
         state: directory
         mode: '0755'
 
-    - name: Format HDD (ext4)
+    - name: Check if already formatted
+      command: blkid -o value -s TYPE {{ hdd_device }}
+      register: fs_type
+      changed_when: false
+      failed_when: false
+
+    - name: Format HDD (ext4) if not already formatted
       filesystem:
         fstype: ext4
         dev: "{{ hdd_device }}"
-        # force: no # Safety: set to yes only if you want to wipe the drive
-      ignore_errors: yes # Ignores error if already formatted
+      when: fs_type.stdout != "ext4"
 
     - name: Mount HDD
       mount:
@@ -34,5 +67,14 @@
       register: df_out
       changed_when: false
 
-    - debug:
-        msg: "Storage mounted: {{ df_out.stdout }}"
+    - name: Display Mount Status
+      debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════════
+          Storage mounted successfully!
+          {{ df_out.stdout }}
+          ════════════════════════════════════════════════════════════════════
+          Mount Point: {{ mount_path }}
+          Device: {{ hdd_device }}
+          Ready for Longhorn installation.
+          ════════════════════════════════════════════════════════════════════

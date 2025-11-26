@@ -1,10 +1,30 @@
 ---
+# =============================================================================
+# Phase 2: Cluster Bootstrap Playbook
+# =============================================================================
+# This playbook initializes the Kubernetes cluster with Cilium CNI.
+#
+# Phases:
+#   2a - Initialize Control Plane (kubeadm init, Cilium, generate join token)
+#   2b - Join Workers (kubeadm join on all small nodes)
+#   2c - Post-Config (apply hardware labels for scheduling affinity)
+#
+# Prerequisites:
+#   - Phase 1 playbooks completed (01_node_prep.yml, 02_k8s_binaries.yml)
+#   - All nodes reachable via SSH
+#   - Helm installed on control plane
+#
+# Usage: ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
+# =============================================================================
+
 - name: Phase 2a - Initialize Control Plane
   hosts: big
   become: true
   vars:
+    # Network CIDRs - must not overlap with your home network
     pod_network_cidr: "10.244.0.0/16"
     service_cidr: "10.96.0.0/12"
+    # Cilium version - check https://github.com/cilium/cilium/releases
     cilium_version: "1.18.4"
   tasks:
     - name: Create kubeadm config
@@ -28,7 +48,7 @@
             serviceSubnet: {{ service_cidr }}
             podSubnet: {{ pod_network_cidr }}
             dnsDomain: cluster.local
-          # Skip kube-proxy for Cilium
+          # Skip kube-proxy for Cilium (eBPF-based replacement)
           skipPhases:
             - addon/kube-proxy
 
@@ -78,6 +98,12 @@
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
 
+    - name: Wait for Cilium to be ready
+      shell: |
+        kubectl wait --for=condition=Ready pods -l k8s-app=cilium -n kube-system --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
     - name: Generate Join Token
       command: kubeadm token create --print-join-command
       register: join_command
@@ -89,6 +115,9 @@
         dest: ~/.kube/config
         flat: yes
 
+# =============================================================================
+# Phase 2b: Join Worker Nodes
+# =============================================================================
 - name: Phase 2b - Join Workers
   hosts: small
   become: true
@@ -102,10 +131,19 @@
       shell: "{{ hostvars[groups['big'][0]]['join_command'].stdout }}"
       when: not worker_conf.stat.exists
 
+# =============================================================================
+# Phase 2c: Apply Hardware Labels for Scheduling Affinity
+# =============================================================================
 - name: Phase 2c - Apply Labels & Post-Config
   hosts: big
   become: true
   tasks:
+    - name: Wait for all nodes to be ready
+      shell: |
+        kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
     - name: Label Control Plane (HDD/8GB)
       shell: |
         export KUBECONFIG=/etc/kubernetes/admin.conf
