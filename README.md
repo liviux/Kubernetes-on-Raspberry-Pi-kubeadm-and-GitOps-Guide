@@ -73,6 +73,9 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [12.3 Cluster Reset (The Nuclear Option)](#123-cluster-reset-the-nuclear-option)
     *   [12.4 Backup & Disaster Recovery](#124-backup--disaster-recovery)
     *   [12.5 Troubleshooting Cheatsheet](#125-troubleshooting-cheatsheet)
+    *   [12.6 Operational Runbooks](#126-operational-runbooks)
+    *   [12.7 Health Check Script](#127-health-check-script)
+    *   [12.8 Component Cleanup Commands](#128-component-cleanup-commands)
 
 ---
 
@@ -599,8 +602,9 @@ With constrained hardware, careful resource allocation is critical. Below is the
 |------|---------|---------|----------------|
 | **Cilium** | 1.18.x | CNI + Load Balancing | eBPF performance, replaces kube-proxy, L2 announcements |
 | **Hubble** | (embedded) | Network observability | Service maps, flow visualization |
-| **Tetragon** | (embedded) | Runtime security | eBPF-based syscall monitoring |
 | **Traefik** | 3.x | Gateway API implementation | Native Gateway API support, lightweight |
+
+> **Note:** Tetragon (Cilium's eBPF runtime security) is available but not enabled by default to conserve resources. Enable via Cilium Helm values if needed.
 
 **Gateway API vs Ingress:**
 ```text
@@ -624,20 +628,27 @@ With constrained hardware, careful resource allocation is critical. Below is the
 
 #### **C. Observability Stack**
 
+> **📦 kube-prometheus-stack Bundle:** Prometheus Operator, Grafana, kube-state-metrics, and AlertManager are deployed together via the `kube-prometheus-stack` Helm chart. Thanos is included but disabled by default.
+
 | Tool | Purpose | Depends On | Memory Impact |
 |------|---------|------------|---------------|
-| **Metrics Server** | Resource metrics (`kubectl top`, HPA, VPA) | - | Low (64MB) |
-| **Prometheus Operator** | Metrics collection & alerting | - | High (512MB-2GB) |
-| **Thanos** | Long-term metrics storage | MinIO | Medium (256MB) |
-| **Grafana** | Visualization dashboards | - | Low (128MB) |
+| **Metrics Server** | K8s API metrics (`kubectl top`, HPA, VPA) | - | Low (64MB) |
+| **Prometheus Operator** ¹ | Metrics collection & alerting | - | High (512MB-2GB) |
+| **Thanos** ² | Long-term metrics storage | MinIO | Medium (256MB) |
+| **Grafana** ¹ | Visualization dashboards | - | Low (128MB) |
 | **Fluent Bit** | Log collection (DaemonSet) | - | Low per node |
 | **Loki** | Log storage & querying | MinIO | Medium (256MB) |
 | **OpenTelemetry** | Trace collection | - | Low (128MB) |
 | **Jaeger** | Trace visualization | - | Medium (256MB) |
 | **OpenCost** | Cost estimation | Prometheus | Low (64MB) |
-| **Kube-state-metrics** | Kubernetes object metrics | - | Low (64MB) |
+| **Kube-state-metrics** ¹ ³ | Kubernetes object metrics | - | Low (64MB) |
 | **K8sGPT** | AI-powered diagnostics | - | Low (64MB) |
 | **Kubeshark** | API traffic analysis | - | High (512MB+) |
+
+> **Notes:**
+> - ¹ Bundled in `kube-prometheus-stack` Helm chart
+> - ² Disabled by default for RPi resource constraints; enable if you need long-term metrics retention
+> - ³ **kube-state-metrics** exposes Kubernetes object states (deployments, pods, nodes) as Prometheus metrics. **Metrics Server** provides real-time resource usage (CPU/memory) for `kubectl top` and autoscaling. They serve different purposes and are both needed.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -672,9 +683,11 @@ With constrained hardware, careful resource allocation is critical. Below is the
 | **Harbor** | Private container registry | Image pulls |
 | **OpenBao** | Secrets management (Vault fork) | Application runtime |
 | **Trivy Operator** | Vulnerability scanning | CI/CD + continuous |
-| **OWASP ZAP** | Dynamic security testing | CI/CD pipelines |
+| **OWASP ZAP** ⁴ | Dynamic security testing | CI/CD pipelines |
 | **Falco** | Runtime threat detection | Kernel syscalls |
 | **Kyverno** | Policy enforcement | API admission |
+
+> **Note:** ⁴ OWASP ZAP is run as an **Argo Workflow step** during CI/CD pipelines, not as a persistent deployment. It scans deployed applications for vulnerabilities (SQL injection, XSS, etc.) before promoting to production.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -695,7 +708,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 │  Layer 3: RUN TIME           ▼                                      │
 │  ┌─────────────────────────────────────────────────────────────┐   │
 │  │  Falco (Syscall Monitor) ──► Alert on shell in container    │   │
-│  │  Tetragon (eBPF)         ──► Block suspicious activity      │   │
+│  │  Cilium Network Policies ──► Block unauthorized traffic     │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -710,8 +723,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 | **Velero** | Backup & disaster recovery | Cluster state, volumes |
 | **Reloader** | Config change propagation | GitOps workflows |
 | **Descheduler** | Workload rebalancing | Resource optimization |
-| **Portainer** | Web UI for containers | Visual management |
-| **K9s** | Terminal UI | Real-time interaction |
+| **K9s** | Terminal UI | Real-time cluster interaction |
 
 **Storage Dependency Chain:**
 ```text
@@ -750,8 +762,10 @@ With constrained hardware, careful resource allocation is critical. Below is the
 |------|---------|-------|
 | **Skaffold** | Local development loop | Code → Build → Push → Deploy |
 | **K9s** | Terminal cluster UI | Real-time pod management |
-| **Portainer** | Web cluster UI | Visual container management |
 | **Hubble UI** | Network visualization | Service dependency maps |
+| **ArgoCD UI** | GitOps management | Application sync & status |
+| **Grafana** | Metrics & logs | Dashboards & log exploration |
+| **Longhorn UI** | Storage management | Volume health & snapshots |
 
 #### **G. Deployment Sequence**
 
@@ -814,16 +828,14 @@ This structure follows the **separation of concerns** principle:
 │   │                                    # PRE-GITOPS DEPENDENCIES (Manual Helm)
 │   │                                    # Components ArgoCD needs before it can run
 │   │                                    # ══════════════════════════════════════
-│   ├── cilium/                          # CNI: eBPF networking, L2 LoadBalancer pool
-│   │   └── install.sh                   # → helm install cilium (skip-kube-proxy mode)
+│   ├── argocd/                          # GitOps: ArgoCD server + controllers
+│   │   └── install.sh                   # → helm install argocd (HA disabled for RPi)
 │   ├── longhorn/                        # Storage: Block storage with HDD-only affinity
 │   │   └── install.sh                   # → helm install longhorn (replica=1, CP node)
 │   ├── metrics-server/                  # Metrics: Required for kubectl top, HPA, VPA
 │   │   └── install.sh                   # → helm install metrics-server (ARM64 flags)
-│   ├── traefik/                         # Gateway: Traefik + Gateway API CRDs
-│   │   └── install.sh                   # → kubectl apply CRDs, helm install traefik
-│   └── argocd/                          # GitOps: ArgoCD server + controllers
-│       └── install.sh                   # → helm install argocd (HA disabled for RPi)
+│   └── traefik/                         # Gateway: Traefik + Gateway API CRDs
+│       └── install.sh                   # → kubectl apply CRDs, helm install traefik
 │
 ├── gitops/                              # ══════════════════════════════════════
 │   │                                    # APPLICATIONS (Declarative GitOps)
@@ -837,8 +849,7 @@ This structure follows the **separation of concerns** principle:
 │   │   │                                # LAYER 1: Core cluster infrastructure
 │   │   │                                # sync-wave: -5 (deploys first)
 │   │   │                                # ──────────────────────────────────────
-│   │   ├── cert-manager.yaml            # TLS: Let's Encrypt automation, ClusterIssuers
-│   │   └── traefik.yaml                 # Gateway: HTTPRoute definitions (if GitOps-managed)
+│   │   └── cert-manager.yaml            # TLS: Let's Encrypt automation, ClusterIssuers
 │   │
 │   ├── storage/                         # ──────────────────────────────────────
 │   │   │                                # LAYER 2: Persistent storage layer
@@ -898,14 +909,12 @@ This structure follows the **separation of concerns** principle:
 │       │                                # LAYER 7: Operations & maintenance
 │       │                                # sync-wave: 3
 │       │                                # ──────────────────────────────────────
-│       ├── velero.yaml                  # Backup: Cluster state + PVCs → MinIO
-│       │                                #         Scheduled backups, disaster recovery
-│       ├── reloader.yaml                # GitOps: Watch ConfigMaps/Secrets, rolling restart
-│       │                                #         Annotations trigger pod recreation
 │       ├── descheduler.yaml             # Balance: Evict pods for better distribution
 │       │                                #         LowNodeUtilization, RemoveDuplicates
-│       └── portainer.yaml               # UI: Visual container management
-│                                        #     Web dashboard, HTTPRoute
+│       ├── reloader.yaml                # GitOps: Watch ConfigMaps/Secrets, rolling restart
+│       │                                #         Annotations trigger pod recreation
+│       └── velero.yaml                  # Backup: Cluster state + PVCs → MinIO
+│                                        #         Scheduled backups, disaster recovery
 │
 └── tests/                               # ══════════════════════════════════════
     │                                    # VALIDATION SCRIPTS
@@ -916,8 +925,28 @@ This structure follows the **separation of concerns** principle:
     ├── 03_storage_test.sh               # Phase 3: PVC create/delete, HDD mount
     ├── 04_security_test.sh              # Phase 5: Kyverno policies, Falco rules
     ├── 05_observability_test.sh         # Phase 6: Prometheus up, Loki query, Grafana
-    └── 06_cicd_test.sh                  # Phase 7: Workflow submit, Event trigger
+    ├── 06_cicd_test.sh                  # Phase 7: Workflow submit, Event trigger
+    └── 07_operations_test.sh            # Phase 8: Cluster health, backups, Day 2 ops
 ```
+
+### Test Script Quick Reference
+
+| Phase | Section | Test Script | What It Validates |
+|-------|---------|-------------|-------------------|
+| **Phase 1** | §5 Infrastructure | `tests/01_infra_test.sh` | Node count, RAM, swap off, kernel modules |
+| **Phase 2** | §6 Cluster Bootstrap | `tests/02_network_test.sh` | Cilium, L2 announcements, CoreDNS, Hubble |
+| **Phase 3** | §7 Storage | `tests/03_storage_test.sh` | Longhorn, PVC lifecycle, HDD mount |
+| **Phase 4** | §8 GitOps | - | Manual: Verify ArgoCD UI, app sync |
+| **Phase 5** | §9 Security | `tests/04_security_test.sh` | Kyverno policies, Falco, Trivy, Harbor |
+| **Phase 6** | §10 Observability | `tests/05_observability_test.sh` | Prometheus, Loki, Grafana, OpenTelemetry |
+| **Phase 7** | §11 CI/CD | `tests/06_cicd_test.sh` | Argo Workflows, Events, Image Updater |
+| **Phase 8** | §12 Day 2 Ops | `tests/07_operations_test.sh` | Health checks, Velero, Descheduler |
+
+> **💡 Usage:** Run the corresponding test script after completing each phase:
+> ```bash
+> chmod +x tests/*.sh
+> ./tests/01_infra_test.sh    # After completing Phase 1
+> ```
 
 ---
 
@@ -2701,13 +2730,22 @@ rpi4-4   82m          2%     501Mi           13%
 
 **Access Hubble UI:**
 
+Hubble UI provides a graphical visualization of your cluster's network flows and service dependencies.
+
 ```bash
 # Get the Hubble UI NodePort
 kubectl get svc hubble-ui -n kube-system
 
-# Access via any node IP, e.g.:
-# http://192.168.0.201:<NodePort>
+# The output will show the NodePort (e.g., 80:31234/TCP)
+# Access via any node IP: http://<NODE_IP>:<NodePort>
+# Example: http://192.168.0.201:31234
+
+# Alternative: Port-forward for local access
+kubectl port-forward -n kube-system svc/hubble-ui 12000:80
+# Then access: http://localhost:12000
 ```
+
+> **💡 Tip:** Hubble UI shows real-time network flows, service maps, and policy enforcement. It's invaluable for debugging network connectivity issues.
 
 > ✅ **Checkpoint:** All nodes Ready, Cilium running, Metrics available. Proceed to Phase 3: Storage.
 
@@ -3218,6 +3256,45 @@ rpi4-4   false        <none>
 
 We now move up the stack to the application layer. Instead of managing tools individually, we establish the **GitOps Loop**—a self-healing, declarative approach where Git is the single source of truth for cluster state.
 
+### Understanding nip.io (Wildcard DNS)
+
+Throughout this guide, you'll see URLs like `argocd.192.168.0.210.nip.io`. This uses **nip.io**, a free wildcard DNS service that eliminates the need for custom DNS configuration.
+
+```text
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         HOW nip.io WORKS                                   │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  Your Browser               nip.io DNS                 Your Cluster        │
+│  ───────────────            ──────────                 ─────────────       │
+│                                                                            │
+│  argocd.192.168.0.210.nip.io                                               │
+│       │                                                                    │
+│       └──► DNS Query ──► nip.io extracts IP ──► Returns 192.168.0.210     │
+│                          from hostname                                     │
+│       ◄── Connect to 192.168.0.210 ──────────────────────────────────────► │
+│                                                                            │
+│  The pattern: <anything>.<IP-with-dots>.nip.io → resolves to <IP>          │
+│                                                                            │
+│  Examples:                                                                 │
+│  ├── argocd.192.168.0.210.nip.io     → 192.168.0.210                      │
+│  ├── grafana.192.168.0.210.nip.io    → 192.168.0.210                      │
+│  └── my-app.10.0.0.5.nip.io          → 10.0.0.5                           │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why use nip.io?**
+
+| Benefit | Description |
+|---------|-------------|
+| **No DNS server needed** | Works out of the box, no `/etc/hosts` editing |
+| **Host-based routing** | Traefik routes requests based on hostname (argocd vs grafana) |
+| **TLS certificates** | Cert-manager can request certs for these hostnames |
+| **Works anywhere** | Any machine on the network can access services by hostname |
+
+> **💡 Alternative:** If you have a real domain, replace `192.168.0.210.nip.io` with your domain and configure DNS A records pointing to `192.168.0.210`.
+
 ### Phase 4 Architecture
 
 ```text
@@ -3279,29 +3356,49 @@ We now move up the stack to the application layer. Instead of managing tools ind
 
 ### The Bootstrap Order
 
-The components must be installed in a specific order due to dependencies:
+The components must be installed in a specific order due to dependencies. This includes prerequisites from Phase 3:
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     PHASE 4 BOOTSTRAP SEQUENCE                          │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Step 1          Step 2          Step 3          Step 4                 │
-│  ┌──────┐        ┌──────┐        ┌──────┐        ┌──────┐              │
-│  │Traefik│───────►│ArgoCD│───────►│Gitea │───────►│App of│              │
-│  │      │        │      │        │      │        │ Apps │              │
-│  └──────┘        └──────┘        └──────┘        └──────┘              │
-│     │               │               │               │                   │
-│     ▼               ▼               ▼               ▼                   │
-│  Provides        Provides        Provides        Deploys               │
-│  LoadBalancer    GitOps          Git Repo        Everything            │
-│  + Routing       Engine          Storage         Else                  │
-│                                                                         │
-│  ════════════════════════════════════════════════════════════════════  │
-│  Manual Bootstrap (Scripts)       │    Automated (ArgoCD Managed)      │
-│  ════════════════════════════════════════════════════════════════════  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                        COMPLETE BOOTSTRAP SEQUENCE                                │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                   │
+│  ══════════════════════════════════════════════════════════════════════════════  │
+│  PHASE 3 PREREQUISITES (Must be completed before Phase 4)                        │
+│  ══════════════════════════════════════════════════════════════════════════════  │
+│                                                                                   │
+│  Step 0a         Step 0b                                                          │
+│  ┌──────────┐    ┌──────────────┐                                                │
+│  │ Longhorn │────│Metrics Server│                                                │
+│  │(Storage) │    │   (API)      │                                                │
+│  └──────────┘    └──────────────┘                                                │
+│       │                │                                                          │
+│       ▼                ▼                                                          │
+│  PVCs for         kubectl top                                                     │
+│  ArgoCD/Gitea     HPA scaling                                                     │
+│                                                                                   │
+│  ══════════════════════════════════════════════════════════════════════════════  │
+│  PHASE 4 BOOTSTRAP (Run scripts in order)                                        │
+│  ══════════════════════════════════════════════════════════════════════════════  │
+│                                                                                   │
+│  Step 1          Step 2          Step 3          Step 4                           │
+│  ┌──────┐        ┌──────┐        ┌──────┐        ┌──────┐                        │
+│  │Traefik│───────►│ArgoCD│───────►│Gitea │───────►│App of│                        │
+│  │      │        │      │        │      │        │ Apps │                        │
+│  └──────┘        └──────┘        └──────┘        └──────┘                        │
+│     │               │               │               │                             │
+│     ▼               ▼               ▼               ▼                             │
+│  Provides        Provides        Provides        Deploys                         │
+│  LoadBalancer    GitOps          Git Repo        Everything                      │
+│  + Routing       Engine          Storage         Else                            │
+│                                                                                   │
+│  ══════════════════════════════════════════════════════════════════════════════  │
+│  Manual Bootstrap (Scripts)           │    Automated (ArgoCD Managed)            │
+│  ══════════════════════════════════════════════════════════════════════════════  │
+└───────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **📌 Summary:** `Longhorn` → `Metrics Server` → `Traefik` → `ArgoCD` → `Gitea` → `App of Apps`
 
 ### 8.1 Gateway API Bootstrap (Traefik)
 
@@ -10457,3 +10554,95 @@ Save as `tests/07_operations_test.sh` and run regularly:
 chmod +x tests/07_operations_test.sh
 ./tests/07_operations_test.sh
 ```
+
+### 12.8 Component Cleanup Commands
+
+Unlike the nuclear `05_reset_cluster.yml`, these commands allow **clean removal of individual components** without destroying the entire cluster.
+
+#### Cleanup via ArgoCD (Recommended)
+
+For components managed by ArgoCD, use the ArgoCD CLI or UI:
+
+```bash
+# Delete an ArgoCD Application (this cleans up all its resources)
+argocd app delete <app-name> --cascade
+
+# Examples:
+argocd app delete fluent-bit --cascade    # Remove Fluent Bit
+argocd app delete kubeshark --cascade     # Remove Kubeshark (frees up memory!)
+argocd app delete opencost --cascade      # Remove OpenCost
+
+# To prevent ArgoCD from redeploying, first disable auto-sync:
+argocd app set <app-name> --sync-policy none
+argocd app delete <app-name> --cascade
+```
+
+#### Cleanup via Helm (Bootstrap Components)
+
+For manually bootstrapped components:
+
+```bash
+# List all Helm releases
+helm list -A
+
+# Uninstall bootstrap components (reverse order!)
+helm uninstall argocd -n argocd          # ⚠️ This removes GitOps!
+helm uninstall traefik -n traefik
+helm uninstall metrics-server -n kube-system
+helm uninstall longhorn -n longhorn-system  # ⚠️ Data loss warning!
+
+# After Helm uninstall, clean up leftover resources
+kubectl delete namespace argocd
+kubectl delete namespace traefik
+kubectl delete namespace longhorn-system
+```
+
+#### Cleanup Specific Components
+
+| Component | Cleanup Commands |
+|-----------|------------------|
+| **Prometheus Stack** | `helm uninstall kube-prometheus-stack -n monitoring` |
+| **Loki Stack** | `helm uninstall loki-stack -n logging` |
+| **Velero** | `helm uninstall velero -n velero` |
+| **Harbor** | `helm uninstall harbor -n harbor` |
+| **Cert-Manager** | `helm uninstall cert-manager -n cert-manager; kubectl delete namespace cert-manager` |
+| **Kyverno** | `helm uninstall kyverno -n kyverno; kubectl delete -f https://github.com/kyverno/kyverno/releases/download/v1.11.0/install.yaml` |
+
+#### Cleanup CRDs
+
+Some components leave CRDs behind. Remove them manually:
+
+```bash
+# List CRDs by component prefix
+kubectl get crds | grep -E "cert-manager|kyverno|velero|longhorn|argo"
+
+# Delete CRDs (⚠️ This removes all resources of that type!)
+kubectl delete crds --selector=app.kubernetes.io/name=cert-manager
+kubectl delete crds --selector=app.kubernetes.io/name=kyverno
+
+# Or delete individual CRDs
+kubectl delete crd certificates.cert-manager.io
+kubectl delete crd clusterpolicies.kyverno.io
+```
+
+#### Cleanup PVCs and Data
+
+```bash
+# List all PVCs
+kubectl get pvc -A
+
+# Delete PVCs (⚠️ Data loss!)
+kubectl delete pvc <pvc-name> -n <namespace>
+
+# Force delete stuck PVCs
+kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}'
+kubectl delete pvc <pvc-name> -n <namespace> --force
+
+# Clean Longhorn volumes directly
+kubectl delete volumes.longhorn.io -n longhorn-system --all
+```
+
+> **⚠️ Important:** Before removing components, ensure:
+> 1. No other components depend on it
+> 2. Data is backed up (for storage components)
+> 3. ArgoCD auto-sync is disabled (to prevent redeployment)
