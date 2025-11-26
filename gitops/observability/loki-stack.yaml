@@ -1,8 +1,38 @@
+# =============================================================================
+# Loki Stack - Log Aggregation Pipeline
+# =============================================================================
+# Centralized logging using Promtail (collector) + Loki (storage/query).
+# Integrated with Grafana for visualization via Log Explorer.
+#
+# Components:
+#   - Loki: Log storage and query engine
+#   - Promtail: DaemonSet log collector on all nodes
+#
+# Storage:
+#   - Index: BoltDB Shipper (local + S3 sync)
+#   - Chunks: MinIO S3 (loki-data bucket)
+#
+# Query Examples:
+#   - All logs: {job="fluent-bit"}
+#   - By namespace: {namespace="argocd"}
+#   - By pod: {pod=~"prometheus.*"}
+#   - With filter: {namespace="monitoring"} |= "error"
+#
+# Access:
+#   - Grafana → Explore → Loki data source
+#
+# Dependencies: MinIO (storage/minio), Grafana (Phase 4)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: loki-stack
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,13 +41,30 @@ spec:
     targetRevision: 2.10.2
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Loki Server Configuration
+        # -------------------------------------------------------------------
         loki:
           enabled: true
+          
+          # Persistent storage for index
           persistence:
             enabled: true
             storageClassName: longhorn
             size: 10Gi
+          
+          # Resource limits (RPi optimized)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          
+          # Storage configuration
           config:
+            # Schema versioning
             schema_config:
               configs:
                 - from: 2024-04-01
@@ -27,20 +74,50 @@ spec:
                   index:
                     prefix: index_
                     period: 24h
+            
+            # S3 storage backend (MinIO)
             storage_config:
               aws:
                 s3: http://admin:password123@minio.storage.svc.cluster.local:9000/loki-data
                 s3forcepathstyle: true
+              boltdb_shipper:
+                active_index_directory: /data/loki/boltdb-shipper-active
+                cache_location: /data/loki/boltdb-shipper-cache
+                shared_store: s3
+            
+            # Limits to prevent OOM on RPi
+            limits_config:
+              enforce_metric_name: false
+              reject_old_samples: true
+              reject_old_samples_max_age: 168h  # 7 days
+              ingestion_rate_mb: 4
+              ingestion_burst_size_mb: 6
         
+        # -------------------------------------------------------------------
+        # Promtail Log Collector (DaemonSet)
+        # -------------------------------------------------------------------
         promtail:
           enabled: true
+          
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          
           config:
             clients:
               - url: http://loki-stack:3100/loki/api/v1/push
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

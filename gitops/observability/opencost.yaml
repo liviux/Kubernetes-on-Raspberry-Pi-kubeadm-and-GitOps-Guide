@@ -1,8 +1,34 @@
+# =============================================================================
+# OpenCost - Resource Cost Estimation
+# =============================================================================
+# Calculates resource consumption and estimates cloud-equivalent costs.
+# Useful for understanding which namespaces/pods consume the most resources.
+#
+# Features:
+#   - Per-namespace cost breakdown
+#   - Per-pod resource consumption
+#   - Efficiency metrics (idle vs used)
+#   - Prometheus integration
+#
+# Access: http://opencost.192.168.0.210.nip.io
+#
+# Cost Model (customizable):
+#   - CPU: $0.031/hour
+#   - Memory: $0.004/GB/hour
+#   - Storage: $0.0425/GB/month
+#
+# Dependencies: Prometheus (observability/kube-prometheus-stack)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: opencost
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,23 +37,72 @@ spec:
     targetRevision: 1.29.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # OpenCost Configuration
+        # -------------------------------------------------------------------
         opencost:
           exporter:
+            # Cluster identifier
             defaultClusterId: "rpi-cluster"
+            
+            # Resource limits
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+          
+          # Prometheus data source
           prometheus:
             external:
               url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+          
+          # UI resources
+          ui:
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Disable Legacy Ingress (we use Gateway API HTTPRoute)
+        # -------------------------------------------------------------------
         ingress:
-          enabled: true
-          className: traefik
-          hosts:
-            - opencost.192.168.0.210.nip.io
-          annotations:
-            traefik.ingress.kubernetes.io/router.entrypoints: web
+          enabled: false
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+---
+# =============================================================================
+# HTTPRoute for OpenCost UI (Gateway API)
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: opencost
+  namespace: monitoring
+spec:
+  parentRefs:
+    - name: main-gateway
+      namespace: traefik-system
+  hostnames:
+    - "opencost.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: opencost
+          port: 9090

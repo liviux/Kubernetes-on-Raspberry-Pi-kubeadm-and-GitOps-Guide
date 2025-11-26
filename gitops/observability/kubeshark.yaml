@@ -1,8 +1,33 @@
+# =============================================================================
+# Kubeshark - API Traffic Analyzer
+# =============================================================================
+# Real-time visibility into Kubernetes API traffic.
+# Like Wireshark, but for microservices communication.
+#
+# Features:
+#   - Protocol decoding (HTTP, gRPC, GraphQL, Kafka, Redis)
+#   - Real-time traffic capture
+#   - Service dependency visualization
+#   - Traffic replay for debugging
+#
+# Access: Port-forward to Kubeshark UI
+#   kubectl port-forward -n observability svc/kubeshark-hub 8899:80
+#   Open: http://localhost:8899
+#
+# WARNING: High memory usage during capture. Disable when not debugging.
+#
+# Dependencies: Longhorn (for persistent storage)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: kubeshark
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,13 +36,40 @@ spec:
     targetRevision: 52.3.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Traffic Capture Settings
+        # -------------------------------------------------------------------
         tap:
+          # Persistent storage for captured traffic
           persistentStorage: true
           storageClass: longhorn
           storageSize: 5Gi
+          
+          # Resource limits (RPi optimized)
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        
+        # -------------------------------------------------------------------
+        # Hub (UI Server)
+        # -------------------------------------------------------------------
+        hub:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: observability
+  
   syncPolicy:
     automated:
       prune: true

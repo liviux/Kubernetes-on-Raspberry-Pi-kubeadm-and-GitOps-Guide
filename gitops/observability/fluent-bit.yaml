@@ -1,8 +1,36 @@
+# =============================================================================
+# Fluent Bit - Lightweight Log Collector
+# =============================================================================
+# Alternative to Promtail with lower memory footprint.
+# Written in C, uses ~10MB RAM (vs 100MB for Fluentd).
+#
+# Features:
+#   - Stream Processing: Filter, parse, enrich logs in-flight
+#   - Multiple Outputs: Loki, Elasticsearch, S3, stdout
+#   - Kubernetes Enrichment: Adds pod, namespace, node labels
+#
+# Input (automatic):
+#   - /var/log/containers/*.log (all container logs)
+#   - Kubernetes metadata injection
+#
+# Output:
+#   - Loki via HTTP API
+#
+# Query in Grafana:
+#   {job="fluent-bit"} |= "error"
+#
+# Dependencies: Loki (observability/loki-stack)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: fluent-bit
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,17 +39,68 @@ spec:
     targetRevision: 0.44.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Resource Limits (very lightweight)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Pipeline Configuration
+        # -------------------------------------------------------------------
         config:
+          # Service settings
+          service: |
+            [SERVICE]
+                Flush         5
+                Log_Level     info
+                Daemon        off
+                Parsers_File  parsers.conf
+                HTTP_Server   On
+                HTTP_Listen   0.0.0.0
+                HTTP_Port     2020
+          
+          # Input: Container logs
+          inputs: |
+            [INPUT]
+                Name              tail
+                Path              /var/log/containers/*.log
+                Parser            cri
+                Tag               kube.*
+                Refresh_Interval  10
+                Mem_Buf_Limit     5MB
+                Skip_Long_Lines   On
+          
+          # Filter: Add Kubernetes metadata
+          filters: |
+            [FILTER]
+                Name                kubernetes
+                Match               kube.*
+                Kube_URL            https://kubernetes.default.svc:443
+                Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+                Merge_Log           On
+                K8S-Logging.Parser  On
+                K8S-Logging.Exclude On
+          
+          # Output: Send to Loki
           outputs: |
             [OUTPUT]
-                Name loki
-                Match *
-                Host loki-stack.monitoring.svc.cluster.local
-                Port 3100
+                Name   loki
+                Match  *
+                Host   loki-stack.monitoring.svc.cluster.local
+                Port   3100
                 Labels job=fluent-bit
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true

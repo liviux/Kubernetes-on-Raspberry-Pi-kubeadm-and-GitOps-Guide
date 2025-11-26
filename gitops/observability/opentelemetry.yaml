@@ -1,18 +1,67 @@
+# =============================================================================
+# OpenTelemetry Operator - Distributed Tracing Infrastructure
+# =============================================================================
+# Installs the OpenTelemetry Operator which enables:
+#   - Automatic sidecar injection for trace collection
+#   - OpenTelemetryCollector CRD for deploying collectors
+#   - Instrumentation CRD for auto-instrumentation
+#
+# Auto-Instrumentation Languages:
+#   - Java, Python, Node.js, .NET, Go
+#
+# Usage:
+#   1. Create an Instrumentation resource
+#   2. Add annotation to pods: instrumentation.opentelemetry.io/inject-java: "true"
+#   3. Traces automatically sent to Jaeger
+#
+# Dependencies: Jaeger (for trace storage/visualization)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: opentelemetry-operator
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
     chart: opentelemetry-operator
     targetRevision: 0.49.0
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Manager (Operator) Resources
+        # -------------------------------------------------------------------
+        manager:
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Admission Webhooks
+        # -------------------------------------------------------------------
+        admissionWebhooks:
+          certManager:
+            enabled: false  # We use self-signed certs
+          autoGenerateCert:
+            enabled: true
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

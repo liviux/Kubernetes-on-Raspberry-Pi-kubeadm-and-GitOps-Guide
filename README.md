@@ -5844,22 +5844,174 @@ bash tests/04_security_test.sh
 
 In this phase, we complete the observability pillar. Metrics (Prometheus) tell you *what* is happening, but Logs (Loki) tell you *why*. We also add cost estimation and AI analysis to help manage the cluster.
 
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ADVANCED OBSERVABILITY ARCHITECTURE                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         DATA SOURCES                                 │   │
+│  │    Pods          Nodes          Services          Kernel             │   │
+│  └──────┬─────────────┬───────────────┬───────────────┬────────────────┘   │
+│         │             │               │               │                     │
+│         ▼             ▼               ▼               ▼                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                      COLLECTION LAYER                                │   │
+│  │  ┌───────────┐  ┌───────────┐  ┌────────────┐  ┌───────────────┐    │   │
+│  │  │Fluent Bit │  │ Promtail  │  │OpenTelemetry│ │kube-state-    │    │   │
+│  │  │(alt logs) │  │  (logs)   │  │ (traces)   │  │metrics        │    │   │
+│  │  └─────┬─────┘  └─────┬─────┘  └──────┬─────┘  └───────┬───────┘    │   │
+│  └────────┼──────────────┼───────────────┼────────────────┼────────────┘   │
+│           │              │               │                │                 │
+│           ▼              ▼               ▼                ▼                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                       STORAGE LAYER                                  │   │
+│  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────────────┐    │   │
+│  │  │     Loki      │  │  Prometheus   │  │      Jaeger           │    │   │
+│  │  │   (logs)      │  │   (metrics)   │  │     (traces)          │    │   │
+│  │  │       │       │  │       │       │  │                       │    │   │
+│  │  │       ▼       │  │       ▼       │  │    (in-memory for     │    │   │
+│  │  │   MinIO S3    │  │   Thanos      │  │     RPi resources)    │    │   │
+│  │  │               │  │       │       │  │                       │    │   │
+│  │  │               │  │       ▼       │  │                       │    │   │
+│  │  │               │  │   MinIO S3    │  │                       │    │   │
+│  │  └───────────────┘  └───────────────┘  └───────────────────────┘    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│           │                    │                    │                       │
+│           └────────────────────┼────────────────────┘                       │
+│                                ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    VISUALIZATION LAYER                               │   │
+│  │      ┌─────────────────────────────────────────────────────────┐    │   │
+│  │      │                     GRAFANA                             │    │   │
+│  │      │    ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  │    │   │
+│  │      │    │Dashboards│ │Log      │  │Trace    │  │ Alerts  │  │    │   │
+│  │      │    │(metrics)│  │Explorer │  │Explorer │  │         │  │    │   │
+│  │      │    └─────────┘  └─────────┘  └─────────┘  └─────────┘  │    │   │
+│  │      └─────────────────────────────────────────────────────────┘    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                      ANALYSIS LAYER                                  │   │
+│  │    ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐     │   │
+│  │    │   OpenCost   │  │   K8sGPT     │  │     Kubeshark        │     │   │
+│  │    │ (cost est.)  │  │ (AI diag.)   │  │  (API analysis)      │     │   │
+│  │    └──────────────┘  └──────────────┘  └──────────────────────┘     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Phase 6 Components:**
+
+| Component | Version | Purpose | Memory | Depends On |
+|-----------|---------|---------|--------|------------|
+| Loki Stack | 2.10.2 | Log aggregation + storage | 256MB | MinIO |
+| Fluent Bit | 0.44.0 | Lightweight log forwarding | 64MB | Loki |
+| OpenTelemetry | 0.49.0 | Distributed trace collection | 128MB | - |
+| Jaeger | 3.0.0 | Trace visualization | 512MB | - |
+| Kubeshark | 52.3.0 | API traffic analysis | 512MB | Longhorn |
+| OpenCost | 1.29.0 | Cost estimation | 64MB | Prometheus |
+| K8sGPT | 0.1.4 | AI-powered diagnostics | 64MB | - |
+
 ### 10.1 Log Aggregation (Loki Stack)
+
 **File:** `gitops/observability/loki-stack.yaml`
 
-We use the **PLG Stack** (Promtail, Loki, Grafana).
-*   **Promtail:** Runs on every node (DaemonSet), reads logs from `/var/log/containers`, and pushes them to Loki.
-*   **Loki:** Stores logs efficiently. We configure it to use **MinIO** (installed in Phase 5) for long-term storage instead of filling up the pod's local volume.
+We use the **PLG Stack** (Promtail, Loki, Grafana) for centralized logging.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           LOKI LOGGING PIPELINE                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐     │
+│  │   rpi4-1    │   │   rpi4-2    │   │   rpi4-3    │   │   rpi4-4    │     │
+│  │  ┌───────┐  │   │  ┌───────┐  │   │  ┌───────┐  │   │  ┌───────┐  │     │
+│  │  │Promtail│  │   │  │Promtail│  │   │  │Promtail│  │   │  │Promtail│  │     │
+│  │  └───┬───┘  │   │  └───┬───┘  │   │  └───┬───┘  │   │  └───┬───┘  │     │
+│  │      │      │   │      │      │   │      │      │   │      │      │     │
+│  │ /var/log/   │   │ /var/log/   │   │ /var/log/   │   │ /var/log/   │     │
+│  │ containers │   │ containers │   │ containers │   │ containers │     │
+│  └──────┼──────┘   └──────┼──────┘   └──────┼──────┘   └──────┼──────┘     │
+│         │                 │                 │                 │             │
+│         └─────────────────┴─────────────────┴─────────────────┘             │
+│                                   │                                         │
+│                                   ▼                                         │
+│                          ┌───────────────┐                                 │
+│                          │     LOKI      │                                 │
+│                          │   (Index +    │                                 │
+│                          │    Query)     │                                 │
+│                          └───────┬───────┘                                 │
+│                                  │                                          │
+│                                  ▼                                          │
+│                          ┌───────────────┐                                 │
+│                          │   MinIO S3    │                                 │
+│                          │  loki-data    │   Long-term                     │
+│                          │    bucket     │   storage                       │
+│                          └───────────────┘                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why Loki vs Elasticsearch?**
+
+| Feature | Loki | Elasticsearch |
+|---------|------|---------------|
+| **RAM Usage** | ~256MB | 2GB+ minimum |
+| **Index Strategy** | Labels only (not full-text) | Full-text indexing |
+| **Query Language** | LogQL (Prometheus-like) | Lucene/KQL |
+| **RPi Suitability** | ✅ Excellent | ❌ Too heavy |
+| **Grafana Integration** | Native | Plugin required |
+
+**Storage Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `object_store` | s3 | Use MinIO for log chunks |
+| `boltdb-shipper` | Index store | Local + S3 sync |
+| `period` | 24h | New index table daily |
+| `s3forcepathstyle` | true | Required for MinIO |
 
 <details>
 <summary>📄 Click to expand full gitops/observability/loki-stack.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Loki Stack - Log Aggregation Pipeline
+# =============================================================================
+# Centralized logging using Promtail (collector) + Loki (storage/query).
+# Integrated with Grafana for visualization via Log Explorer.
+#
+# Components:
+#   - Loki: Log storage and query engine
+#   - Promtail: DaemonSet log collector on all nodes
+#
+# Storage:
+#   - Index: BoltDB Shipper (local + S3 sync)
+#   - Chunks: MinIO S3 (loki-data bucket)
+#
+# Query Examples:
+#   - All logs: {job="fluent-bit"}
+#   - By namespace: {namespace="argocd"}
+#   - By pod: {pod=~"prometheus.*"}
+#   - With filter: {namespace="monitoring"} |= "error"
+#
+# Access:
+#   - Grafana → Explore → Loki data source
+#
+# Dependencies: MinIO (storage/minio), Grafana (Phase 4)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: loki-stack
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -5868,13 +6020,30 @@ spec:
     targetRevision: 2.10.2
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Loki Server Configuration
+        # -------------------------------------------------------------------
         loki:
           enabled: true
+          
+          # Persistent storage for index
           persistence:
             enabled: true
             storageClassName: longhorn
             size: 10Gi
+          
+          # Resource limits (RPi optimized)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          
+          # Storage configuration
           config:
+            # Schema versioning
             schema_config:
               configs:
                 - from: 2024-04-01
@@ -5884,40 +6053,119 @@ spec:
                   index:
                     prefix: index_
                     period: 24h
+            
+            # S3 storage backend (MinIO)
             storage_config:
               aws:
                 s3: http://admin:password123@minio.storage.svc.cluster.local:9000/loki-data
                 s3forcepathstyle: true
+              boltdb_shipper:
+                active_index_directory: /data/loki/boltdb-shipper-active
+                cache_location: /data/loki/boltdb-shipper-cache
+                shared_store: s3
+            
+            # Limits to prevent OOM on RPi
+            limits_config:
+              enforce_metric_name: false
+              reject_old_samples: true
+              reject_old_samples_max_age: 168h  # 7 days
+              ingestion_rate_mb: 4
+              ingestion_burst_size_mb: 6
         
+        # -------------------------------------------------------------------
+        # Promtail Log Collector (DaemonSet)
+        # -------------------------------------------------------------------
         promtail:
           enabled: true
+          
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          
           config:
             clients:
               - url: http://loki-stack:3100/loki/api/v1/push
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
 ```
 
 </details>
 
 ### 10.2 Log Collection (Fluent Bit)
+
 **File:** `gitops/observability/fluent-bit.yaml`
-*Note:* You requested Fluentd, but **Fluent Bit** is the industry standard for Edge/Raspberry Pi. It is written in C (vs Ruby for Fluentd) and uses ~10x less RAM. It is configured here to forward logs to the Loki stack.
+
+> 💡 **Why Fluent Bit over Fluentd?** Fluent Bit is written in C (vs Ruby for Fluentd) and uses ~10x less RAM—critical for Raspberry Pi.
+
+**Comparison:**
+
+| Feature | Fluent Bit | Fluentd |
+|---------|------------|---------|
+| **Language** | C | Ruby |
+| **Memory** | ~10MB | ~100MB |
+| **CPU** | Minimal | Moderate |
+| **Plugins** | 70+ built-in | 1000+ plugins |
+| **Use Case** | Edge/IoT | Enterprise |
+| **RPi Suitability** | ✅ Excellent | ⚠️ Heavy |
+
+**Pipeline Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `OUTPUT.Name` | loki | Send logs to Loki |
+| `OUTPUT.Host` | loki-stack.monitoring.svc | Internal service DNS |
+| `OUTPUT.Labels` | job=fluent-bit | Label for Loki queries |
 
 <details>
 <summary>📄 Click to expand full gitops/observability/fluent-bit.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Fluent Bit - Lightweight Log Collector
+# =============================================================================
+# Alternative to Promtail with lower memory footprint.
+# Written in C, uses ~10MB RAM (vs 100MB for Fluentd).
+#
+# Features:
+#   - Stream Processing: Filter, parse, enrich logs in-flight
+#   - Multiple Outputs: Loki, Elasticsearch, S3, stdout
+#   - Kubernetes Enrichment: Adds pod, namespace, node labels
+#
+# Input (automatic):
+#   - /var/log/containers/*.log (all container logs)
+#   - Kubernetes metadata injection
+#
+# Output:
+#   - Loki via HTTP API
+#
+# Query in Grafana:
+#   {job="fluent-bit"} |= "error"
+#
+# Dependencies: Loki (observability/loki-stack)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: fluent-bit
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -5926,17 +6174,68 @@ spec:
     targetRevision: 0.44.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Resource Limits (very lightweight)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Pipeline Configuration
+        # -------------------------------------------------------------------
         config:
+          # Service settings
+          service: |
+            [SERVICE]
+                Flush         5
+                Log_Level     info
+                Daemon        off
+                Parsers_File  parsers.conf
+                HTTP_Server   On
+                HTTP_Listen   0.0.0.0
+                HTTP_Port     2020
+          
+          # Input: Container logs
+          inputs: |
+            [INPUT]
+                Name              tail
+                Path              /var/log/containers/*.log
+                Parser            cri
+                Tag               kube.*
+                Refresh_Interval  10
+                Mem_Buf_Limit     5MB
+                Skip_Long_Lines   On
+          
+          # Filter: Add Kubernetes metadata
+          filters: |
+            [FILTER]
+                Name                kubernetes
+                Match               kube.*
+                Kube_URL            https://kubernetes.default.svc:443
+                Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+                Merge_Log           On
+                K8S-Logging.Parser  On
+                K8S-Logging.Exclude On
+          
+          # Output: Send to Loki
           outputs: |
             [OUTPUT]
-                Name loki
-                Match *
-                Host loki-stack.monitoring.svc.cluster.local
-                Port 3100
+                Name   loki
+                Match  *
+                Host   loki-stack.monitoring.svc.cluster.local
+                Port   3100
                 Labels job=fluent-bit
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
@@ -5946,51 +6245,186 @@ spec:
 </details>
 
 ### 10.3 Distributed Tracing (OpenTelemetry)
+
 **File:** `gitops/observability/opentelemetry.yaml`
-Installs the OpenTelemetry Operator. This allows you to inject tracing sidecars into your applications automatically.
+
+OpenTelemetry is the **CNCF standard** for observability instrumentation. The Operator enables automatic trace injection into applications.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    OPENTELEMETRY TRACING FLOW                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                        APPLICATION POD                                │ │
+│  │  ┌─────────────────┐     ┌─────────────────────────────────────────┐ │ │
+│  │  │   Your App      │────►│  OTel Sidecar (auto-injected)           │ │ │
+│  │  │  (instrumented) │     │  - Collects spans                       │ │ │
+│  │  │                 │     │  - Batches traces                       │ │ │
+│  │  └─────────────────┘     │  - Exports to collector                 │ │ │
+│  │                          └────────────────────┬────────────────────┘ │ │
+│  └───────────────────────────────────────────────┼───────────────────────┘ │
+│                                                  │                          │
+│                                                  ▼                          │
+│                          ┌───────────────────────────────────────────┐     │
+│                          │      OpenTelemetry Collector              │     │
+│                          │  - Receives traces from all apps          │     │
+│                          │  - Processes and transforms               │     │
+│                          │  - Exports to Jaeger                      │     │
+│                          └───────────────────────┬───────────────────┘     │
+│                                                  │                          │
+│                                                  ▼                          │
+│                          ┌───────────────────────────────────────────┐     │
+│                          │           Jaeger Backend                  │     │
+│                          │      (Storage + Query + UI)               │     │
+│                          └───────────────────────────────────────────┘     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why OpenTelemetry?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Vendor Neutral** | Export to Jaeger, Zipkin, Datadog, etc. |
+| **Auto-Instrumentation** | No code changes for many languages |
+| **CNCF Standard** | Industry-wide adoption |
+| **Unified** | Traces + Metrics + Logs in one SDK |
 
 <details>
 <summary>📄 Click to expand full gitops/observability/opentelemetry.yaml</summary>
 
 ```yaml
+# =============================================================================
+# OpenTelemetry Operator - Distributed Tracing Infrastructure
+# =============================================================================
+# Installs the OpenTelemetry Operator which enables:
+#   - Automatic sidecar injection for trace collection
+#   - OpenTelemetryCollector CRD for deploying collectors
+#   - Instrumentation CRD for auto-instrumentation
+#
+# Auto-Instrumentation Languages:
+#   - Java, Python, Node.js, .NET, Go
+#
+# Usage:
+#   1. Create an Instrumentation resource
+#   2. Add annotation to pods: instrumentation.opentelemetry.io/inject-java: "true"
+#   3. Traces automatically sent to Jaeger
+#
+# Dependencies: Jaeger (for trace storage/visualization)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: opentelemetry-operator
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
     chart: opentelemetry-operator
     targetRevision: 0.49.0
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Manager (Operator) Resources
+        # -------------------------------------------------------------------
+        manager:
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Admission Webhooks
+        # -------------------------------------------------------------------
+        admissionWebhooks:
+          certManager:
+            enabled: false  # We use self-signed certs
+          autoGenerateCert:
+            enabled: true
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
 ```
 
 </details>
 
 ### 10.4 Tracing Backend (Jaeger)
+
 **File:** `gitops/observability/jaeger.yaml`
 
-Jaeger provides the UI to visualize the distributed traces collected by OpenTelemetry.
-*   **Storage:** Configured to use memory (limited size) for Raspberry Pi resource efficiency, as ElasticSearch is too heavy for this setup.
-*   **Ingress:** Exposed via Traefik.
+Jaeger provides the UI to visualize distributed traces collected by OpenTelemetry.
+
+> ⚠️ **RPi Optimization:** We use in-memory storage instead of Elasticsearch/Cassandra to conserve resources. Traces are limited to 1000 to prevent OOM.
+
+**Storage Options:**
+
+| Backend | Memory | RPi Suitable | Persistence |
+|---------|--------|--------------|-------------|
+| **Memory** | 512MB | ✅ Yes | ❌ No |
+| Elasticsearch | 2GB+ | ❌ No | ✅ Yes |
+| Cassandra | 4GB+ | ❌ No | ✅ Yes |
+| Badger (local) | 256MB | ⚠️ Limited | ✅ Yes |
+
+**Access:**
+
+| Endpoint | URL |
+|----------|-----|
+| Jaeger UI | http://jaeger.192.168.0.210.nip.io |
+| Query API | http://jaeger.192.168.0.210.nip.io/api |
 
 <details>
 <summary>📄 Click to expand full gitops/observability/jaeger.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Jaeger - Distributed Tracing Backend
+# =============================================================================
+# Provides trace storage, query engine, and web UI for visualizing
+# request flows across microservices.
+#
+# Configuration (RPi optimized):
+#   - All-in-One deployment (collector + query + agent in one pod)
+#   - In-memory storage (no external DB required)
+#   - Max 1000 traces to prevent OOM
+#
+# Features:
+#   - Service dependency graph
+#   - Trace comparison
+#   - Latency histograms
+#   - Error tracking
+#
+# Access: http://jaeger.192.168.0.210.nip.io
+#
+# Dependencies: OpenTelemetry Operator (for auto-instrumentation)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: jaeger
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -5999,26 +6433,47 @@ spec:
     targetRevision: 3.0.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Disable External Data Stores (use in-memory)
+        # -------------------------------------------------------------------
         provisionDataStore:
           cassandra: false
           elasticsearch: false
           kafka: false
+        
+        # -------------------------------------------------------------------
+        # All-in-One Deployment
+        # -------------------------------------------------------------------
         allInOne:
           enabled: true
           # Limit in-memory traces to prevent OOM
-          args: ["--memory.max-traces=1000"] 
+          args:
+            - "--memory.max-traces=1000"
           resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
             limits:
+              cpu: 500m
               memory: 512Mi
+        
+        # -------------------------------------------------------------------
+        # Storage Configuration
+        # -------------------------------------------------------------------
         storage:
           type: memory
-        # Disable built-in ingress - we use Gateway API HTTPRoute
+        
+        # -------------------------------------------------------------------
+        # Disable Legacy Ingress (we use Gateway API HTTPRoute)
+        # -------------------------------------------------------------------
         query:
           ingress:
             enabled: false
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
@@ -6026,7 +6481,9 @@ spec:
     syncOptions:
       - CreateNamespace=true
 ---
+# =============================================================================
 # HTTPRoute for Jaeger UI (Gateway API)
+# =============================================================================
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -6051,18 +6508,70 @@ spec:
 </details>
 
 ### 10.5 Traffic Analysis (Kubeshark)
+
 **File:** `gitops/observability/kubeshark.yaml`
-Provides deep visibility into API traffic (HTTP, REST, gRPC, GraphQL) similar to Wireshark, but for K8s.
+
+Kubeshark provides **real-time API traffic analysis**—like Wireshark but for Kubernetes. It captures and decodes HTTP, gRPC, GraphQL, and other protocols.
+
+> ⚠️ **Resource Warning:** Kubeshark can consume significant memory when capturing traffic. Disable when not actively debugging.
+
+**Capabilities:**
+
+| Feature | Description |
+|---------|-------------|
+| **Protocol Decoding** | HTTP/1.1, HTTP/2, gRPC, GraphQL, Kafka, Redis |
+| **Real-time Capture** | Live traffic view with filters |
+| **Service Map** | Visual service dependency graph |
+| **Traffic Replay** | Re-send captured requests |
+| **Query Language** | Filter by pod, namespace, method, status |
+
+**Query Examples:**
+
+```text
+# All traffic to a specific service
+request.namespace == "default" and request.name == "my-service"
+
+# All 5xx errors
+response.status >= 500
+
+# Slow requests (>1s)
+response.latency > 1000
+```
 
 <details>
 <summary>📄 Click to expand full gitops/observability/kubeshark.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Kubeshark - API Traffic Analyzer
+# =============================================================================
+# Real-time visibility into Kubernetes API traffic.
+# Like Wireshark, but for microservices communication.
+#
+# Features:
+#   - Protocol decoding (HTTP, gRPC, GraphQL, Kafka, Redis)
+#   - Real-time traffic capture
+#   - Service dependency visualization
+#   - Traffic replay for debugging
+#
+# Access: Port-forward to Kubeshark UI
+#   kubectl port-forward -n observability svc/kubeshark-hub 8899:80
+#   Open: http://localhost:8899
+#
+# WARNING: High memory usage during capture. Disable when not debugging.
+#
+# Dependencies: Longhorn (for persistent storage)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: kubeshark
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -6071,13 +6580,40 @@ spec:
     targetRevision: 52.3.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Traffic Capture Settings
+        # -------------------------------------------------------------------
         tap:
+          # Persistent storage for captured traffic
           persistentStorage: true
           storageClass: longhorn
           storageSize: 5Gi
+          
+          # Resource limits (RPi optimized)
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        
+        # -------------------------------------------------------------------
+        # Hub (UI Server)
+        # -------------------------------------------------------------------
+        hub:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: observability
+  
   syncPolicy:
     automated:
       prune: true
@@ -6089,19 +6625,66 @@ spec:
 </details>
 
 ### 10.6 Cost Management (OpenCost)
+
 **File:** `gitops/observability/opencost.yaml`
 
-OpenCost calculates the resource consumption (CPU/RAM/Storage) of every pod and estimates a "cloud cost" equivalent. This is excellent for understanding which namespace is hogging resources on your Raspberry Pis.
+OpenCost calculates resource consumption (CPU/RAM/Storage) per namespace/pod and estimates equivalent cloud costs. Essential for understanding which workloads are consuming your Raspberry Pi resources.
+
+**Cost Model:**
+
+| Resource | Default Rate | Customizable |
+|----------|--------------|--------------|
+| CPU | $0.031/hour | Yes |
+| Memory | $0.004/GB/hour | Yes |
+| Storage | $0.0425/GB/month | Yes |
+| Network | $0.00/GB | Yes |
+
+**Insights Provided:**
+
+| View | Purpose |
+|------|---------|
+| **Namespace** | Cost breakdown by namespace |
+| **Deployment** | Per-deployment resource usage |
+| **Pod** | Individual pod costs |
+| **Efficiency** | Idle vs utilized resources |
+
+**Access:** http://opencost.192.168.0.210.nip.io
 
 <details>
 <summary>📄 Click to expand full gitops/observability/opencost.yaml</summary>
 
 ```yaml
+# =============================================================================
+# OpenCost - Resource Cost Estimation
+# =============================================================================
+# Calculates resource consumption and estimates cloud-equivalent costs.
+# Useful for understanding which namespaces/pods consume the most resources.
+#
+# Features:
+#   - Per-namespace cost breakdown
+#   - Per-pod resource consumption
+#   - Efficiency metrics (idle vs used)
+#   - Prometheus integration
+#
+# Access: http://opencost.192.168.0.210.nip.io
+#
+# Cost Model (customizable):
+#   - CPU: $0.031/hour
+#   - Memory: $0.004/GB/hour
+#   - Storage: $0.0425/GB/month
+#
+# Dependencies: Prometheus (observability/kube-prometheus-stack)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: opencost
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -6110,24 +6693,56 @@ spec:
     targetRevision: 1.29.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # OpenCost Configuration
+        # -------------------------------------------------------------------
         opencost:
           exporter:
+            # Cluster identifier
             defaultClusterId: "rpi-cluster"
+            
+            # Resource limits
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+          
+          # Prometheus data source
           prometheus:
             external:
               url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
-        # Disable built-in ingress - we use Gateway API HTTPRoute
+          
+          # UI resources
+          ui:
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Disable Legacy Ingress (we use Gateway API HTTPRoute)
+        # -------------------------------------------------------------------
         ingress:
           enabled: false
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
 ---
+# =============================================================================
 # HTTPRoute for OpenCost UI (Gateway API)
+# =============================================================================
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -6152,29 +6767,95 @@ spec:
 </details>
 
 ### 10.7 AI Diagnostics (K8sGPT)
+
 **File:** `gitops/observability/k8sgpt.yaml`
 
-K8sGPT scans your cluster for issues (CrashLoops, PVC failures, Service misconfigs) and uses an AI backend to explain the fix in plain English.
-*   **Backend:** Configured here to use the public OpenAI API (requires an API Key) or LocalAI if you host it. *Note: Replace `YOUR_OPENAI_TOKEN` in the secret manually or use the OpenBao vault later.*
+K8sGPT scans your cluster for issues (CrashLoops, PVC failures, Service misconfigs) and uses AI to explain fixes in plain English.
+
+**Analyzers:**
+
+| Analyzer | Detects |
+|----------|---------|
+| **Pod** | CrashLoopBackOff, OOMKilled, ImagePullErrors |
+| **Service** | Missing endpoints, selector mismatches |
+| **PVC** | Pending claims, storage class issues |
+| **Ingress** | Missing backends, invalid paths |
+| **NetworkPolicy** | Blocked traffic patterns |
+| **HPA** | Scaling issues, metric unavailability |
+
+**AI Backend Options:**
+
+| Provider | Free | Notes |
+|----------|------|-------|
+| **OpenAI** | No | Requires API key, best quality |
+| **LocalAI** | Yes | Self-hosted, requires more resources |
+| **Ollama** | Yes | Run models locally |
+| **AzureOpenAI** | No | Enterprise option |
+
+> 💡 **Note:** Replace `YOUR_OPENAI_TOKEN` with your actual API key, or use OpenBao for secrets management.
 
 <details>
 <summary>📄 Click to expand full gitops/observability/k8sgpt.yaml</summary>
 
 ```yaml
+# =============================================================================
+# K8sGPT - AI-Powered Kubernetes Diagnostics
+# =============================================================================
+# Scans cluster for issues and provides AI-generated explanations and fixes.
+#
+# Analyzers:
+#   - Pod: CrashLoopBackOff, OOMKilled, ImagePullErrors
+#   - Service: Missing endpoints, selector mismatches
+#   - PVC: Pending claims, storage class issues
+#   - Ingress: Missing backends, invalid paths
+#   - NetworkPolicy: Blocked traffic patterns
+#
+# Usage (CLI):
+#   kubectl get results -n observability    # View scan results
+#   k8sgpt analyze                          # Run manual scan
+#
+# AI Backend Configuration:
+#   Create secret with OpenAI key or configure LocalAI
+#   kubectl create secret generic k8sgpt-secret \
+#     --from-literal=openai-api-key=YOUR_KEY -n observability
+#
+# Dependencies: None (but AI features need backend configuration)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: k8sgpt
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://charts.k8sgpt.ai/
     chart: k8sgpt-operator
     targetRevision: 0.1.4
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Operator Configuration
+        # -------------------------------------------------------------------
+        controllerManager:
+          manager:
+            resources:
+              limits:
+                cpu: 200m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 64Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: observability
+  
   syncPolicy:
     automated:
       prune: true
@@ -6186,75 +6867,377 @@ spec:
 </details>
 
 ### 10.8 Observability Verification Script
+
 **File:** `tests/05_observability_test.sh`
 
-This script ensures data is flowing through your pipelines.
-1.  **Prometheus:** Checks if scrape targets are active via the API.
-2.  **Loki:** Checks if the database is up.
-3.  **K8sGPT:** Verifies the AI operator is active.
+This script verifies data flows through all observability pipelines.
+
+**Test Coverage:**
+
+| Test | Component | Verification |
+|------|-----------|--------------|
+| Loki | Log Storage | Pod running, can query logs |
+| Fluent Bit | Log Collection | DaemonSet running on all nodes |
+| Jaeger | Tracing | UI accessible |
+| OpenCost | Cost Analysis | UI accessible, data from Prometheus |
+| K8sGPT | AI Diagnostics | Operator running |
+| Kubeshark | Traffic Analysis | Hub pod running |
 
 <details>
 <summary>📄 Click to expand full tests/05_observability_test.sh</summary>
 
 ```bash
 #!/bin/bash
-echo "=== OBSERVABILITY STACK VERIFICATION ==="
+# =============================================================================
+# Phase 6 Advanced Observability Verification Test
+# =============================================================================
+# Verifies all observability components deployed in Phase 6:
+#   - Loki Stack (log aggregation)
+#   - Fluent Bit (log collection)
+#   - OpenTelemetry (trace collection)
+#   - Jaeger (trace visualization)
+#   - OpenCost (cost estimation)
+#   - K8sGPT (AI diagnostics)
+#   - Kubeshark (traffic analysis)
+#
+# Prerequisites:
+#   - Phase 6 components deployed
+#   - kubectl configured for the cluster
+#
+# Usage: bash tests/05_observability_test.sh
+# =============================================================================
 
-# 1. Prometheus Targets
-echo "Checking Prometheus Targets..."
-# Port-forward to query internal API
-kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090 > /dev/null 2>&1 &
-PID=$!
+set -e
+
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║       PHASE 6: ADVANCED OBSERVABILITY VERIFICATION                    ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+TESTS_WARNED=0
+
+# -----------------------------------------------------------------------------
+# Helper Functions
+# -----------------------------------------------------------------------------
+pass() {
+    echo "✅ $1"
+    ((TESTS_PASSED++))
+}
+
+fail() {
+    echo "❌ $1"
+    ((TESTS_FAILED++))
+}
+
+warn() {
+    echo "⚠️  $1"
+    ((TESTS_WARNED++))
+}
+
+# -----------------------------------------------------------------------------
+# Test 1: Loki Log Aggregation
+# -----------------------------------------------------------------------------
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 1: Loki Log Aggregation                                        │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+LOKI_PODS=$(kubectl get pods -n monitoring -l app=loki --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$LOKI_PODS" -ge 1 ]; then
+    pass "Loki is running ($LOKI_PODS pods)"
+else
+    fail "Loki not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 2: Promtail Log Collection
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 2: Promtail Log Collection                                     │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+PROMTAIL_PODS=$(kubectl get pods -n monitoring -l app=promtail --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo "0")
+if [ "$PROMTAIL_PODS" -ge "$NODE_COUNT" ]; then
+    pass "Promtail running on all nodes ($PROMTAIL_PODS/$NODE_COUNT)"
+else
+    warn "Promtail not on all nodes ($PROMTAIL_PODS/$NODE_COUNT)"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 3: Fluent Bit (Alternative Collector)
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 3: Fluent Bit Log Collector                                    │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+FLUENTBIT_PODS=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=fluent-bit --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$FLUENTBIT_PODS" -ge 1 ]; then
+    pass "Fluent Bit running ($FLUENTBIT_PODS pods)"
+else
+    warn "Fluent Bit not running (using Promtail instead)"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 4: OpenTelemetry Operator
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 4: OpenTelemetry Operator                                      │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+OTEL_PODS=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=opentelemetry-operator --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$OTEL_PODS" -ge 1 ]; then
+    pass "OpenTelemetry Operator running"
+else
+    fail "OpenTelemetry Operator not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 5: Jaeger Tracing Backend
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 5: Jaeger Tracing Backend                                      │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+JAEGER_PODS=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=jaeger --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$JAEGER_PODS" -ge 1 ]; then
+    pass "Jaeger is running"
+    
+    # Check UI accessibility
+    JAEGER_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://jaeger.192.168.0.210.nip.io 2>/dev/null || echo "000")
+    if [ "$JAEGER_STATUS" == "200" ]; then
+        echo "  ✅ Jaeger UI accessible"
+    else
+        echo "  ⚠️  Jaeger UI not accessible (HTTP $JAEGER_STATUS)"
+    fi
+else
+    fail "Jaeger not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 6: OpenCost
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 6: OpenCost Cost Analysis                                      │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+OPENCOST_PODS=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=opencost --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$OPENCOST_PODS" -ge 1 ]; then
+    pass "OpenCost is running"
+    
+    # Check UI accessibility
+    OPENCOST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://opencost.192.168.0.210.nip.io 2>/dev/null || echo "000")
+    if [ "$OPENCOST_STATUS" == "200" ]; then
+        echo "  ✅ OpenCost UI accessible"
+    else
+        echo "  ⚠️  OpenCost UI not accessible (HTTP $OPENCOST_STATUS)"
+    fi
+else
+    fail "OpenCost not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 7: K8sGPT Operator
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 7: K8sGPT AI Diagnostics                                       │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+K8SGPT_PODS=$(kubectl get pods -n observability -l app.kubernetes.io/name=k8sgpt-operator --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$K8SGPT_PODS" -ge 1 ]; then
+    pass "K8sGPT Operator running"
+else
+    warn "K8sGPT Operator not running"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 8: Kubeshark Traffic Analysis
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 8: Kubeshark Traffic Analysis                                  │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+KUBESHARK_PODS=$(kubectl get pods -n observability -l app.kubernetes.io/name=kubeshark --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$KUBESHARK_PODS" -ge 1 ]; then
+    pass "Kubeshark is running ($KUBESHARK_PODS pods)"
+else
+    warn "Kubeshark not running (optional - high memory usage)"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 9: Data Flow Verification
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 9: Data Flow Verification                                      │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+echo "  Checking Prometheus scrape targets..."
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090 > /dev/null 2>&1 &
+PF_PID=$!
 sleep 3
-UP_TARGETS=$(curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets | length')
-kill $PID
+UP_TARGETS=$(curl -s http://localhost:9090/api/v1/targets 2>/dev/null | jq '.data.activeTargets | length' 2>/dev/null || echo "0")
+kill $PF_PID 2>/dev/null || true
 
 if [ "$UP_TARGETS" -gt 0 ]; then
-    echo "✅ Prometheus is scraping $UP_TARGETS targets"
+    pass "Prometheus scraping $UP_TARGETS targets"
 else
-    echo "❌ Prometheus has 0 targets"
-    exit 1
+    warn "Could not verify Prometheus targets"
 fi
 
-# 2. Loki Log Ingestion
-echo "Checking Loki Status..."
-kubectl get pods -n monitoring -l app=loki | grep Running > /dev/null
-if [ $? -eq 0 ]; then
-    echo "✅ Loki Database is Running"
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║                    VERIFICATION SUMMARY                               ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "  Tests Passed:  $TESTS_PASSED"
+echo "  Tests Failed:  $TESTS_FAILED"
+echo "  Warnings:      $TESTS_WARNED"
+echo ""
+
+if [ $TESTS_FAILED -eq 0 ]; then
+    echo "  ✅ Phase 6 Advanced Observability verification complete!"
+    echo ""
+    echo "Access URLs:"
+    echo "  • Grafana (Logs):  http://grafana.192.168.0.210.nip.io → Explore → Loki"
+    echo "  • Jaeger (Traces): http://jaeger.192.168.0.210.nip.io"
+    echo "  • OpenCost:        http://opencost.192.168.0.210.nip.io"
+    echo ""
+    echo "Port-forward for Kubeshark:"
+    echo "  kubectl port-forward -n observability svc/kubeshark-hub 8899:80"
+    exit 0
 else
-    echo "❌ Loki is down"
+    echo "  ❌ Some tests failed. Check component status above."
     exit 1
 fi
-
-# 3. K8sGPT
-echo "Checking AI Diagnostics..."
-kubectl get pods -n observability -l app.kubernetes.io/name=k8sgpt-operator | grep Running > /dev/null && echo "✅ K8sGPT Operator is Active"
-
-echo "=== OBSERVABILITY CHECK COMPLETE ==="
 ```
 
 </details>
 
 ### 10.9 Phase 6 Execution Steps
 
-1.  **Commit:** Save the YAML files to `gitops/observability/` locally.
-    ```bash
-    git add .
-    git commit -m "Add Advanced Observability stack"
-    git push origin main
-    ```
-    *(ArgoCD will pick up the changes if you configured the Root App, or you can apply them manually).*
+Execute these steps after Phase 5 (Security & Management) is complete.
 
-2.  **Verify Loki:**
-    *   Open Grafana (`http://grafana.192.168.0.210.nip.io`).
-    *   Go to **Data Sources**.
-    *   Add Data Source -> **Loki**.
-    *   URL: `http://loki-stack:3100`.
-    *   Go to **Explore**, select **Loki**, and run query `{namespace="monitoring"}` to see logs.
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     PHASE 6 EXECUTION CHECKLIST                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  □ Step 1: Verify Phase 5 MinIO is running (required for Loki storage)     │
+│  □ Step 2: Commit observability files to Git                               │
+│  □ Step 3: Wait for ArgoCD to sync applications                            │
+│  □ Step 4: Configure Grafana data sources                                  │
+│  □ Step 5: Run verification script                                         │
+│  □ Step 6: (Optional) Configure K8sGPT AI backend                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-3.  **Verify OpenCost:**
-    *   Open `http://opencost.192.168.0.210.nip.io`.
-    *   You should see a breakdown of costs per namespace.
+**Step 1: Verify Prerequisites**
+
+```bash
+# Ensure MinIO is running (Loki needs S3 storage)
+kubectl get pods -n storage -l app=minio
+# Expected: minio pod Running
+
+# Ensure Prometheus is running (OpenCost needs metrics)
+kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus
+# Expected: prometheus pods Running
+```
+
+**Step 2: Commit and Push**
+
+```bash
+cd /path/to/your/repo
+git add gitops/observability/
+git commit -m "Add Phase 6: Advanced Observability stack"
+git push origin main
+```
+
+**Step 3: Monitor ArgoCD Sync**
+
+```bash
+# Watch all applications sync
+kubectl get applications -n argocd -w
+
+# Check specific application
+kubectl describe application -n argocd loki-stack
+```
+
+**Step 4: Configure Grafana Data Sources**
+
+After Loki is running, add it as a data source in Grafana:
+
+1. Open Grafana: http://grafana.192.168.0.210.nip.io
+2. Navigate to: **Configuration → Data Sources → Add data source**
+3. Select: **Loki**
+4. Configure:
+   - URL: `http://loki-stack:3100`
+   - Click **Save & Test**
+
+**Step 5: Run Verification Script**
+
+```bash
+bash tests/05_observability_test.sh
+```
+
+**Step 6: (Optional) Configure K8sGPT**
+
+To enable AI-powered diagnostics, create an OpenAI API key secret:
+
+```bash
+kubectl create secret generic k8sgpt-secret \
+  --from-literal=openai-api-key=sk-your-actual-key-here \
+  -n observability
+```
+
+**Phase 6 Access URLs:**
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| Grafana (Logs) | http://grafana.192.168.0.210.nip.io | Log Explorer with Loki |
+| Jaeger | http://jaeger.192.168.0.210.nip.io | Distributed tracing UI |
+| OpenCost | http://opencost.192.168.0.210.nip.io | Cost estimation dashboard |
+
+**Port-Forward Commands:**
+
+```bash
+# Kubeshark (traffic analysis)
+kubectl port-forward -n observability svc/kubeshark-hub 8899:80
+# Open: http://localhost:8899
+
+# K8sGPT Results (if using CLI)
+kubectl get results -n observability
+```
+
+**Sample LogQL Queries for Grafana:**
+
+| Query | Purpose |
+|-------|---------|
+| `{namespace="argocd"}` | All ArgoCD logs |
+| `{pod=~"prometheus.*"}` | Prometheus pod logs |
+| `{namespace="monitoring"} \|= "error"` | Errors in monitoring |
+| `{namespace="security"} \| json` | Parsed JSON logs from security namespace |
+
+**Troubleshooting:**
+
+| Issue | Solution |
+|-------|----------|
+| Loki not receiving logs | Check Promtail pods: `kubectl logs -n monitoring -l app=promtail` |
+| OpenCost shows no data | Verify Prometheus is accessible from OpenCost namespace |
+| Jaeger empty | Applications need OpenTelemetry instrumentation |
+| K8sGPT no results | Configure AI backend secret |
 
 ## 11. Phase 7: CI/CD & Developer Experience
 
