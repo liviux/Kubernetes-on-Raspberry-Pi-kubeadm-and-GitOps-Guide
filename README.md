@@ -1089,6 +1089,9 @@ Ansible automates all node preparation and cluster bootstrapping.
 
 **File:** `ansible/hosts`
 
+<details>
+<summary>📄 Click to expand full ansible/hosts</summary>
+
 ```ini
 # ============================================================================
 # KUBERNETES CLUSTER INVENTORY
@@ -1148,9 +1151,14 @@ hdd_device=/dev/sda
 longhorn_data_path=/var/lib/longhorn
 ```
 
+</details>
+
 #### Ansible Configuration File
 
 **File:** `ansible/ansible.cfg`
+
+<details>
+<summary>📄 Click to expand full ansible/ansible.cfg</summary>
 
 ```ini
 [defaults]
@@ -1174,6 +1182,8 @@ callback_whitelist = profile_tasks
 ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
 pipelining = True
 ```
+
+</details>
 
 #### Verification Commands
 
@@ -2175,6 +2185,9 @@ This complex playbook performs the following:
 5.  **Labels:** Applies the hardware labels (`ram=8gb`, `storage=hdd`, etc.).
 6.  **Taints:** Removes the scheduling taint from the Control Plane so it can run workloads.
 
+<details>
+<summary>📄 Click to expand full ansible/playbooks/03_cluster_init.yml</summary>
+
 ```yaml
 ---
 - name: Phase 2a - Initialize Control Plane
@@ -2300,6 +2313,8 @@ This complex playbook performs the following:
       loop: "{{ groups['small'] }}"
 ```
 
+</details>
+
 ### 6.2 Metrics Server
 **File:** `bootstrap/metrics-server/install.sh`
 
@@ -2308,6 +2323,9 @@ Metrics Server is a cluster-wide aggregator of resource usage data. It is **requ
 - Horizontal Pod Autoscaler (HPA)
 - Vertical Pod Autoscaler (VPA)
 - Kubernetes Dashboard resource displays
+
+<details>
+<summary>📄 Click to expand full bootstrap/metrics-server/install.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -2336,12 +2354,17 @@ echo "=== METRICS SERVER INSTALLED ==="
 echo "Verify with: kubectl top nodes"
 ```
 
+</details>
+
 *Note: The `--kubelet-insecure-tls` flag is required because kubeadm generates self-signed certificates for the kubelet.*
 
 ### 6.3 Network Verification Script
 **File:** `tests/02_network_test.sh`
 
 Checks if all nodes are Ready (Cilium success) and if the Control Plane has the correct storage labels.
+
+<details>
+<summary>📄 Click to expand full tests/02_network_test.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -2384,6 +2407,8 @@ fi
 echo "=== PHASE 2 COMPLETE ==="
 ```
 
+</details>
+
 ### 6.4 Phase 2 Execution Steps
 
 1.  **Run the Cluster Initialization:**
@@ -2416,6 +2441,9 @@ This playbook runs only on the `big` (Control Plane) node. It formats the USB HD
 
 *   **Mount Point:** `/var/lib/longhorn`
 *   **Filesystem:** `ext4`
+
+<details>
+<summary>📄 Click to expand full ansible/playbooks/04_storage_mount.yml</summary>
 
 ```yaml
 ---
@@ -2458,6 +2486,8 @@ This playbook runs only on the `big` (Control Plane) node. It formats the USB HD
         msg: "Storage mounted: {{ df_out.stdout }}"
 ```
 
+</details>
+
 ### 7.2 Longhorn Bootstrap Script
 **File:** `bootstrap/longhorn/install.sh`
 
@@ -2466,6 +2496,9 @@ This script installs Longhorn via Helm and applies the critical "Day 2" configur
 1.  **Install:** Deploys Longhorn v1.10.1 via Helm.
 2.  **Label:** Applies `node.longhorn.io/create-default-disk=true` to `rpi4-1` so Longhorn knows where to create the initial storage chunk.
 3.  **Restrict:** Patches the configuration of worker nodes (`rpi4-2,3,4`) to set `allowScheduling: false`. This prevents Longhorn from ever trying to save data to their SD cards.
+
+<details>
+<summary>📄 Click to expand full bootstrap/longhorn/install.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -2508,6 +2541,8 @@ done
 echo "=== LONGHORN INSTALLED & CONFIGURED ==="
 ```
 
+</details>
+
 ### 7.3 Storage Verification Script
 **File:** `tests/03_storage_test.sh`
 
@@ -2515,6 +2550,9 @@ This script creates a real Persistent Volume Claim (PVC) and a Pod to verify tha
 1.  Longhorn can provision storage.
 2.  The data is physically written to `rpi4-1`.
 3.  A Pod running on a *different* node (e.g., `rpi4-2`) can access that data over the network.
+
+<details>
+<summary>📄 Click to expand full tests/03_storage_test.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -2596,6 +2634,8 @@ fi
 echo "=== PHASE 3 COMPLETE ==="
 ```
 
+</details>
+
 ### 7.4 Phase 3 Execution Steps
 
 1.  **Mount the HDD:**
@@ -2638,6 +2678,9 @@ Traefik is configured to:
 *   Serve as the Gateway API controller via GatewayClass.
 *   Expose Prometheus metrics for the Observability stack.
 *   Enable JSON access logs for the Logging stack (Loki).
+
+<details>
+<summary>📄 Click to expand full bootstrap/traefik/install.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -2714,12 +2757,17 @@ echo "External IP should be assigned shortly."
 echo "Gateway: main-gateway.traefik-system"
 ```
 
+</details>
+
 ### 8.2 GitOps Bootstrap (ArgoCD)
 **File:** `bootstrap/argocd/install.sh`
 
 This script installs **ArgoCD**.
 *   **Insecure Mode:** We disable ArgoCD's internal TLS because Traefik handles SSL termination at the Gateway level.
 *   **HTTPRoute:** We apply a Gateway API HTTPRoute so the UI is accessible at `argocd.192.168.0.210.nip.io`.
+
+<details>
+<summary>📄 Click to expand full bootstrap/argocd/install.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -2771,6 +2819,8 @@ echo "URL: http://argocd.192.168.0.210.nip.io"
 echo "Get Password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
 ```
 
+</details>
+
 ### 8.3 Source Control Service (Gitea)
 **File:** `gitops/services/gitea.yaml`
 
@@ -2778,6 +2828,9 @@ This is our first **Declarative Application**. Instead of a shell script, this i
 *   **Database:** Deploys a dedicated PostgreSQL instance managed by the chart.
 *   **Storage:** Uses the `longhorn` storage class (HDD).
 *   **UI:** Configured with a modern theme and mapped to `gitea.192.168.0.210.nip.io`.
+
+<details>
+<summary>📄 Click to expand full gitops/services/gitea.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -2876,12 +2929,17 @@ spec:
           port: 3000
 ```
 
+</details>
+
 ### 8.4 The "App of Apps" Pattern
 **File:** `gitops/app-of-apps.yaml`
 
 This is the master controller. It points to your Git repository (once created in Gitea) and recursively installs everything else defined in the `gitops/` folder (Security, Observability, Management).
 
 *Note: Initially, this will be manual. Once you migrate the code to Gitea (Step 9.5), you will update the `repoURL` here.*
+
+<details>
+<summary>📄 Click to expand full gitops/app-of-apps.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -2941,6 +2999,8 @@ spec:
       - ServerSideApply=true
 ```
 
+</details>
+
 ### 8.5 Phase 4 Execution Steps
 
 1.  **Install Traefik:**
@@ -2983,6 +3043,9 @@ Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. 
 *   **Storage:** Uses Longhorn (HDD) for the data backing.
 *   **Buckets:** Automatically provisions buckets for `velero`, `loki`, `harbor`, and `thanos`.
 *   **Access:** Exposed via Gateway API HTTPRoute (`minio.192.168.0.210.nip.io`).
+
+<details>
+<summary>📄 Click to expand full gitops/storage/minio.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3068,11 +3131,16 @@ spec:
           port: 9001
 ```
 
+</details>
+
 ### 9.2 Certificate Automation (Cert-Manager)
 **File:** `gitops/infrastructure/cert-manager.yaml`
 
 Cert-Manager handles TLS certificates within the cluster.
 *   **Self-Signed Issuer:** Configured to issue self-signed certificates locally. This prevents the "Not Secure" browser warnings from escalating into connection errors, while avoiding the complexity of external DNS validation (Let's Encrypt) for this private setup.
+
+<details>
+<summary>📄 Click to expand full gitops/infrastructure/cert-manager.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3101,6 +3169,8 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 9.3 Container Registry (Harbor)
 **File:** `gitops/security/harbor.yaml`
 
@@ -3108,6 +3178,9 @@ Harbor serves as the local "Docker Hub".
 *   **Dependency:** Connects to the **MinIO** S3 service installed above for storing huge container images (keeping them off the SD cards).
 *   **Scanning:** Trivy is enabled to scan every uploaded image for CVEs.
 *   **Database:** Uses internal PostgreSQL backed by Longhorn.
+
+<details>
+<summary>📄 Click to expand full gitops/security/harbor.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3164,12 +3237,17 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 9.4 Backup & Restore (Velero)
 **File:** `gitops/management/velero.yaml`
 
 Velero performs nightly backups of the cluster configuration and persistent volumes.
 *   **Target:** Stores backups in the `velero` bucket on MinIO.
 *   **Volume Snapshots:** Integrated with Longhorn CSI to take snapshots of the HDD data.
+
+<details>
+<summary>📄 Click to expand full gitops/management/velero.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3221,11 +3299,16 @@ spec:
     syncOptions:
       - CreateNamespace=true
 ```
+
+</details>
 ### 9.5 Secrets Management (OpenBao)
 **File:** `gitops/security/openbao.yaml`
 We use OpenBao (the community fork of Vault) to handle secrets securely.
 *   **Storage:** Uses Longhorn (HDD) to persist encrypted secrets.
 *   **UI:** Exposed internally via LoadBalancer.
+
+<details>
+<summary>📄 Click to expand full gitops/security/openbao.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3262,9 +3345,14 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 9.6 Policy Enforcement (Kyverno)
 **File:** `gitops/security/kyverno.yaml`
 Kyverno enforces best practices (e.g., preventing root containers) without the complexity of OPA Gatekeeper.
+
+<details>
+<summary>📄 Click to expand full gitops/security/kyverno.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3299,9 +3387,14 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 9.7 Runtime Security (Falco)
 **File:** `gitops/security/falco.yaml`
 Monitors kernel syscalls to detect intrusions. We explicitly configure the **eBPF driver** because the traditional kernel module driver is often problematic on Ubuntu RPi kernels.
+
+<details>
+<summary>📄 Click to expand full gitops/security/falco.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3334,6 +3427,8 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 9.8 Configuration Reloader (Reloader)
 **File:** `gitops/management/reloader.yaml`
 
@@ -3341,6 +3436,9 @@ Reloader watches for changes in ConfigMaps and Secrets, then automatically trigg
 
 *   **Use Case:** When you update a Grafana dashboard ConfigMap, Reloader restarts Grafana automatically.
 *   **Footprint:** Extremely lightweight (~10MB RAM).
+
+<details>
+<summary>📄 Click to expand full gitops/management/reloader.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3374,6 +3472,8 @@ spec:
       selfHeal: true
 ```
 
+</details>
+
 **Usage:** Annotate your Deployments to enable auto-reload:
 ```yaml
 metadata:
@@ -3390,6 +3490,9 @@ On resource-constrained Raspberry Pi clusters, workloads can become imbalanced o
     *   `RemoveDuplicates`: Ensures replicas are spread across nodes.
     *   `LowNodeUtilization`: Moves pods from overloaded nodes to underutilized ones.
     *   `RemovePodsViolatingNodeAffinity`: Evicts pods that no longer satisfy node affinity rules.
+
+<details>
+<summary>📄 Click to expand full gitops/management/descheduler.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3441,12 +3544,17 @@ spec:
       selfHeal: true
 ```
 
+</details>
+
 *Note: Descheduler only evicts pods; it does not schedule them. The kube-scheduler handles placement after eviction.*
     
 ### 9.10 The Root Application (App of Apps)
 **File:** `gitops/root-app.yaml`
 
 This is the "One Ring to Rule Them All." Instead of applying the files above individually, we point ArgoCD to this single file (or eventually, to the Git repo containing it). It tells ArgoCD to deploy the entire stack defined in the `gitops/` directory structure.
+
+<details>
+<summary>📄 Click to expand full gitops/root-app.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3472,6 +3580,8 @@ spec:
       selfHeal: true
 ```
 
+</details>
+
 ### 9.11 Security Verification Script
 **File:** `tests/04_security_test.sh`
 
@@ -3479,6 +3589,9 @@ This script verifies that your security policies are enforced and services are a
 1.  **Kyverno:** Attempts to create a pod violating the "no-latest-tag" policy. It expects a failure.
 2.  **Falco:** Verifies the eBPF probes are running.
 3.  **Harbor:** Checks API availability.
+
+<details>
+<summary>📄 Click to expand full tests/04_security_test.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -3517,6 +3630,8 @@ fi
 echo "=== SECURITY CHECK COMPLETE ==="
 ```
 
+</details>
+
 ### 9.12 Phase 5 Execution Steps
 
 1.  **Commit Files:** Ensure the files above are created in your local `gitops/` folder.
@@ -3544,6 +3659,9 @@ In this phase, we complete the observability pillar. Metrics (Prometheus) tell y
 We use the **PLG Stack** (Promtail, Loki, Grafana).
 *   **Promtail:** Runs on every node (DaemonSet), reads logs from `/var/log/containers`, and pushes them to Loki.
 *   **Loki:** Stores logs efficiently. We configure it to use **MinIO** (installed in Phase 5) for long-term storage instead of filling up the pod's local volume.
+
+<details>
+<summary>📄 Click to expand full gitops/observability/loki-stack.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3593,9 +3711,15 @@ spec:
       prune: true
       selfHeal: true
 ```
+
+</details>
+
 ### 10.2 Log Collection (Fluent Bit)
 **File:** `gitops/observability/fluent-bit.yaml`
 *Note:* You requested Fluentd, but **Fluent Bit** is the industry standard for Edge/Raspberry Pi. It is written in C (vs Ruby for Fluentd) and uses ~10x less RAM. It is configured here to forward logs to the Loki stack.
+
+<details>
+<summary>📄 Click to expand full gitops/observability/fluent-bit.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3628,9 +3752,14 @@ spec:
       selfHeal: true
 ```
 
+</details>
+
 ### 10.3 Distributed Tracing (OpenTelemetry)
 **File:** `gitops/observability/opentelemetry.yaml`
 Installs the OpenTelemetry Operator. This allows you to inject tracing sidecars into your applications automatically.
+
+<details>
+<summary>📄 Click to expand full gitops/observability/opentelemetry.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3652,12 +3781,18 @@ spec:
       prune: true
       selfHeal: true
 ```
+
+</details>
+
 ### 10.4 Tracing Backend (Jaeger)
 **File:** `gitops/observability/jaeger.yaml`
 
 Jaeger provides the UI to visualize the distributed traces collected by OpenTelemetry.
 *   **Storage:** Configured to use memory (limited size) for Raspberry Pi resource efficiency, as ElasticSearch is too heavy for this setup.
 *   **Ingress:** Exposed via Traefik.
+
+<details>
+<summary>📄 Click to expand full gitops/observability/jaeger.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3722,9 +3857,14 @@ spec:
           port: 16686
 ```
 
+</details>
+
 ### 10.5 Traffic Analysis (Kubeshark)
 **File:** `gitops/observability/kubeshark.yaml`
 Provides deep visibility into API traffic (HTTP, REST, gRPC, GraphQL) similar to Wireshark, but for K8s.
+
+<details>
+<summary>📄 Click to expand full gitops/observability/kubeshark.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3755,10 +3895,15 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 10.6 Cost Management (OpenCost)
 **File:** `gitops/observability/opencost.yaml`
 
 OpenCost calculates the resource consumption (CPU/RAM/Storage) of every pod and estimates a "cloud cost" equivalent. This is excellent for understanding which namespace is hogging resources on your Raspberry Pis.
+
+<details>
+<summary>📄 Click to expand full gitops/observability/opencost.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3813,11 +3958,16 @@ spec:
           port: 9090
 ```
 
+</details>
+
 ### 10.7 AI Diagnostics (K8sGPT)
 **File:** `gitops/observability/k8sgpt.yaml`
 
 K8sGPT scans your cluster for issues (CrashLoops, PVC failures, Service misconfigs) and uses an AI backend to explain the fix in plain English.
 *   **Backend:** Configured here to use the public OpenAI API (requires an API Key) or LocalAI if you host it. *Note: Replace `YOUR_OPENAI_TOKEN` in the secret manually or use the OpenBao vault later.*
+
+<details>
+<summary>📄 Click to expand full gitops/observability/k8sgpt.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3842,6 +3992,8 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 10.8 Observability Verification Script
 **File:** `tests/05_observability_test.sh`
 
@@ -3849,6 +4001,9 @@ This script ensures data is flowing through your pipelines.
 1.  **Prometheus:** Checks if scrape targets are active via the API.
 2.  **Loki:** Checks if the database is up.
 3.  **K8sGPT:** Verifies the AI operator is active.
+
+<details>
+<summary>📄 Click to expand full tests/05_observability_test.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -3887,6 +4042,8 @@ kubectl get pods -n observability -l app.kubernetes.io/name=k8sgpt-operator | gr
 echo "=== OBSERVABILITY CHECK COMPLETE ==="
 ```
 
+</details>
+
 ### 10.9 Phase 6 Execution Steps
 
 1.  **Commit:** Save the YAML files to `gitops/observability/` locally.
@@ -3916,6 +4073,9 @@ In this final phase, we establish the machinery that builds, tests, and releases
 **File:** `gitops/cicd/argo-image-updater.yaml`
 
 This component watches your **Harbor** registry. When a CI pipeline pushes a new image tag (e.g., `v1.0.1`), this tool automatically updates the Git repository (modifying the ArgoCD Application) to reflect the new version.
+
+<details>
+<summary>📄 Click to expand full gitops/cicd/argo-image-updater.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3948,6 +4108,8 @@ spec:
       selfHeal: true
 ```
 
+</details>
+
 ### 11.2 CI Engine (Argo Workflows)
 **File:** `gitops/cicd/argo-workflows.yaml`
 
@@ -3955,6 +4117,9 @@ Argo Workflows is a Kubernetes-native workflow engine. It creates Pods to run yo
 *   **UI:** Exposed via Gateway API HTTPRoute.
 *   **Persistence:** Uses MinIO (S3) to store build artifacts (logs, compiled binaries).
 *   **Executor:** Uses `pns` (Process Namespace Sharing) for efficiency on Raspberry Pi.
+
+<details>
+<summary>📄 Click to expand full gitops/cicd/argo-workflows.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -4008,12 +4173,17 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 11.3 Event Bus (Argo Events)
 **File:** `gitops/cicd/argo-events.yaml`
 
 Argo Events listens for external triggers (like a `git push` to your Gitea repo) and triggers an Argo Workflow.
 *   **Sensor:** Listens for the event.
 *   **EventBus:** Manages the message queue (Jetstream).
+
+<details>
+<summary>📄 Click to expand full gitops/cicd/argo-events.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -4050,12 +4220,17 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 ### 11.4 Security Tooling (Trivy)
 
 Rather than installing these as standalone long-running services, we install the **Trivy Operator** to scan the running cluster, and we provide the configurations to run ZAP/Trivy inside CI pipelines.
 
 **File:** `gitops/security/trivy-operator.yaml`
 Scans running pods and generates "VulnerabilityReports" visible in the cluster.
+
+<details>
+<summary>📄 Click to expand full gitops/security/trivy-operator.yaml</summary>
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -4086,6 +4261,8 @@ spec:
       - CreateNamespace=true
 ```
 
+</details>
+
 > **Note on OWASP ZAP:**
 > OWASP ZAP is best run as a step in your **Argo Workflow** (`WorkflowTemplate`) against a staging URL. It does not require a standalone Helm installation for this architecture.
 
@@ -4096,6 +4273,9 @@ To enable rapid iteration on your local machine without pushing git commits for 
 **Setup Instructions (Run on Local Machine):**
 1.  Install Skaffold: `choco install skaffold` (Windows) or `brew install skaffold`.
 2.  Create a `skaffold.yaml` in your application source code repo:
+
+<details>
+<summary>📄 Click to expand full skaffold.yaml</summary>
 
 ```yaml
 apiVersion: skaffold/v4beta3
@@ -4116,6 +4296,8 @@ deploy:
     - k8s/deployment.yaml
 ```
 
+</details>
+
 3.  Run `skaffold dev`.
     *   Skaffold will watch your source files.
     *   On save, it builds the image, pushes to Harbor, and redeploys to the Raspberry Pi cluster in seconds.
@@ -4127,6 +4309,9 @@ Verifies the build machinery components.
 1.  **Argo Workflows:** Checks controller availability.
 2.  **Argo Events:** Checks controller availability.
 3.  **Trivy:** Checks if vulnerability reports are being generated for running pods.
+
+<details>
+<summary>📄 Click to expand full tests/06_cicd_test.sh</summary>
 
 ```bash
 #!/bin/bash
@@ -4163,6 +4348,8 @@ fi
 
 echo "=== CI/CD CHECK COMPLETE ==="
 ```
+
+</details>
 
 ### 11.7 Phase 7 Execution Steps
 
@@ -4236,6 +4423,9 @@ This playbook is a safety net for your learning process. If you misconfigure the
 *   **Action:** Runs `kubeadm reset`, cleans CNI configurations (`/etc/cni`), flushes IPtables, and removes local kube configs.
 *   **Safety:** By default, it *does not* wipe the Longhorn data on the HDD, preserving your persistent volumes.
 
+<details>
+<summary>📄 Click to expand full ansible/playbooks/05_reset_cluster.yml</summary>
+
 ```yaml
 ---
 - name: Phase 8 - Cluster Reset (The Nuclear Option)
@@ -4272,6 +4462,8 @@ This playbook is a safety net for your learning process. If you misconfigure the
         ip link delete kube-ipvs0 || true
       ignore_errors: yes
 ```
+
+</details>
 
 **Usage:**
 ```bash
