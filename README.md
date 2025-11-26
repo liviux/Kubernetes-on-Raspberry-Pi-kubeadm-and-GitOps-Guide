@@ -1,5 +1,7 @@
 # Kubernetes Cluster on Raspberry Pi 4: Bare Metal GitOps Guide
 
+TL;DR: This guide details the step-by-step process to deploy a production-grade Kubernetes cluster on Raspberry Pi 4 hardware using Ansible for infrastructure provisioning and ArgoCD for GitOps-based application management. And a ton of modern cloud-native tools along it.
+
 ## Table of Contents
 1.  [Introduction and Scope](#1-introduction-and-scope)
     *   [Project Overview](#project-overview)
@@ -151,69 +153,609 @@ Upon completing this guide, you will be able to:
 - **4GB Worker RAM:** Some observability tools (Jaeger, Kubeshark) are configured with aggressive resource limits that may cause OOM under heavy load.
 - **SD Card Wear:** Longhorn is explicitly configured to never schedule replicas on worker nodes to protect SD cards.
 
-
 ---
 
 ## 2. Architecture Overview
 
-### Hardware Topology
-The cluster consists of four nodes, topologically separated into storage-heavy control roles and compute-heavy worker roles.
+### High-Level Architecture Diagram
 
-*   **Control Plane (`rpi4-1`):** 8GB RAM, 128GB SD, 1TB HDD.
-    *   **Role:** Kubernetes API, Etcd, and **Primary Storage Node**.
-    *   **Configuration:** Labeled with `storage=hdd` and `unique-hdd=true`.
-    *   **Taints:** Untainted to allow workload scheduling, but functionally reserved for critical storage components (Longhorn/MinIO) to utilize the HDD.
-*   **Worker Nodes (`rpi4-2`, `rpi4-3`, `rpi4-4`):** 4GB RAM, 64GB SD.
-    *   **Role:** Stateless workload execution.
-    *   **Protection:** Explicitly configured to block persistent storage writes, preventing SD card burnout.
+> 💡 **Tip:** The Mermaid diagram below is interactive on GitHub. Click nodes to explore relationships.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#326CE5', 'primaryTextColor': '#fff', 'primaryBorderColor': '#326CE5', 'lineColor': '#5D6D7E', 'secondaryColor': '#F39C12', 'tertiaryColor': '#fff'}}}%%
+flowchart TB
+    subgraph Internet["☁️ Internet"]
+        USER[("👤 User")]
+    end
+
+    subgraph HomeNetwork["🏠 Home Network (192.168.0.0/24)"]
+        ROUTER["🌐 Router/Gateway<br/>DHCP + Port Forward"]
+        
+        subgraph K8sCluster["⎈ Kubernetes Cluster"]
+            subgraph ControlPlane["📍 Control Plane (rpi4-1 • 8GB • .201)"]
+                ETCD[("💾 etcd")]
+                API["🔌 API Server"]
+                SCHED["📅 Scheduler"]
+                CM["🎛️ Controller Manager"]
+                
+                subgraph Storage["💿 Storage Layer"]
+                    HDD[("🗄️ 1TB HDD")]
+                    LONGHORN["📦 Longhorn"]
+                    MINIO["🪣 MinIO (S3)"]
+                end
+            end
+            
+            subgraph Workers["👷 Worker Nodes (4GB each)"]
+                W1["rpi4-2 • .202"]
+                W2["rpi4-3 • .203"]
+                W3["rpi4-4 • .204"]
+            end
+            
+            subgraph Networking["🌐 Network Layer"]
+                CILIUM["🐝 Cilium CNI<br/>eBPF + L2 LB"]
+                TRAEFIK["🚦 Traefik<br/>Gateway API"]
+                GWAPI["📋 HTTPRoutes"]
+            end
+            
+            subgraph GitOps["🔄 GitOps Engine"]
+                ARGOCD["🐙 ArgoCD"]
+                IMGUPD["🖼️ Image Updater"]
+            end
+            
+            subgraph Observability["📊 Observability"]
+                METRICS["📈 Metrics Server"]
+                PROM["🔥 Prometheus"]
+                THANOS["🏛️ Thanos"]
+                GRAFANA["📉 Grafana"]
+                LOKI["📝 Loki"]
+                FLUENTBIT["🦋 Fluent Bit"]
+                OTEL["📡 OpenTelemetry"]
+                JAEGER["🔍 Jaeger"]
+            end
+            
+            subgraph Security["🔒 Security Layer"]
+                CERTMGR["📜 Cert-Manager"]
+                HARBOR["🚢 Harbor Registry"]
+                OPENBAO["🔐 OpenBao"]
+                KYVERNO["📋 Kyverno"]
+                FALCO["🦅 Falco"]
+                TRIVY["🔬 Trivy"]
+            end
+            
+            subgraph CICD["🚀 CI/CD"]
+                WORKFLOWS["⚙️ Argo Workflows"]
+                EVENTS["📨 Argo Events"]
+            end
+            
+            subgraph Management["🛠️ Management"]
+                VELERO["💾 Velero"]
+                RELOADER["🔄 Reloader"]
+                DESCHEDULER["⚖️ Descheduler"]
+            end
+        end
+    end
+    
+    subgraph ExternalGit["📂 Git Repository"]
+        GITHUB[("🐱 GitHub<br/>GitOps Source")]
+    end
+
+    %% Traffic Flow
+    USER -->|"HTTPS :443"| ROUTER
+    ROUTER -->|"Port Forward"| CILIUM
+    CILIUM -->|"L2 ARP<br/>192.168.0.210"| TRAEFIK
+    TRAEFIK --> GWAPI
+    GWAPI -->|"Route to Services"| Workers
+    
+    %% GitOps Flow
+    GITHUB -->|"Sync"| ARGOCD
+    ARGOCD -->|"Deploy"| K8sCluster
+    IMGUPD -->|"Watch Tags"| HARBOR
+    
+    %% Storage Dependencies
+    HDD --> LONGHORN
+    LONGHORN --> MINIO
+    MINIO --> THANOS
+    MINIO --> LOKI
+    MINIO --> VELERO
+    
+    %% Observability Flow
+    Workers -->|"Metrics"| PROM
+    PROM --> THANOS
+    THANOS --> GRAFANA
+    Workers -->|"Logs"| FLUENTBIT
+    FLUENTBIT --> LOKI
+    LOKI --> GRAFANA
+    Workers -->|"Traces"| OTEL
+    OTEL --> JAEGER
+    
+    %% Security Flow
+    CERTMGR -->|"TLS Certs"| TRAEFIK
+    HARBOR -->|"Images"| Workers
+    TRIVY -->|"Scan"| HARBOR
+    KYVERNO -->|"Policies"| API
+    FALCO -->|"Monitor"| Workers
+    
+    %% Control Plane
+    API --> ETCD
+    SCHED --> API
+    CM --> API
+    
+    %% Management
+    RELOADER -->|"Watch ConfigMaps"| Workers
+    DESCHEDULER -->|"Rebalance"| Workers
+    VELERO -->|"Backup"| MINIO
+
+    %% Styling
+    classDef control fill:#326CE5,stroke:#fff,stroke-width:2px,color:#fff
+    classDef worker fill:#5D6D7E,stroke:#fff,stroke-width:2px,color:#fff
+    classDef storage fill:#F39C12,stroke:#fff,stroke-width:2px,color:#fff
+    classDef network fill:#1ABC9C,stroke:#fff,stroke-width:2px,color:#fff
+    classDef gitops fill:#E74C3C,stroke:#fff,stroke-width:2px,color:#fff
+    classDef observe fill:#9B59B6,stroke:#fff,stroke-width:2px,color:#fff
+    classDef security fill:#E91E63,stroke:#fff,stroke-width:2px,color:#fff
+    classDef external fill:#95A5A6,stroke:#fff,stroke-width:2px,color:#fff
+    
+    class ETCD,API,SCHED,CM control
+    class W1,W2,W3 worker
+    class HDD,LONGHORN,MINIO storage
+    class CILIUM,TRAEFIK,GWAPI network
+    class ARGOCD,IMGUPD gitops
+    class PROM,THANOS,GRAFANA,LOKI,FLUENTBIT,OTEL,JAEGER,METRICS observe
+    class CERTMGR,HARBOR,OPENBAO,KYVERNO,FALCO,TRIVY security
+    class USER,ROUTER,GITHUB external
+```
+
+### Deployment Sequence Diagram
+
+```mermaid
+%%{init: {'theme': 'base'}}%%
+sequenceDiagram
+    autonumber
+    participant User as 👤 Operator
+    participant Ansible as 📜 Ansible
+    participant Nodes as 🖥️ RPi Nodes
+    participant K8s as ⎈ Kubernetes
+    participant Cilium as 🐝 Cilium
+    participant ArgoCD as 🐙 ArgoCD
+    participant GitHub as 🐱 GitHub
+
+    rect rgb(50, 108, 229, 0.1)
+        Note over User,Nodes: Phase 1: Infrastructure Provisioning
+        User->>Ansible: Run 01_node_prep.yml
+        Ansible->>Nodes: Configure OS, Cgroups, Containerd
+        Nodes-->>Ansible: Ready
+        User->>Ansible: Run 02_k8s_binaries.yml
+        Ansible->>Nodes: Install kubeadm, kubelet, kubectl
+    end
+
+    rect rgb(26, 188, 156, 0.1)
+        Note over User,Cilium: Phase 2: Cluster Bootstrap
+        User->>Ansible: Run 03_cluster_init.yml
+        Ansible->>Nodes: kubeadm init (Control Plane)
+        Nodes->>K8s: API Server Online
+        Ansible->>Cilium: helm install cilium
+        Cilium-->>K8s: CNI Ready, L2 LB Active
+        Ansible->>Nodes: kubeadm join (Workers)
+        Nodes-->>K8s: 4/4 Nodes Ready
+    end
+
+    rect rgb(243, 156, 18, 0.1)
+        Note over User,K8s: Phase 3: Storage Foundation
+        User->>Ansible: Run 04_storage_mount.yml
+        Ansible->>Nodes: Mount HDD to /var/lib/longhorn
+        User->>K8s: helm install longhorn
+        K8s-->>K8s: StorageClass: longhorn-hdd
+    end
+
+    rect rgb(231, 76, 60, 0.1)
+        Note over User,GitHub: Phase 4: GitOps Bootstrap
+        User->>K8s: helm install traefik
+        User->>K8s: helm install argocd
+        User->>K8s: kubectl apply -f root-app.yaml
+        K8s->>ArgoCD: Root Application Created
+        ArgoCD->>GitHub: Watch Repository
+        GitHub-->>ArgoCD: Sync gitops/ manifests
+        ArgoCD->>K8s: Deploy All Applications
+    end
+
+    rect rgb(155, 89, 182, 0.1)
+        Note over GitHub,K8s: Continuous GitOps Loop
+        loop Every 3 minutes
+            ArgoCD->>GitHub: Check for changes
+            GitHub-->>ArgoCD: New commit detected
+            ArgoCD->>K8s: Apply changes
+            K8s-->>ArgoCD: Sync complete ✓
+        end
+    end
+```
+
+### Component Dependency Graph
+
+```mermaid
+%%{init: {'theme': 'base'}}%%
+flowchart LR
+    subgraph Layer0["Layer 0: Hardware"]
+        HDD["🗄️ 1TB HDD"]
+        SD["💾 SD Cards"]
+    end
+
+    subgraph Layer1["Layer 1: Platform"]
+        K8S["⎈ Kubernetes"]
+        CILIUM["🐝 Cilium"]
+    end
+
+    subgraph Layer2["Layer 2: Storage"]
+        LH["📦 Longhorn"]
+        MINIO["🪣 MinIO"]
+    end
+
+    subgraph Layer3["Layer 3: Core Services"]
+        ARGO["🐙 ArgoCD"]
+        TRAEFIK["🚦 Traefik"]
+        CERT["📜 Cert-Manager"]
+    end
+
+    subgraph Layer4["Layer 4: Platform Services"]
+        PROM["🔥 Prometheus"]
+        LOKI["📝 Loki"]
+        HARBOR["🚢 Harbor"]
+        VAULT["🔐 OpenBao"]
+    end
+
+    subgraph Layer5["Layer 5: Applications"]
+        THANOS["🏛️ Thanos"]
+        VELERO["💾 Velero"]
+        GRAFANA["📉 Grafana"]
+        WORKFLOWS["⚙️ Argo Workflows"]
+    end
+
+    %% Dependencies
+    HDD --> LH
+    SD --> K8S
+    K8S --> CILIUM
+    CILIUM --> LH
+    LH --> MINIO
+    LH --> HARBOR
+    LH --> VAULT
+    MINIO --> THANOS
+    MINIO --> LOKI
+    MINIO --> VELERO
+    K8S --> ARGO
+    ARGO --> TRAEFIK
+    ARGO --> CERT
+    ARGO --> PROM
+    ARGO --> HARBOR
+    PROM --> THANOS
+    PROM --> GRAFANA
+    LOKI --> GRAFANA
+    CERT --> TRAEFIK
+    HARBOR --> WORKFLOWS
+
+    %% Styling
+    style Layer0 fill:#34495E,stroke:#fff,color:#fff
+    style Layer1 fill:#2C3E50,stroke:#fff,color:#fff
+    style Layer2 fill:#F39C12,stroke:#fff,color:#fff
+    style Layer3 fill:#E74C3C,stroke:#fff,color:#fff
+    style Layer4 fill:#9B59B6,stroke:#fff,color:#fff
+    style Layer5 fill:#1ABC9C,stroke:#fff,color:#fff
+```
+
+### ASCII Fallback Diagram
+
+For environments that don't render Mermaid, here's the ASCII representation:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              HOME NETWORK (192.168.0.0/24)                      │
+│                                                                                 │
+│    ┌─────────────┐                                                              │
+│    │   Router    │◄──── DHCP Reservations: .201-.204                            │
+│    │  Gateway    │◄──── Port Forward: 80,443 → .210 (Traefik LB)               │
+│    └──────┬──────┘                                                              │
+│           │                                                                     │
+│           ▼                                                                     │
+│    ┌──────────────────────────────────────────────────────────────────────┐    │
+│    │                    CILIUM L2 ANNOUNCEMENT POOL                        │    │
+│    │                        192.168.0.210 - .220                           │    │
+│    └──────────────────────────────────────────────────────────────────────┘    │
+│           │                                                                     │
+│    ═══════╪═════════════════════════════════════════════════════════════════   │
+│           │           KUBERNETES CLUSTER (Pod CIDR: 10.244.0.0/16)             │
+│    ═══════╪═════════════════════════════════════════════════════════════════   │
+│           │                                                                     │
+│    ┌──────┴──────┐     ┌─────────────┐  ┌─────────────┐  ┌─────────────┐       │
+│    │   rpi4-1    │     │   rpi4-2    │  │   rpi4-3    │  │   rpi4-4    │       │
+│    │ Control+Stor│     │   Worker    │  │   Worker    │  │   Worker    │       │
+│    │  .201 (8GB) │     │ .202 (4GB)  │  │ .203 (4GB)  │  │ .204 (4GB)  │       │
+│    │             │     │             │  │             │  │             │       │
+│    │ ┌─────────┐ │     │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │       │
+│    │ │  etcd   │ │     │ │ Cilium  │ │  │ │ Cilium  │ │  │ │ Cilium  │ │       │
+│    │ │ API Srv │ │     │ │  Agent  │ │  │ │  Agent  │ │  │ │  Agent  │ │       │
+│    │ │ Sched.  │ │     │ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │       │
+│    │ └─────────┘ │     │             │  │             │  │             │       │
+│    │             │     │  Workloads  │  │  Workloads  │  │  Workloads  │       │
+│    │ ┌─────────┐ │     │  (Stateless)│  │  (Stateless)│  │  (Stateless)│       │
+│    │ │Longhorn │ │     │             │  │             │  │             │       │
+│    │ │ MinIO   │ │     │   64GB SD   │  │   64GB SD   │  │   64GB SD   │       │
+│    │ └────┬────┘ │     │  (No PVCs)  │  │  (No PVCs)  │  │  (No PVCs)  │       │
+│    │      │      │     └─────────────┘  └─────────────┘  └─────────────┘       │
+│    │ ┌────▼────┐ │                                                              │
+│    │ │  1TB    │ │                                                              │
+│    │ │  HDD    │ │◄──── All Persistent Volumes                                  │
+│    │ └─────────┘ │                                                              │
+│    └─────────────┘                                                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Hardware Topology
+
+The cluster consists of four Raspberry Pi 4 nodes with intentionally asymmetric roles:
+
+| Node | Hostname | IP Address | RAM | Storage | Role | Labels |
+|------|----------|------------|-----|---------|------|--------|
+| Control Plane | `rpi4-1` | 192.168.0.201 | 8GB | 128GB SD + **1TB HDD** | API Server, etcd, Storage | `storage=hdd`, `unique-hdd=true`, `ram=8gb` |
+| Worker 1 | `rpi4-2` | 192.168.0.202 | 4GB | 64GB SD | Compute | `ram=4gb` |
+| Worker 2 | `rpi4-3` | 192.168.0.203 | 4GB | 64GB SD | Compute | `ram=4gb` |
+| Worker 3 | `rpi4-4` | 192.168.0.204 | 4GB | 64GB SD | Compute | `ram=4gb` |
+
+**Design Rationale:**
+
+| Decision | Justification |
+|----------|---------------|
+| **Untainted Control Plane** | With only 4 nodes and 20GB total RAM, we cannot afford to waste 8GB on control plane overhead alone. The control plane runs storage workloads that benefit from its HDD. |
+| **Single HDD Storage** | All persistent data lives on one disk. This is acceptable for a learning environment—production would require distributed storage across multiple nodes. |
+| **Worker SD Protection** | SD cards have limited write endurance (~10K-100K cycles). Blocking PVC scheduling to workers extends their lifespan significantly. |
+| **L2 Load Balancing** | Without cloud provider integration, Cilium's L2 Announcements provide LoadBalancer IPs by responding to ARP requests on the local network. |
+
+### Network Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           NETWORK TOPOLOGY                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  EXTERNAL ACCESS                                                        │
+│  ───────────────                                                        │
+│  Internet ──► Router ──► Port Forward ──► 192.168.0.210 (Traefik LB)   │
+│                                                                         │
+│  CLUSTER NETWORKS                                                       │
+│  ────────────────                                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ Node Network:     192.168.0.201-204  (Physical IPs)             │   │
+│  │ Pod Network:      10.244.0.0/16      (Cilium CNI)               │   │
+│  │ Service Network:  10.96.0.0/12       (ClusterIP range)          │   │
+│  │ LoadBalancer IPs: 192.168.0.210-220  (Cilium L2 Pool)           │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  TRAFFIC FLOW                                                           │
+│  ────────────                                                           │
+│  External Request                                                       │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
+│  │   Cilium    │───►│   Traefik   │───►│  HTTPRoute  │                 │
+│  │ L2 Announce │    │   Gateway   │    │   Routing   │                 │
+│  │ (ARP Reply) │    │ (TLS Term.) │    │  (Service)  │                 │
+│  └─────────────┘    └─────────────┘    └─────────────┘                 │
+│       │                                       │                         │
+│       │              ┌────────────────────────┘                         │
+│       │              ▼                                                  │
+│       │         ┌─────────────┐                                        │
+│       │         │  Backend    │                                        │
+│       │         │    Pod      │                                        │
+│       │         └─────────────┘                                        │
+│       │                                                                 │
+│  Internal (Pod-to-Pod)                                                  │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────┐    ┌─────────────┐                                    │
+│  │   Cilium    │───►│  eBPF Data  │  (No kube-proxy, direct routing)   │
+│  │   Agent     │    │    Path     │                                    │
+│  └─────────────┘    └─────────────┘                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Resource Budget
+
+With constrained hardware, careful resource allocation is critical. Below is the expected memory footprint:
+
+| Category | Component | Memory Request | Memory Limit | Node Placement |
+|----------|-----------|----------------|--------------|----------------|
+| **System** | kubelet + containerd | ~300MB | - | All |
+| **System** | Cilium Agent | 128MB | 512MB | All |
+| **Control Plane** | etcd | 256MB | 2GB | rpi4-1 |
+| **Control Plane** | API Server | 256MB | 2GB | rpi4-1 |
+| **Storage** | Longhorn Manager | 256MB | 512MB | rpi4-1 |
+| **Storage** | MinIO | 512MB | 1GB | rpi4-1 |
+| **GitOps** | ArgoCD (all components) | 512MB | 1GB | Any |
+| **Observability** | Prometheus | 512MB | 2GB | Any |
+| **Observability** | Loki | 256MB | 1GB | Any |
+| **Observability** | Grafana | 128MB | 256MB | Any |
+| **Security** | Falco | 128MB | 512MB | All (DaemonSet) |
+| **Security** | Kyverno | 128MB | 384MB | Any |
+| **Management** | Reloader | 64MB | 128MB | Any |
+| **Management** | Descheduler | 64MB | 128MB | Any |
+
+**Estimated Total:**
+- **Control Plane (rpi4-1):** ~4-5GB reserved, leaving ~3GB for workloads
+- **Workers (rpi4-2/3/4):** ~1GB system overhead, leaving ~3GB each for workloads
+- **Cluster Total Available:** ~12GB for application workloads
+
+> ⚠️ **Warning:** Running the full observability stack simultaneously may cause memory pressure. Consider disabling Kubeshark and Jaeger when not actively debugging.
 
 ### Software Stack & Justification
 
 #### **A. Orchestration & Deployment**
-*   **Kubernetes (Kubeadm):** The foundation. Installed via Ansible (Phase 1) to ensure a pure upstream experience.
-*   **Helm:** The package manager used by ArgoCD to deploy applications.
-*   **ArgoCD + Image Updater:** The GitOps engine (Phase 4). Monitors this repository and automatically syncs changes to the cluster. The Image Updater automates container version bumps based on registry tags.
-*   **Argo Workflows & Events:** The CI/CD engine (Phase 7). A Kubernetes-native pipeline system that replaces heavyweight tools like Jenkins. It handles builds, tests, and event triggers (webhooks) directly on the cluster.
+
+| Tool | Version | Purpose | Why This Tool? |
+|------|---------|---------|----------------|
+| **Kubernetes** | 1.31 | Container orchestration | Industry standard, upstream experience via kubeadm |
+| **Helm** | 3.x | Package management | Required by ArgoCD for chart deployments |
+| **ArgoCD** | 2.x | GitOps controller | Best-in-class GitOps, declarative, self-healing |
+| **Argo Image Updater** | 0.x | Image automation | Automatic version bumps from registry tags |
+| **Argo Workflows** | 3.x | CI/CD pipelines | Kubernetes-native, replaces Jenkins |
+| **Argo Events** | 1.x | Event automation | Webhook triggers, event-driven pipelines |
 
 #### **B. Network Layer**
-*   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF for superior performance. Configured with L2 Announcements to turn the Raspberry Pis into a physical Load Balancer.
-*   **Hubble:** Network observability tool (embedded in Cilium) for visualizing communication maps.
-*   **Tetragon:** eBPF-based security observability and runtime enforcement.
-*   **Traefik:** The Gateway API implementation. Manages external access to services via HTTPRoute resources and LoadBalancer IPs requested from Cilium. Gateway API is the successor to Ingress, providing more expressive routing capabilities.
 
-#### **C. Observability Stack** (Deployed via GitOps)
-*   **Metrics Server:** Cluster-wide resource metrics aggregator. Required for `kubectl top`, HPA, and VPA.
-*   **Prometheus Operator:** The standard for metrics collection and alerting.
-*   **Thanos:** Provides long-term storage for Prometheus metrics (deduplication and downsampling). *Depends on MinIO.*
-*   **Grafana:** Visualization for metrics and logs.
-*   **Fluent Bit:** Log collector. Gathers logs from all nodes.
-*   **Loki:** Log database. Stores logs indexed by labels. *Depends on MinIO.*
-*   **OpenTelemetry + Jaeger:** Distributed tracing. Tracks requests across microservices for latency debugging.
-*   **OpenCost:** Cloud cost allocation tool to estimate resource consumption.
-*   **Kube-state-metrics:** Exposes raw Kubernetes object metrics.
-*   **K8sGPT:** AI-powered diagnostics tool to explain cluster errors in plain English.
-*   **Kubeshark:** API traffic analyzer (Wireshark for K8s).
+| Tool | Version | Purpose | Why This Tool? |
+|------|---------|---------|----------------|
+| **Cilium** | 1.18.x | CNI + Load Balancing | eBPF performance, replaces kube-proxy, L2 announcements |
+| **Hubble** | (embedded) | Network observability | Service maps, flow visualization |
+| **Tetragon** | (embedded) | Runtime security | eBPF-based syscall monitoring |
+| **Traefik** | 3.x | Gateway API implementation | Native Gateway API support, lightweight |
 
-#### **D. Security Layer** (Deployed via GitOps)
-*   **Cert-Manager:** Automates the issuance and renewal of TLS certificates.
-*   **Harbor:** Private container registry to store built images locally.
-*   **OpenBao:** Secrets management (Community fork of Vault) to securely store API keys.
-*   **Trivy:** Vulnerability scanner integrated into the CI/CD pipeline.
-*   **OWASP ZAP:** Dynamic Application Security Testing (DAST) tool integrated into **Argo Workflows** for security testing.
-*   **Falco:** Runtime threat detection. Alerts on suspicious system calls.
-*   **Kyverno:** Policy engine. Enforces rules (e.g., "No root containers") at the API level.
+**Gateway API vs Ingress:**
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                    WHY GATEWAY API?                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Ingress (Legacy)              Gateway API (Modern)                 │
+│  ─────────────────             ────────────────────                 │
+│  • Single resource type        • Separated concerns:                │
+│  • Limited routing             │  - GatewayClass (infra)           │
+│  • Vendor annotations          │  - Gateway (ops team)             │
+│  • No traffic splitting        │  - HTTPRoute (dev team)           │
+│                                • Rich routing (headers, weights)   │
+│                                • Standard, portable                 │
+│                                • Role-based ownership               │
+│                                                                     │
+│  This guide uses Gateway API exclusively for all external access.  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### **C. Observability Stack**
+
+| Tool | Purpose | Depends On | Memory Impact |
+|------|---------|------------|---------------|
+| **Metrics Server** | Resource metrics (`kubectl top`, HPA, VPA) | - | Low (64MB) |
+| **Prometheus Operator** | Metrics collection & alerting | - | High (512MB-2GB) |
+| **Thanos** | Long-term metrics storage | MinIO | Medium (256MB) |
+| **Grafana** | Visualization dashboards | - | Low (128MB) |
+| **Fluent Bit** | Log collection (DaemonSet) | - | Low per node |
+| **Loki** | Log storage & querying | MinIO | Medium (256MB) |
+| **OpenTelemetry** | Trace collection | - | Low (128MB) |
+| **Jaeger** | Trace visualization | - | Medium (256MB) |
+| **OpenCost** | Cost estimation | Prometheus | Low (64MB) |
+| **Kube-state-metrics** | Kubernetes object metrics | - | Low (64MB) |
+| **K8sGPT** | AI-powered diagnostics | - | Low (64MB) |
+| **Kubeshark** | API traffic analysis | - | High (512MB+) |
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                    OBSERVABILITY DATA FLOW                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  METRICS PIPELINE                                                   │
+│  ────────────────                                                   │
+│  Pods ──► Prometheus ──► Thanos ──► MinIO (S3)                     │
+│                │                                                    │
+│                └──► Grafana (Visualization)                         │
+│                                                                     │
+│  LOGGING PIPELINE                                                   │
+│  ────────────────                                                   │
+│  Containers ──► Fluent Bit ──► Loki ──► MinIO (S3)                 │
+│                                   │                                 │
+│                                   └──► Grafana (Log Explorer)       │
+│                                                                     │
+│  TRACING PIPELINE                                                   │
+│  ────────────────                                                   │
+│  Applications ──► OpenTelemetry ──► Jaeger                         │
+│       (SDK)         (Collector)      (UI + Storage)                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### **D. Security Layer**
+
+| Tool | Purpose | Enforcement Point |
+|------|---------|-------------------|
+| **Cert-Manager** | TLS certificate automation | Cluster-wide |
+| **Harbor** | Private container registry | Image pulls |
+| **OpenBao** | Secrets management (Vault fork) | Application runtime |
+| **Trivy Operator** | Vulnerability scanning | CI/CD + continuous |
+| **OWASP ZAP** | Dynamic security testing | CI/CD pipelines |
+| **Falco** | Runtime threat detection | Kernel syscalls |
+| **Kyverno** | Policy enforcement | API admission |
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SECURITY DEFENSE LAYERS                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Layer 1: BUILD TIME                                                │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Trivy (Image Scan) ──► Harbor (Signed Images)              │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              │                                      │
+│  Layer 2: DEPLOY TIME        ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Kyverno (Admission) ──► "No privileged containers"         │   │
+│  │                      ──► "Images from Harbor only"          │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              │                                      │
+│  Layer 3: RUN TIME           ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Falco (Syscall Monitor) ──► Alert on shell in container    │   │
+│  │  Tetragon (eBPF)         ──► Block suspicious activity      │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 #### **E. Cluster Management & Storage**
-*   **Longhorn:** Distributed block storage (Phase 3). Configured to strictly use the 1TB HDD on the control plane.
-*   **MinIO:** Object storage. **Required Dependency** for Thanos, Loki, and Velero to function on bare metal.
-*   **Velero:** Backup and disaster recovery. Backs up cluster state and volumes to MinIO.
-*   **Reloader:** Automatically triggers rolling updates when ConfigMaps or Secrets change. Essential for GitOps workflows.
-*   **Descheduler:** Rebalances workloads across nodes to optimize resource utilization on constrained hardware.
-*   **Portainer:** Visual web UI for simplified container management.
-*   **K9s:** Terminal-based UI for real-time cluster interaction.
+
+| Tool | Purpose | Critical For |
+|------|---------|--------------|
+| **Longhorn** | Distributed block storage | PersistentVolumes |
+| **MinIO** | S3-compatible object storage | Thanos, Loki, Velero |
+| **Velero** | Backup & disaster recovery | Cluster state, volumes |
+| **Reloader** | Config change propagation | GitOps workflows |
+| **Descheduler** | Workload rebalancing | Resource optimization |
+| **Portainer** | Web UI for containers | Visual management |
+| **K9s** | Terminal UI | Real-time interaction |
+
+**Storage Dependency Chain:**
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                    STORAGE DEPENDENCIES                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│              ┌─────────┐                                            │
+│              │   HDD   │ (1TB Physical Disk)                        │
+│              └────┬────┘                                            │
+│                   │                                                 │
+│              ┌────▼────┐                                            │
+│              │Longhorn │ (Block Storage)                            │
+│              └────┬────┘                                            │
+│                   │                                                 │
+│         ┌─────────┼─────────┐                                       │
+│         │         │         │                                       │
+│    ┌────▼────┐ ┌──▼───┐ ┌───▼────┐                                 │
+│    │  MinIO  │ │Harbor│ │OpenBao │                                 │
+│    │  (S3)   │ │(Reg.)│ │(Vault) │                                 │
+│    └────┬────┘ └──────┘ └────────┘                                 │
+│         │                                                           │
+│    ┌────┴────────────────┐                                         │
+│    │         │           │                                          │
+│    ▼         ▼           ▼                                          │
+│  Thanos    Loki       Velero                                        │
+│ (Metrics) (Logs)     (Backups)                                      │
+│                                                                     │
+│  ⚠️ MinIO failure = Observability & Backup systems offline          │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 #### **F. Developer Experience**
-*   **Skaffold:** Command-line tool for local development iteration (code-sync, build, push, deploy loop).
+
+| Tool | Purpose | Usage |
+|------|---------|-------|
+| **Skaffold** | Local development loop | Code → Build → Push → Deploy |
+| **K9s** | Terminal cluster UI | Real-time pod management |
+| **Portainer** | Web cluster UI | Visual container management |
+| **Hubble UI** | Network visualization | Service dependency maps |
 
 ---
 
