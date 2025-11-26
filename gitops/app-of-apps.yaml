@@ -1,8 +1,30 @@
+# =============================================================================
+# Observability Stack - Prometheus, Grafana, Alertmanager
+# =============================================================================
+# This is the initial "App of Apps" deployment that provides comprehensive
+# monitoring and alerting for the cluster.
+#
+# Components Deployed:
+#   - Prometheus: Metrics collection and storage
+#   - Grafana: Visualization and dashboards
+#   - Alertmanager: Alert routing and notification
+#   - Node Exporter: Host metrics
+#   - kube-state-metrics: Kubernetes object metrics
+#
+# Access:
+#   - Grafana: http://grafana.192.168.0.210.nip.io
+#   - Default Login: admin / prom-operator
+#
+# Storage: All components use Longhorn for persistence
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: observability-stack
   namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,8 +33,17 @@ spec:
     targetRevision: 66.3.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Global Settings
+        # -------------------------------------------------------------------
+        fullnameOverride: prometheus
+        
+        # -------------------------------------------------------------------
+        # Prometheus Configuration
+        # -------------------------------------------------------------------
         prometheus:
           prometheusSpec:
+            # Persistent storage for metrics
             storageSpec:
               volumeClaimTemplate:
                 spec:
@@ -21,15 +52,44 @@ spec:
                   resources:
                     requests:
                       storage: 10Gi
+            
+            # Retention settings
+            retention: 15d
+            retentionSize: "8GB"
+            
+            # Resource limits for RPi
             resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
               limits:
-                memory: 500Mi
-
+                cpu: 500m
+                memory: 512Mi
+            
+            # Scrape all namespaces
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+        
+        # -------------------------------------------------------------------
+        # Grafana Configuration
+        # -------------------------------------------------------------------
         grafana:
+          # Persistent storage for dashboards
           persistence:
             enabled: true
             storageClassName: longhorn
             size: 2Gi
+          
+          # Resource limits for RPi
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          
+          # Ingress configuration
           ingress:
             enabled: true
             ingressClassName: traefik
@@ -37,19 +97,69 @@ spec:
               - grafana.192.168.0.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
-
+          
+          # Additional dashboards
+          dashboardProviders:
+            dashboardproviders.yaml:
+              apiVersion: 1
+              providers:
+                - name: 'default'
+                  folder: ''
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/default
+        
+        # -------------------------------------------------------------------
+        # Alertmanager Configuration
+        # -------------------------------------------------------------------
         alertmanager:
           alertmanagerSpec:
+            # Persistent storage for alert state
             storage:
               volumeClaimTemplate:
                 spec:
                   storageClassName: longhorn
+                  accessModes: ["ReadWriteOnce"]
                   resources:
                     requests:
                       storage: 2Gi
+            
+            # Resource limits for RPi
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Component Resource Limits
+        # -------------------------------------------------------------------
+        kube-state-metrics:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+        
+        prometheus-node-exporter:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true

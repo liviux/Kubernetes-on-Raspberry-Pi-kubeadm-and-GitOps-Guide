@@ -1,3 +1,26 @@
+# =============================================================================
+# Gitea - Self-Hosted Git Server
+# =============================================================================
+# Provides the Git repository hosting for the GitOps workflow. All cluster
+# configuration lives here as code, making it the "single source of truth".
+#
+# Features:
+#   - PostgreSQL database for production reliability
+#   - Longhorn storage for persistent data
+#   - SSH and HTTP access for git operations
+#   - Modern UI with auto theme detection
+#
+# Access:
+#   - Web: http://gitea.192.168.0.210.nip.io
+#   - SSH: ssh://git@192.168.0.210:2222/user/repo.git
+#
+# First-time Setup:
+#   1. Access web UI
+#   2. Create admin account
+#   3. Create 'home-cluster' repository
+#   4. Push gitops/ folder content
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -5,6 +28,8 @@ metadata:
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-options: ServerSideApply=true
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -13,23 +38,38 @@ spec:
     targetRevision: 10.6.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Global Storage Configuration
+        # -------------------------------------------------------------------
         global:
           storageClass: longhorn
         
+        # -------------------------------------------------------------------
+        # Gitea Application Settings
+        # -------------------------------------------------------------------
         gitea:
           admin:
-            existingSecret: "" # We create admin on first login
+            existingSecret: ""  # Create admin on first login via UI
+          
           config:
             APP_NAME: "PiCluster Git"
+            
             server:
               DOMAIN: "gitea.192.168.0.210.nip.io"
               ROOT_URL: "http://gitea.192.168.0.210.nip.io/"
               SSH_DOMAIN: "192.168.0.210"
               SSH_PORT: "2222"
+            
+            ui:
               DEFAULT_THEME: "gitea-auto"
+            
             service:
-              DISABLE_REGISTRATION: false
-
+              DISABLE_REGISTRATION: false  # Enable for first setup
+            
+            repository:
+              DEFAULT_BRANCH: "main"
+          
+          # Resource limits for RPi
           resources:
             requests:
               memory: 256Mi
@@ -37,11 +77,18 @@ spec:
             limits:
               memory: 1Gi
               cpu: 1000m
-
+        
+        # -------------------------------------------------------------------
+        # Persistent Storage
+        # -------------------------------------------------------------------
         persistence:
           enabled: true
           size: 10Gi
-
+          storageClass: longhorn
+        
+        # -------------------------------------------------------------------
+        # PostgreSQL Database
+        # -------------------------------------------------------------------
         postgresql:
           enabled: true
           global:
@@ -49,7 +96,17 @@ spec:
           primary:
             persistence:
               size: 5Gi
-
+            resources:
+              requests:
+                memory: 128Mi
+                cpu: 50m
+              limits:
+                memory: 256Mi
+                cpu: 250m
+        
+        # -------------------------------------------------------------------
+        # Ingress Configuration
+        # -------------------------------------------------------------------
         ingress:
           enabled: true
           className: traefik
@@ -60,19 +117,28 @@ spec:
                   pathType: Prefix
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
-
+        
+        # -------------------------------------------------------------------
+        # Service Configuration
+        # -------------------------------------------------------------------
         service:
+          http:
+            type: ClusterIP
+            port: 3000
           ssh:
             type: LoadBalancer
             port: 2222
-            annotations: 
+            annotations:
               io.cilium/lb-ipam-ips: "192.168.0.210"
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: gitea
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true

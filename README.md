@@ -3216,63 +3216,185 @@ rpi4-4   false        <none>
 
 ## 8. Phase 4: GitOps & Observability
 
-We now move up the stack to the application layer. Instead of managing tools individually, we establish the **GitOps Loop**.
+We now move up the stack to the application layer. Instead of managing tools individually, we establish the **GitOps Loop**—a self-healing, declarative approach where Git is the single source of truth for cluster state.
 
-**The Bootstrap Order:**
-1.  **Traefik:** Provides the LoadBalancer IP (`192.168.0.210`) and routing so we can access UIs.
-2.  **ArgoCD:** The controller that syncs Git state to the Cluster.
-3.  **Gitea:** The internal Git server where our cluster configuration will live.
-4.  **App of Apps:** A single manifest that tells ArgoCD to install everything else (Observability, Security, etc.).
+### Phase 4 Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           GITOPS CONTROL LOOP                                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│   ┌─────────────────────────────────────────────────────────────────────────┐  │
+│   │                         EXTERNAL ACCESS FLOW                             │  │
+│   │                                                                          │  │
+│   │    Internet ──► Router ──► 192.168.0.210 ──► Traefik Gateway            │  │
+│   │                              (Cilium L2)       │                         │  │
+│   │                                                ▼                         │  │
+│   │    ┌──────────────────────────────────────────────────────────────┐     │  │
+│   │    │              HTTPRoute Routing Table                         │     │  │
+│   │    │  ┌─────────────────────┬─────────────────────────────────┐  │     │  │
+│   │    │  │ argocd.*.nip.io     │ → argocd-server:80              │  │     │  │
+│   │    │  │ gitea.*.nip.io      │ → gitea-http:3000               │  │     │  │
+│   │    │  │ grafana.*.nip.io    │ → grafana:80                    │  │     │  │
+│   │    │  │ minio.*.nip.io      │ → minio-console:9001            │  │     │  │
+│   │    │  └─────────────────────┴─────────────────────────────────┘  │     │  │
+│   │    └──────────────────────────────────────────────────────────────┘     │  │
+│   └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                 │
+│   ┌─────────────────────────────────────────────────────────────────────────┐  │
+│   │                         GITOPS RECONCILIATION                            │  │
+│   │                                                                          │  │
+│   │   ┌─────────────┐         ┌─────────────┐         ┌─────────────┐       │  │
+│   │   │   Gitea     │◄───────►│   ArgoCD    │────────►│  Kubernetes │       │  │
+│   │   │ (Git Repo)  │  poll   │ (Controller)│  apply  │   Cluster   │       │  │
+│   │   └─────────────┘         └──────┬──────┘         └─────────────┘       │  │
+│   │                                  │                                       │  │
+│   │                                  ▼                                       │  │
+│   │                          ┌─────────────┐                                │  │
+│   │                          │App of Apps  │                                │  │
+│   │                          │  (Parent)   │                                │  │
+│   │                          └──────┬──────┘                                │  │
+│   │                                 │                                        │  │
+│   │            ┌────────────────────┼────────────────────┐                  │  │
+│   │            ▼                    ▼                    ▼                  │  │
+│   │    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐           │  │
+│   │    │  Security   │      │Observability│      │ Management  │           │  │
+│   │    │   Apps      │      │    Apps     │      │    Apps     │           │  │
+│   │    └─────────────┘      └─────────────┘      └─────────────┘           │  │
+│   │                                                                          │  │
+│   └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 4 Components
+
+| Component | Version | Purpose | Access URL |
+|-----------|---------|---------|------------|
+| **Traefik** | 37.3.0 | Gateway API / Ingress Controller | LoadBalancer: 192.168.0.210 |
+| **ArgoCD** | 7.7.0 | GitOps Controller | argocd.192.168.0.210.nip.io |
+| **Gitea** | 10.6.0 | Self-hosted Git Server | gitea.192.168.0.210.nip.io |
+| **Prometheus Stack** | 66.3.0 | Metrics & Alerting | grafana.192.168.0.210.nip.io |
+
+### The Bootstrap Order
+
+The components must be installed in a specific order due to dependencies:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     PHASE 4 BOOTSTRAP SEQUENCE                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Step 1          Step 2          Step 3          Step 4                 │
+│  ┌──────┐        ┌──────┐        ┌──────┐        ┌──────┐              │
+│  │Traefik│───────►│ArgoCD│───────►│Gitea │───────►│App of│              │
+│  │      │        │      │        │      │        │ Apps │              │
+│  └──────┘        └──────┘        └──────┘        └──────┘              │
+│     │               │               │               │                   │
+│     ▼               ▼               ▼               ▼                   │
+│  Provides        Provides        Provides        Deploys               │
+│  LoadBalancer    GitOps          Git Repo        Everything            │
+│  + Routing       Engine          Storage         Else                  │
+│                                                                         │
+│  ════════════════════════════════════════════════════════════════════  │
+│  Manual Bootstrap (Scripts)       │    Automated (ArgoCD Managed)      │
+│  ════════════════════════════════════════════════════════════════════  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ### 8.1 Gateway API Bootstrap (Traefik)
+
 **File:** `bootstrap/traefik/install.sh`
 
-This script installs **Traefik v3** as a Gateway API implementation. Gateway API is the successor to Ingress, providing:
-*   **More expressive routing:** Header-based, query-based, and method-based routing
-*   **Role-based configuration:** Infrastructure admins manage Gateways, app teams manage HTTPRoutes
-*   **Portable:** Standard API across all implementations (Traefik, Cilium, NGINX, etc.)
+This script installs **Traefik v3** as the cluster's ingress controller and Gateway API implementation.
 
-Traefik is configured to:
-*   Request the specific LoadBalancer IP (`192.168.0.210`) from Cilium.
-*   Serve as the Gateway API controller via GatewayClass.
-*   Expose Prometheus metrics for the Observability stack.
-*   Enable JSON access logs for the Logging stack (Loki).
+**Why Traefik?**
+
+| Feature | Benefit for RPi Cluster |
+|---------|-------------------------|
+| **Lightweight** | Low memory footprint (~100MB) |
+| **Gateway API Native** | Modern routing standard, future-proof |
+| **Auto-discovery** | Automatically finds Ingress/HTTPRoute resources |
+| **Prometheus Metrics** | Built-in observability integration |
+| **JSON Access Logs** | Structured logs for Loki ingestion |
+
+**Configuration Highlights:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `loadBalancerIP` | `192.168.0.210` | Static IP from Cilium L2 pool |
+| `providers.kubernetesCRD.allowCrossNamespace` | `true` | Services in any namespace can use Traefik |
+| `logs.access.format` | `json` | Structured logs for Loki |
+| `metrics.prometheus.enabled` | `true` | Expose metrics for Prometheus |
 
 <details>
 <summary>📄 Click to expand full bootstrap/traefik/install.sh</summary>
 
 ```bash
 #!/bin/bash
+# =============================================================================
+# Phase 4a: Traefik Gateway Bootstrap Script
+# =============================================================================
+# Installs Traefik v3 as the cluster's ingress controller and Gateway API
+# implementation. All external traffic flows through this single entry point.
+#
+# Features:
+#   - LoadBalancer IP from Cilium L2 pool (192.168.0.210)
+#   - Cross-namespace routing support
+#   - Prometheus metrics enabled
+#   - JSON access logs for Loki
+#
+# Prerequisites:
+#   - Cilium CNI with L2 announcements enabled
+#   - kubectl and helm configured
+#
+# Usage: bash bootstrap/traefik/install.sh
+# =============================================================================
+
 set -e
-echo "=== PHASE 4a: TRAEFIK + GATEWAY API BOOTSTRAP ==="
 
-# 1. Install Gateway API CRDs (required before Traefik)
-echo "Installing Gateway API CRDs..."
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              PHASE 4a: TRAEFIK GATEWAY BOOTSTRAP                      ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
 
-# 2. Add Repo
+# =============================================================================
+# 1. Add Helm Repository
+# =============================================================================
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 1: Adding Traefik Helm Repository                              │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 helm repo add traefik https://traefik.github.io/charts
 helm repo update
 
-# 3. Install Traefik v3 with Gateway API support
-echo "Deploying Traefik..."
+# =============================================================================
+# 2. Install Traefik
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 2: Installing Traefik v3                                       │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+echo "Deploying Traefik with Gateway API support..."
+
 helm upgrade --install traefik traefik/traefik \
   --namespace traefik-system \
   --create-namespace \
-  --version 34.0.0 \
+  --version 37.3.0 \
   --set service.type=LoadBalancer \
   --set service.spec.loadBalancerIP=192.168.0.210 \
   --set ports.web.nodePort=null \
   --set ports.websecure.nodePort=null \
-  --set providers.kubernetesGateway.enabled=true \
   --set providers.kubernetesCRD.enabled=true \
   --set providers.kubernetesCRD.allowCrossNamespace=true \
+  --set providers.kubernetesIngress.enabled=true \
   --set logs.general.level=INFO \
   --set logs.access.enabled=true \
   --set logs.access.format=json \
   --set metrics.prometheus.enabled=true \
   --set metrics.prometheus.addEntryPointsLabels=true \
   --set metrics.prometheus.addRoutersLabels=true \
+  --set metrics.prometheus.addServicesLabels=true \
   --set-string service.annotations."prometheus\.io/scrape"="true" \
   --set-string service.annotations."prometheus\.io/port"="9100" \
   --set resources.requests.cpu="100m" \
@@ -3281,65 +3403,130 @@ helm upgrade --install traefik traefik/traefik \
   --set resources.limits.memory="300Mi" \
   --wait
 
-# 4. Create the shared Gateway resource
-echo "Creating Gateway resource..."
-cat <<EOF | kubectl apply -f -
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: main-gateway
-  namespace: traefik-system
-spec:
-  gatewayClassName: traefik
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 80
-      allowedRoutes:
-        namespaces:
-          from: All
-    - name: https
-      protocol: HTTPS
-      port: 443
-      allowedRoutes:
-        namespaces:
-          from: All
-      tls:
-        mode: Terminate
-        certificateRefs:
-          - name: wildcard-cert
-            namespace: traefik-system
-EOF
+# =============================================================================
+# 3. Verify Installation
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 3: Verifying Installation                                      │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 
-echo "=== TRAEFIK + GATEWAY API INSTALLED ==="
-echo "External IP should be assigned shortly."
-echo "Gateway: main-gateway.traefik-system"
+echo "Waiting for LoadBalancer IP assignment..."
+sleep 5
+
+EXTERNAL_IP=$(kubectl get svc traefik -n traefik-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              TRAEFIK GATEWAY INSTALLED                                ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Configuration:"
+echo "  • Namespace: traefik-system"
+echo "  • External IP: $EXTERNAL_IP"
+echo "  • HTTP Port: 80 (web)"
+echo "  • HTTPS Port: 443 (websecure)"
+echo "  • Metrics: :9100/metrics"
+echo ""
+echo "Verify with:"
+echo "  kubectl get svc -n traefik-system"
+echo "  curl -I http://$EXTERNAL_IP"
+echo ""
+echo "Next command:"
+echo "  bash bootstrap/argocd/install.sh"
 ```
 
 </details>
 
 ### 8.2 GitOps Bootstrap (ArgoCD)
+
 **File:** `bootstrap/argocd/install.sh`
 
-This script installs **ArgoCD**.
-*   **Insecure Mode:** We disable ArgoCD's internal TLS because Traefik handles SSL termination at the Gateway level.
-*   **HTTPRoute:** We apply a Gateway API HTTPRoute so the UI is accessible at `argocd.192.168.0.210.nip.io`.
+This script installs **ArgoCD**, the GitOps controller that continuously monitors Git repositories and ensures the cluster state matches the desired state defined in those repositories.
+
+**Why ArgoCD?**
+
+| Feature | Benefit for RPi Cluster |
+|---------|-------------------------|
+| **Declarative** | All config in Git, no manual `kubectl apply` |
+| **Self-Healing** | Auto-corrects drift from desired state |
+| **Multi-tenancy** | Projects isolate teams/environments |
+| **UI Dashboard** | Visual sync status and diff viewer |
+| **Rollback** | One-click revert to any previous state |
+
+**Configuration Highlights:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `server.extraArgs` | `--insecure` | TLS offload to Traefik (avoids double encryption) |
+| `global.logging.format` | `json` | Structured logs for Loki |
+| `configs.params.server.insecure` | `true` | Allows HTTP backend |
+
+**Expected Output:**
+
+```text
+╔═══════════════════════════════════════════════════════════════════════╗
+║              ARGOCD GITOPS CONTROLLER INSTALLED                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+Access Information:
+  • URL: http://argocd.192.168.0.210.nip.io
+  • Username: admin
+  • Password: <see command below>
+
+Retrieve Admin Password:
+  kubectl -n argocd get secret argocd-initial-admin-secret \
+    -o jsonpath='{.data.password}' | base64 -d && echo
+```
 
 <details>
 <summary>📄 Click to expand full bootstrap/argocd/install.sh</summary>
 
 ```bash
 #!/bin/bash
-set -e
-echo "=== PHASE 4b: ARGOCD BOOTSTRAP ==="
+# =============================================================================
+# Phase 4b: ArgoCD GitOps Controller Bootstrap Script
+# =============================================================================
+# Installs ArgoCD, the GitOps engine that watches Git repositories and
+# automatically syncs the cluster state to match the desired configuration.
+#
+# Features:
+#   - Insecure mode (TLS offloaded to Traefik)
+#   - JSON logging for Loki integration
+#   - Ingress for UI access
+#
+# Prerequisites:
+#   - Traefik installed with Gateway/Ingress support
+#   - kubectl and helm configured
+#
+# Usage: bash bootstrap/argocd/install.sh
+# =============================================================================
 
-# 1. Add Repo
+set -e
+
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              PHASE 4b: ARGOCD GITOPS BOOTSTRAP                        ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+# =============================================================================
+# 1. Add Helm Repository
+# =============================================================================
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 1: Adding ArgoCD Helm Repository                               │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 helm repo add argo https://argoproj.github.io/argo-helm
 helm repo update
 
+# =============================================================================
 # 2. Install ArgoCD
-# We use --insecure to offload TLS to Traefik Gateway
-echo "Deploying ArgoCD..."
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 2: Installing ArgoCD                                           │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+echo "Deploying ArgoCD with insecure mode (TLS offload to Traefik)..."
+
 helm upgrade --install argocd argo/argo-cd \
   --namespace argocd \
   --create-namespace \
@@ -3347,51 +3534,148 @@ helm upgrade --install argocd argo/argo-cd \
   --set server.extraArgs="{--insecure}" \
   --set configs.params."server\.insecure"=true \
   --set global.logging.format=json \
+  --set server.resources.requests.cpu="100m" \
+  --set server.resources.requests.memory="128Mi" \
+  --set server.resources.limits.cpu="500m" \
+  --set server.resources.limits.memory="256Mi" \
+  --set controller.resources.requests.cpu="100m" \
+  --set controller.resources.requests.memory="256Mi" \
+  --set controller.resources.limits.cpu="500m" \
+  --set controller.resources.limits.memory="512Mi" \
+  --set repoServer.resources.requests.cpu="100m" \
+  --set repoServer.resources.requests.memory="128Mi" \
+  --set repoServer.resources.limits.cpu="500m" \
+  --set repoServer.resources.limits.memory="256Mi" \
   --wait
 
-# 3. Expose UI via Gateway API HTTPRoute
-echo "Creating HTTPRoute for ArgoCD..."
+# =============================================================================
+# 3. Create Ingress for UI Access
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 3: Creating Ingress for ArgoCD UI                              │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+echo "Creating Ingress for ArgoCD..."
+
 cat <<EOF | kubectl apply -f -
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
   name: argocd-server
   namespace: argocd
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
-  parentRefs:
-    - name: main-gateway
-      namespace: traefik-system
-  hostnames:
-    - "argocd.192.168.0.210.nip.io"
   rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
-        - name: argocd-server
-          port: 80
+    - host: argocd.192.168.0.210.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80
 EOF
 
-echo "=== ARGOCD READY ==="
-echo "URL: http://argocd.192.168.0.210.nip.io"
-echo "Get Password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+# =============================================================================
+# 4. Retrieve Initial Admin Password
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 4: Retrieving Admin Credentials                                │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+# Wait for secret to be created
+sleep 5
+ARGOCD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || echo "pending")
+
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              ARGOCD GITOPS CONTROLLER INSTALLED                       ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Access Information:"
+echo "  • URL: http://argocd.192.168.0.210.nip.io"
+echo "  • Username: admin"
+echo "  • Password: $ARGOCD_PASSWORD"
+echo ""
+echo "Retrieve Password Later:"
+echo "  kubectl -n argocd get secret argocd-initial-admin-secret \\"
+echo "    -o jsonpath='{.data.password}' | base64 -d && echo"
+echo ""
+echo "Verify with:"
+echo "  kubectl get pods -n argocd"
+echo "  argocd app list"
+echo ""
+echo "Next command:"
+echo "  kubectl apply -f gitops/services/gitea.yaml"
 ```
 
 </details>
 
 ### 8.3 Source Control Service (Gitea)
+
 **File:** `gitops/services/gitea.yaml`
 
-This is our first **Declarative Application**. Instead of a shell script, this is a YAML file we feed to ArgoCD.
-*   **Database:** Deploys a dedicated PostgreSQL instance managed by the chart.
-*   **Storage:** Uses the `longhorn` storage class (HDD).
-*   **UI:** Configured with a modern theme and mapped to `gitea.192.168.0.210.nip.io`.
+This is our first **Declarative Application**. Instead of a shell script, this is a YAML file we feed to ArgoCD. Gitea provides a self-hosted Git server that serves as the "source of truth" for our GitOps workflow.
+
+**Why Gitea?**
+
+| Feature | Benefit for RPi Cluster |
+|---------|-------------------------|
+| **Lightweight** | Runs well on ARM64 with ~200MB memory |
+| **Self-contained** | No external dependencies required |
+| **GitHub-like UX** | Familiar interface for developers |
+| **Built-in CI** | Gitea Actions for local CI/CD |
+| **SSH + HTTP** | Both protocols supported |
+
+**Gitea Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `storageClass` | `longhorn` | Persistent data on HDD-backed storage |
+| `postgresql.enabled` | `true` | Production-grade database |
+| `persistence.size` | `10Gi` | Repository data storage |
+| `ssh.port` | `2222` | Avoid conflict with node SSH |
+| `service.ssh.type` | `LoadBalancer` | Direct SSH access via Cilium L2 |
+
+**Access Information:**
+
+| Service | URL / Address |
+|---------|---------------|
+| Web UI | http://gitea.192.168.0.210.nip.io |
+| SSH Clone | ssh://git@192.168.0.210:2222/user/repo.git |
+| HTTP Clone | http://gitea.192.168.0.210.nip.io/user/repo.git |
 
 <details>
 <summary>📄 Click to expand full gitops/services/gitea.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Gitea - Self-Hosted Git Server
+# =============================================================================
+# Provides the Git repository hosting for the GitOps workflow. All cluster
+# configuration lives here as code, making it the "single source of truth".
+#
+# Features:
+#   - PostgreSQL database for production reliability
+#   - Longhorn storage for persistent data
+#   - SSH and HTTP access for git operations
+#   - Modern UI with auto theme detection
+#
+# Access:
+#   - Web: http://gitea.192.168.0.210.nip.io
+#   - SSH: ssh://git@192.168.0.210:2222/user/repo.git
+#
+# First-time Setup:
+#   1. Access web UI
+#   2. Create admin account
+#   3. Create 'home-cluster' repository
+#   4. Push gitops/ folder content
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -3399,6 +3683,8 @@ metadata:
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-options: ServerSideApply=true
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -3407,23 +3693,38 @@ spec:
     targetRevision: 10.6.0
     helm:
       values: |
+        # ---------------------------------------------------------------------
+        # Global Storage Configuration
+        # ---------------------------------------------------------------------
         global:
           storageClass: longhorn
         
+        # ---------------------------------------------------------------------
+        # Gitea Application Settings
+        # ---------------------------------------------------------------------
         gitea:
           admin:
-            existingSecret: "" # We create admin on first login
+            existingSecret: ""  # Create admin on first login via UI
+          
           config:
             APP_NAME: "PiCluster Git"
+            
             server:
               DOMAIN: "gitea.192.168.0.210.nip.io"
               ROOT_URL: "http://gitea.192.168.0.210.nip.io/"
               SSH_DOMAIN: "192.168.0.210"
               SSH_PORT: "2222"
+            
+            ui:
               DEFAULT_THEME: "gitea-auto"
+            
             service:
-              DISABLE_REGISTRATION: false
-
+              DISABLE_REGISTRATION: false  # Enable for first setup
+            
+            repository:
+              DEFAULT_BRANCH: "main"
+          
+          # Resource limits for RPi
           resources:
             requests:
               memory: 256Mi
@@ -3431,11 +3732,18 @@ spec:
             limits:
               memory: 1Gi
               cpu: 1000m
-
+        
+        # ---------------------------------------------------------------------
+        # Persistent Storage
+        # ---------------------------------------------------------------------
         persistence:
           enabled: true
           size: 10Gi
-
+          storageClass: longhorn
+        
+        # ---------------------------------------------------------------------
+        # PostgreSQL Database
+        # ---------------------------------------------------------------------
         postgresql:
           enabled: true
           global:
@@ -3443,69 +3751,157 @@ spec:
           primary:
             persistence:
               size: 5Gi
-
-        # Disable built-in ingress - we use Gateway API HTTPRoute
+            resources:
+              requests:
+                memory: 128Mi
+                cpu: 50m
+              limits:
+                memory: 256Mi
+                cpu: 250m
+        
+        # ---------------------------------------------------------------------
+        # Service Configuration
+        # ---------------------------------------------------------------------
+        # Disable built-in ingress - we use separate Ingress resource
         ingress:
           enabled: false
-
+        
         service:
           http:
             type: ClusterIP
+            port: 3000
           ssh:
             type: LoadBalancer
             port: 2222
-            annotations: 
+            annotations:
               io.cilium/lb-ipam-ips: "192.168.0.210"
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: gitea
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true
+
 ---
-# HTTPRoute for Gitea (Gateway API)
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
+# =============================================================================
+# Ingress for Gitea Web UI
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
   name: gitea
   namespace: gitea
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
-  parentRefs:
-    - name: main-gateway
-      namespace: traefik-system
-  hostnames:
-    - "gitea.192.168.0.210.nip.io"
   rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
-        - name: gitea-http
-          port: 3000
+    - host: gitea.192.168.0.210.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gitea-http
+                port:
+                  number: 3000
 ```
 
 </details>
 
 ### 8.4 The "App of Apps" Pattern
+
 **File:** `gitops/app-of-apps.yaml`
 
-This is the master controller. It points to your Git repository (once created in Gitea) and recursively installs everything else defined in the `gitops/` folder (Security, Observability, Management).
+The **App of Apps** pattern is the key to scalable GitOps. Instead of manually deploying each application, we deploy one "parent" Application that points to a directory containing child Applications. ArgoCD recursively discovers and syncs all of them.
 
-*Note: Initially, this will be manual. Once you migrate the code to Gitea (Step 9.5), you will update the `repoURL` here.*
+**How It Works:**
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        APP OF APPS HIERARCHY                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                    ┌─────────────────────────────┐                         │
+│                    │      Root Application       │                         │
+│                    │    (app-of-apps.yaml)       │                         │
+│                    └─────────────┬───────────────┘                         │
+│                                  │                                          │
+│                                  │ watches gitops/ directory                │
+│                                  │                                          │
+│    ┌─────────────┬───────────────┼───────────────┬─────────────┐           │
+│    ▼             ▼               ▼               ▼             ▼           │
+│ ┌──────┐    ┌────────┐    ┌─────────────┐  ┌──────────┐  ┌─────────┐      │
+│ │cicd/ │    │infra/  │    │observability│  │security/ │  │storage/ │      │
+│ │      │    │        │    │/            │  │          │  │         │      │
+│ └──┬───┘    └───┬────┘    └──────┬──────┘  └────┬─────┘  └────┬────┘      │
+│    │            │                │              │             │            │
+│    ▼            ▼                ▼              ▼             ▼            │
+│ argo-       cert-         prometheus      kyverno         minio           │
+│ workflows   manager       grafana         falco           velero          │
+│ argo-                     loki            trivy                           │
+│ events                    jaeger          openbao                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Initial Bootstrap - Observability Stack:**
+
+For the initial deployment, we start with the **kube-prometheus-stack** which provides:
+
+| Component | Purpose |
+|-----------|---------|
+| **Prometheus** | Metrics collection and alerting |
+| **Grafana** | Dashboards and visualization |
+| **Alertmanager** | Alert routing and silencing |
+| **Node Exporter** | Host-level metrics |
+| **kube-state-metrics** | Kubernetes object metrics |
+
+**Configuration Highlights:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `prometheus.storageSpec` | `10Gi` Longhorn | Persistent metrics storage |
+| `grafana.persistence` | `2Gi` Longhorn | Dashboard persistence |
+| `alertmanager.storage` | `2Gi` Longhorn | Alert state persistence |
 
 <details>
 <summary>📄 Click to expand full gitops/app-of-apps.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Observability Stack - Prometheus, Grafana, Alertmanager
+# =============================================================================
+# This is the initial "App of Apps" deployment that provides comprehensive
+# monitoring and alerting for the cluster.
+#
+# Components Deployed:
+#   - Prometheus: Metrics collection and storage
+#   - Grafana: Visualization and dashboards
+#   - Alertmanager: Alert routing and notification
+#   - Node Exporter: Host metrics
+#   - kube-state-metrics: Kubernetes object metrics
+#
+# Access:
+#   - Grafana: http://grafana.192.168.0.210.nip.io
+#   - Default Login: admin / prom-operator
+#
+# Storage: All components use Longhorn for persistence
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: observability-stack
   namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -3514,8 +3910,17 @@ spec:
     targetRevision: 66.3.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Global Settings
+        # -------------------------------------------------------------------
+        fullnameOverride: prometheus
+        
+        # -------------------------------------------------------------------
+        # Prometheus Configuration
+        # -------------------------------------------------------------------
         prometheus:
           prometheusSpec:
+            # Persistent storage for metrics
             storageSpec:
               volumeClaimTemplate:
                 spec:
@@ -3524,31 +3929,109 @@ spec:
                   resources:
                     requests:
                       storage: 10Gi
+            
+            # Retention settings
+            retention: 15d
+            retentionSize: "8GB"
+            
+            # Resource limits for RPi
             resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
               limits:
-                memory: 500Mi
-
+                cpu: 500m
+                memory: 512Mi
+            
+            # Scrape all namespaces
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+        
+        # -------------------------------------------------------------------
+        # Grafana Configuration
+        # -------------------------------------------------------------------
         grafana:
+          # Persistent storage for dashboards
           persistence:
             enabled: true
             storageClassName: longhorn
             size: 2Gi
-          # Disable built-in ingress - we use Gateway API HTTPRoute
+          
+          # Resource limits for RPi
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          
+          # Disable built-in ingress - we use separate Ingress resource
           ingress:
             enabled: false
-
+          
+          # Additional dashboards
+          dashboardProviders:
+            dashboardproviders.yaml:
+              apiVersion: 1
+              providers:
+                - name: 'default'
+                  folder: ''
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/default
+        
+        # -------------------------------------------------------------------
+        # Alertmanager Configuration
+        # -------------------------------------------------------------------
         alertmanager:
           alertmanagerSpec:
+            # Persistent storage for alert state
             storage:
               volumeClaimTemplate:
                 spec:
                   storageClassName: longhorn
+                  accessModes: ["ReadWriteOnce"]
                   resources:
                     requests:
                       storage: 2Gi
+            
+            # Resource limits for RPi
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Component Resource Limits
+        # -------------------------------------------------------------------
+        kube-state-metrics:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+        
+        prometheus-node-exporter:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  
   syncPolicy:
     automated:
       prune: true
@@ -3556,40 +4039,158 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+
+---
+# =============================================================================
+# Ingress for Grafana UI
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: monitoring
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: grafana.192.168.0.210.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus-grafana
+                port:
+                  number: 80
 ```
 
 </details>
 
 ### 8.5 Phase 4 Execution Steps
 
-1.  **Install Traefik:**
-    ```bash
-    bash bootstrap/traefik/install.sh
-    ```
-    *Verify: `kubectl get svc -n traefik-system` should show External-IP `192.168.0.210`.*
+Execute these commands in order from your control machine:
 
-2.  **Install ArgoCD:**
-    ```bash
-    bash bootstrap/argocd/install.sh
-    ```
-    *Verify: Open `http://argocd.192.168.0.210.nip.io` and login with the secret password.*
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     PHASE 4 EXECUTION CHECKLIST                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  □ Step 1: Install Traefik (Gateway/Ingress)                               │
+│  □ Step 2: Install ArgoCD (GitOps Controller)                              │
+│  □ Step 3: Deploy Gitea (Git Server)                                       │
+│  □ Step 4: Create Repository in Gitea                                      │
+│  □ Step 5: Deploy Observability Stack                                      │
+│  □ Step 6: Verify All Services                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-3.  **Deploy Gitea (via ArgoCD):**
-    ```bash
-    kubectl apply -f gitops/services/gitea.yaml
-    ```
-    *Wait 5 minutes. Verify: Open `http://gitea.192.168.0.210.nip.io` and create your admin account.*
+**Step 1: Install Traefik**
 
-4.  **The Pivot (Critical Step):**
-    *   Create a repository in Gitea named `home-cluster`.
-    *   Push your local `gitops/` folder to this new repo.
-    *   (Optional) Modify the `gitea.yaml` and `app-of-apps.yaml` to point to your new `http://gitea...` repo URL instead of public charts, completing the loop.
+```bash
+bash bootstrap/traefik/install.sh
+```
 
-5.  **Deploy Observability:**
-    ```bash
-    kubectl apply -f gitops/app-of-apps.yaml
-    ```
-    *Verify: Open `http://grafana.192.168.0.210.nip.io`.*
+**Verify:**
+```bash
+# Check Traefik service has External IP
+kubectl get svc -n traefik-system
+
+# Expected output:
+# NAME      TYPE           CLUSTER-IP     EXTERNAL-IP     PORT(S)
+# traefik   LoadBalancer   10.96.x.x      192.168.0.210   80:xxxxx/TCP,443:xxxxx/TCP
+```
+
+**Step 2: Install ArgoCD**
+
+```bash
+bash bootstrap/argocd/install.sh
+```
+
+**Verify:**
+```bash
+# Check ArgoCD pods are running
+kubectl get pods -n argocd
+
+# Access ArgoCD UI
+# Open: http://argocd.192.168.0.210.nip.io
+# Username: admin
+# Password: (shown in install script output)
+```
+
+**Step 3: Deploy Gitea via ArgoCD**
+
+```bash
+kubectl apply -f gitops/services/gitea.yaml
+```
+
+**Verify:**
+```bash
+# Watch the deployment progress
+kubectl get pods -n gitea -w
+
+# Check Application status in ArgoCD
+kubectl get application -n argocd gitea
+
+# Expected: STATUS=Synced, HEALTH=Healthy (wait ~5 minutes)
+```
+
+**Step 4: Initialize Gitea (The Pivot Point)**
+
+This is the critical step where we close the GitOps loop:
+
+1. Open Gitea UI: `http://gitea.192.168.0.210.nip.io`
+2. Create your admin account on first visit
+3. Create a new repository named `home-cluster`
+4. Push your local configuration:
+
+```bash
+# Initialize and push to Gitea
+cd /path/to/your/gitops/folder
+git init
+git remote add origin http://gitea.192.168.0.210.nip.io/admin/home-cluster.git
+git add .
+git commit -m "Initial cluster configuration"
+git push -u origin main
+```
+
+**Step 5: Deploy Observability Stack**
+
+```bash
+kubectl apply -f gitops/app-of-apps.yaml
+```
+
+**Verify:**
+```bash
+# Watch deployment progress
+kubectl get pods -n monitoring -w
+
+# Check Application status
+kubectl get application -n argocd observability-stack
+
+# Expected: All pods Running (wait ~10 minutes for all components)
+```
+
+**Step 6: Final Verification**
+
+```bash
+# List all ArgoCD-managed applications
+kubectl get applications -n argocd
+
+# Expected output:
+# NAME                  SYNC STATUS   HEALTH STATUS
+# gitea                 Synced        Healthy
+# observability-stack   Synced        Healthy
+```
+
+**Access URLs:**
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| ArgoCD | http://argocd.192.168.0.210.nip.io | admin / (secret) |
+| Gitea | http://gitea.192.168.0.210.nip.io | (created on first visit) |
+| Grafana | http://grafana.192.168.0.210.nip.io | admin / prom-operator |
 
 ## 9. Phase 5: Security & Management Stack
 
