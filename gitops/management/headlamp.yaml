@@ -1,0 +1,145 @@
+# =============================================================================
+# Headlamp - Modern Kubernetes Dashboard
+# =============================================================================
+# A modern, user-friendly Kubernetes dashboard with plugin support.
+# Provides a graphical interface for cluster management and monitoring.
+#
+# Features:
+#   - Modern React-based UI
+#   - Plugin system for extensibility
+#   - Multi-cluster support
+#   - OIDC authentication ready
+#   - Real-time resource visualization
+#   - YAML editing and applying
+#   - Pod logs and exec terminal
+#
+# Access:
+#   - URL: http://headlamp.192.168.0.210.nip.io
+#   - Authentication: Service Account token (see below)
+#
+# Memory: ~100-150MB (lightweight for RPi)
+#
+# Dependencies: Traefik (Gateway API)
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: headlamp
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://headlamp-k8s.github.io/headlamp
+    chart: headlamp
+    targetRevision: 0.25.0
+    helm:
+      releaseName: headlamp
+      values: |
+        # =======================================================================
+        # Headlamp Configuration for RPi Cluster
+        # =======================================================================
+        
+        replicaCount: 1
+        
+        # -----------------------------------------------------------------------
+        # Resource Limits (conservative for 4GB workers)
+        # -----------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        
+        # -----------------------------------------------------------------------
+        # Configuration
+        # -----------------------------------------------------------------------
+        config:
+          # Allow plugins from external sources
+          pluginsDir: /headlamp/plugins
+        
+        # -----------------------------------------------------------------------
+        # Service Configuration
+        # -----------------------------------------------------------------------
+        service:
+          type: ClusterIP
+          port: 80
+        
+        # -----------------------------------------------------------------------
+        # Service Account (for cluster access)
+        # -----------------------------------------------------------------------
+        serviceAccount:
+          create: true
+          name: headlamp
+        
+        # -----------------------------------------------------------------------
+        # Cluster RBAC
+        # -----------------------------------------------------------------------
+        clusterRoleBinding:
+          create: true
+          # Full cluster access for dashboard functionality
+          clusterRoleName: cluster-admin
+        
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: headlamp
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+---
+# =============================================================================
+# HTTPRoute for Headlamp (Gateway API)
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: headlamp
+  namespace: headlamp
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik
+      sectionName: web
+  hostnames:
+    - "headlamp.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: headlamp
+          port: 80
+---
+# =============================================================================
+# Service Account Token Secret (for UI authentication)
+# =============================================================================
+# Headlamp requires a service account token for authentication.
+# This secret creates a long-lived token for the headlamp SA.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: headlamp-token
+  namespace: headlamp
+  annotations:
+    kubernetes.io/service-account.name: headlamp
+    argocd.argoproj.io/sync-wave: "4"
+type: kubernetes.io/service-account-token

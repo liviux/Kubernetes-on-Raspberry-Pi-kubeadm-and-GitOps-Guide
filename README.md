@@ -46,9 +46,10 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [9.7 Runtime Security (Falco)](#97-runtime-security-falco)
     *   [9.8 Configuration Reloader (Reloader)](#98-configuration-reloader-reloader)
     *   [9.9 Workload Rebalancing (Descheduler)](#99-workload-rebalancing-descheduler)
-    *   [9.10 The Root Application (App of Apps)](#910-the-root-application-app-of-apps)
-    *   [9.11 Security Verification Script](#911-security-verification-script)
-    *   [9.12 Phase 5 Execution Steps](#912-phase-5-execution-steps)
+    *   [9.10 Cluster Dashboard (Headlamp)](#910-cluster-dashboard-headlamp)
+    *   [9.11 The Root Application (App of Apps)](#911-the-root-application-app-of-apps)
+    *   [9.12 Security Verification Script](#912-security-verification-script)
+    *   [9.13 Phase 5 Execution Steps](#913-phase-5-execution-steps)
 10. [Phase 6: Advanced Observability](#10-phase-6-advanced-observability)
     *   [10.1 Log Aggregation (Loki Stack)](#101-log-aggregation-loki-stack)
     *   [10.2 Log Collection (Fluent Bit)](#102-log-collection-fluent-bit)
@@ -575,6 +576,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 | **Security** | Kyverno | 128MB | 384MB | Any |
 | **Management** | Reloader | 64MB | 128MB | Any |
 | **Management** | Descheduler | 64MB | 128MB | Any |
+| **Management** | Headlamp | 64MB | 192MB | Any |
 
 **Estimated Total:**
 - **Control Plane (rpi4-1):** ~4-5GB reserved, leaving ~3GB for workloads
@@ -760,6 +762,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 
 | Tool | Purpose | Usage |
 |------|---------|-------|
+| **Headlamp** | Cluster dashboard | Full K8s UI, resource management, pod exec |
 | **Skaffold** | Local development loop | Code → Build → Push → Deploy |
 | **K9s** | Terminal cluster UI | Real-time pod management |
 | **Hubble UI** | Network visualization | Service dependency maps |
@@ -911,6 +914,8 @@ This structure follows the **separation of concerns** principle:
 │       │                                # ──────────────────────────────────────
 │       ├── descheduler.yaml             # Balance: Evict pods for better distribution
 │       │                                #         LowNodeUtilization, RemoveDuplicates
+│       ├── headlamp.yaml                # Dashboard: Modern K8s UI with plugin support
+│       │                                #            Resource management, pod exec, logs
 │       ├── reloader.yaml                # GitOps: Watch ConfigMaps/Secrets, rolling restart
 │       │                                #         Annotations trigger pod recreation
 │       └── velero.yaml                  # Backup: Cluster state + PVCs → MinIO
@@ -5556,7 +5561,152 @@ spec:
 
 </details>
     
-### 9.10 The Root Application (App of Apps)
+### 9.10 Cluster Dashboard (Headlamp)
+
+**File:** `gitops/management/headlamp.yaml`
+
+Headlamp is a **modern, lightweight Kubernetes dashboard** that provides a graphical interface for cluster management. Unlike the traditional Kubernetes Dashboard, Headlamp features a plugin architecture and a more intuitive React-based UI.
+
+**Why Headlamp over Kubernetes Dashboard?**
+
+| Feature | Kubernetes Dashboard | Headlamp |
+|---------|---------------------|----------|
+| **Memory Usage** | ~200MB | ~100MB |
+| **UI Framework** | Angular | React (modern) |
+| **Plugin System** | ❌ | ✅ Extensible |
+| **Multi-cluster** | Limited | ✅ Native |
+| **Active Development** | Moderate | Very Active |
+| **OIDC Ready** | Manual config | Built-in |
+
+**Access Configuration:**
+
+| Setting | Value |
+|---------|-------|
+| **URL** | `http://headlamp.192.168.0.210.nip.io` |
+| **Authentication** | Service Account Token |
+| **Namespace** | `headlamp` |
+| **Memory Limit** | 192Mi |
+
+**Getting the Authentication Token:**
+
+```bash
+# Get the token for Headlamp login
+kubectl get secret headlamp-token -n headlamp -o jsonpath='{.data.token}' | base64 -d
+```
+
+**Key Features:**
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        HEADLAMP CAPABILITIES                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  RESOURCE MANAGEMENT                   DEBUGGING TOOLS                      │
+│  ───────────────────                   ───────────────                      │
+│  • View all K8s resources              • Pod logs (real-time)               │
+│  • Create/Edit/Delete via YAML         • Exec into containers               │
+│  • Scale deployments                   • Resource events                    │
+│  • Manage ConfigMaps/Secrets           • Node conditions                    │
+│                                                                             │
+│  VISUALIZATION                         CLUSTER OVERVIEW                     │
+│  ─────────────                         ────────────────                     │
+│  • Workload status                     • Node status & resources            │
+│  • Pod relationships                   • Namespace summary                  │
+│  • Storage volumes                     • RBAC visualization                 │
+│  • Network resources                   • CRD browser                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+<details>
+<summary>📄 Click to expand full gitops/management/headlamp.yaml</summary>
+
+```yaml
+# =============================================================================
+# Headlamp - Modern Kubernetes Dashboard
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: headlamp
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://headlamp-k8s.github.io/headlamp
+    chart: headlamp
+    targetRevision: 0.25.0
+    helm:
+      releaseName: headlamp
+      values: |
+        replicaCount: 1
+        
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        
+        service:
+          type: ClusterIP
+          port: 80
+        
+        serviceAccount:
+          create: true
+          name: headlamp
+        
+        clusterRoleBinding:
+          create: true
+          clusterRoleName: cluster-admin
+        
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: headlamp
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+---
+# HTTPRoute for Gateway API access
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: headlamp
+  namespace: headlamp
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik
+  hostnames:
+    - "headlamp.192.168.0.210.nip.io"
+  rules:
+    - backendRefs:
+        - name: headlamp
+          port: 80
+---
+# Service Account Token for authentication
+apiVersion: v1
+kind: Secret
+metadata:
+  name: headlamp-token
+  namespace: headlamp
+  annotations:
+    kubernetes.io/service-account.name: headlamp
+type: kubernetes.io/service-account-token
+```
+
+</details>
+
+### 9.11 The Root Application (App of Apps)
 
 **File:** `gitops/root-app.yaml`
 
@@ -5587,7 +5737,7 @@ This is the **"One Ring to Rule Them All"**—the master Application that points
 │    cert-manager            kyverno                 reloader                │
 │                            falco                   descheduler             │
 │                            harbor                  velero                  │
-│                            openbao                                         │
+│                            openbao                 headlamp                │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -5657,7 +5807,7 @@ spec:
 
 </details>
 
-### 9.11 Security Verification Script
+### 9.12 Security Verification Script
 
 **File:** `tests/04_security_test.sh`
 
@@ -5868,7 +6018,7 @@ fi
 
 </details>
 
-### 9.12 Phase 5 Execution Steps
+### 9.13 Phase 5 Execution Steps
 
 Execute these commands after Phase 4 (GitOps) is complete:
 
@@ -5934,6 +6084,12 @@ bash tests/04_security_test.sh
 |---------|-----|----------|----------|
 | MinIO Console | http://minio.192.168.0.210.nip.io | admin | password123 |
 | Harbor Registry | http://harbor.192.168.0.210.nip.io | admin | Harbor12345 |
+| Headlamp Dashboard | http://headlamp.192.168.0.210.nip.io | - | Service Account Token ⁵ |
+
+> **⁵ Headlamp Token:** Get the authentication token with:
+> ```bash
+> kubectl get secret headlamp-token -n headlamp -o jsonpath='{.data.token}' | base64 -d
+> ```
 
 > ⚠️ **Security Reminder:** Change all default passwords before exposing services externally!
 
