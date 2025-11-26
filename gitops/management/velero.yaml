@@ -1,8 +1,36 @@
+# =============================================================================
+# Velero - Backup and Disaster Recovery
+# =============================================================================
+# Backs up Kubernetes resources and persistent volumes to S3 (MinIO).
+# Essential for cluster disaster recovery and migrations.
+#
+# Backup Capabilities:
+#   - Full cluster backup (all namespaces)
+#   - Namespace-specific backup
+#   - Selective resource backup (by label)
+#   - PersistentVolume snapshots (via Longhorn CSI)
+#
+# Storage Backend:
+#   - S3 API via MinIO internal endpoint
+#   - Bucket: velero
+#   - Region: minio (arbitrary, required by AWS plugin)
+#
+# Recommended Schedule (create manually):
+#   - Daily: Full cluster backup, retain 7 days
+#   - Hourly: Critical namespaces (gitops, argocd)
+#
+# Dependencies: MinIO (storage/minio)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: velero
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,18 +39,29 @@ spec:
     targetRevision: 5.1.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Backup Storage Location (MinIO S3)
+        # -------------------------------------------------------------------
         configuration:
           provider: aws
+          
           backupStorageLocation:
             bucket: velero
             config:
               region: minio
-              s3ForcePathStyle: true
+              s3ForcePathStyle: true  # Required for MinIO
               s3Url: http://minio.storage.svc.cluster.local:9000
+          
           volumeSnapshotLocation:
             config:
               region: minio
+          
+          # Default backup TTL (7 days)
+          defaultBackupTTL: 168h
         
+        # -------------------------------------------------------------------
+        # MinIO Credentials (CHANGE IN PRODUCTION!)
+        # -------------------------------------------------------------------
         credentials:
           useSecret: true
           secretContents:
@@ -30,19 +69,56 @@ spec:
               [default]
               aws_access_key_id = admin
               aws_secret_access_key = password123
-
+        
+        # -------------------------------------------------------------------
+        # AWS S3 Plugin (for MinIO compatibility)
+        # -------------------------------------------------------------------
         initContainers:
           - name: velero-plugin-for-aws
             image: velero/velero-plugin-for-aws:v1.9.0
             volumeMounts:
               - mountPath: /target
                 name: plugins
+        
+        # -------------------------------------------------------------------
+        # Resource Limits (RPi optimized)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        
+        # -------------------------------------------------------------------
+        # Scheduled Backups (uncomment to enable)
+        # -------------------------------------------------------------------
+        schedules: {}
+        #   daily-full:
+        #     schedule: "0 2 * * *"      # 2 AM daily
+        #     template:
+        #       ttl: 168h                 # 7 days
+        #       includedNamespaces:
+        #         - "*"
+        #       excludedNamespaces:
+        #         - kube-system
+        #   hourly-critical:
+        #     schedule: "0 * * * *"       # Every hour
+        #     template:
+        #       ttl: 24h                  # 1 day
+        #       includedNamespaces:
+        #         - argocd
+        #         - gitops
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: velero
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true

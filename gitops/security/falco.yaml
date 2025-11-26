@@ -1,8 +1,37 @@
+# =============================================================================
+# Falco - Runtime Security Monitoring
+# =============================================================================
+# Cloud-native runtime security using eBPF to monitor kernel syscalls.
+# No kernel modules needed - uses eBPF probes for better compatibility.
+#
+# Detection Categories:
+#   - Shell spawned in container
+#   - Sensitive file access (/etc/shadow, /etc/passwd)
+#   - Privilege escalation attempts
+#   - Cryptominer patterns
+#   - Network anomalies (unexpected outbound connections)
+#   - Container escape attempts
+#
+# Components:
+#   - Falco: Core detection engine (DaemonSet)
+#   - Falcosidekick: Alert forwarding to Slack, webhook, etc.
+#   - Falcosidekick-UI: Web interface for viewing alerts
+#
+# Access:
+#   - Falcosidekick UI: http://falco-ui.192.168.0.210.nip.io
+#
+# Dependencies: None (runs as DaemonSet on all nodes)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: falco
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,18 +40,86 @@ spec:
     targetRevision: 4.0.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Driver Configuration - Use eBPF (no kernel modules needed)
+        # -------------------------------------------------------------------
         driver:
           kind: ebpf
+          ebpf:
+            # Probe is built at runtime for the kernel version
+            hostNetwork: true
+        
+        # -------------------------------------------------------------------
+        # Falco Core Settings
+        # -------------------------------------------------------------------
+        falco:
+          # Rule priority threshold (emergency, alert, critical, error, warning, notice, info, debug)
+          priority: notice
+          
+          # Output formats
+          jsonOutput: true
+          jsonIncludeOutputProperty: true
+          
+          # Log level
+          logLevel: info
+        
+        # -------------------------------------------------------------------
+        # Resource Limits (RPi optimized)
+        # -------------------------------------------------------------------
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        
+        # -------------------------------------------------------------------
+        # Falcosidekick - Alert Forwarding
+        # -------------------------------------------------------------------
         falcosidekick:
           enabled: true
+          
+          # Resource limits for sidekick
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          
+          # -------------------------------------------------------------------
+          # Falcosidekick Web UI
+          # -------------------------------------------------------------------
           webui:
             enabled: true
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 50m
+                memory: 64Mi
+            
+            # Ingress for Web UI
+            ingress:
+              enabled: true
+              hosts:
+                - host: falco-ui.192.168.0.210.nip.io
+                  paths:
+                    - path: /
+                      pathType: Prefix
+              ingressClassName: traefik
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: security
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true

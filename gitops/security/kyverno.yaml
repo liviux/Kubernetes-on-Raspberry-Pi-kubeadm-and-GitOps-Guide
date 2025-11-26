@@ -1,8 +1,33 @@
+# =============================================================================
+# Kyverno - Kubernetes Native Policy Management
+# =============================================================================
+# Policy engine designed specifically for Kubernetes. Uses Kubernetes-native
+# resources (CRDs) instead of Rego language like OPA Gatekeeper.
+#
+# Controllers:
+#   - Admission Controller: Validates/mutates resources at admission time
+#   - Background Controller: Scans existing resources against policies
+#   - Cleanup Controller: Handles TTL-based resource cleanup
+#   - Reports Controller: Generates policy reports
+#
+# Default Policies (recommended to add):
+#   - disallow-latest-tag: Prevent :latest images
+#   - require-labels: Ensure resources have required labels
+#   - disallow-privileged: Block privileged containers
+#   - require-resource-limits: Enforce CPU/memory limits
+#
+# Dependencies: None (foundational security layer)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: kyverno
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,20 +36,69 @@ spec:
     targetRevision: 3.1.4
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Controller Replicas (1 each for RPi resource constraints)
+        # -------------------------------------------------------------------
         admissionController:
           replicas: 1
+          resources:
+            limits:
+              cpu: 500m
+              memory: 384Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+        
         backgroundController:
           replicas: 1
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        
         cleanupController:
           replicas: 1
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        
         reportsController:
           replicas: 1
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Webhook Configuration
+        # -------------------------------------------------------------------
+        webhooksCleanup:
+          enabled: true
+        
+        # -------------------------------------------------------------------
+        # Metrics (for Prometheus scraping)
+        # -------------------------------------------------------------------
+        metricsService:
+          create: true
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: kyverno
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true

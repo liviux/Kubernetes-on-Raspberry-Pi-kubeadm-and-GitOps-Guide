@@ -1,3 +1,29 @@
+# =============================================================================
+# Reloader - Auto-Restart on ConfigMap/Secret Changes
+# =============================================================================
+# Watches ConfigMaps and Secrets for changes and triggers rolling restarts
+# of Deployments/StatefulSets that reference them.
+#
+# Why Reloader?
+#   - Kubernetes doesn't auto-restart pods when ConfigMaps/Secrets change
+#   - Manual restarts are error-prone and easy to forget
+#   - Reloader automates this with annotations
+#
+# Usage (add annotation to Deployment/StatefulSet):
+#   metadata:
+#     annotations:
+#       reloader.stakater.com/auto: "true"    # Watch all referenced CM/Secrets
+#       # OR specific resources:
+#       configmap.reloader.stakater.com/reload: "my-config"
+#       secret.reloader.stakater.com/reload: "my-secret"
+#
+# Modes:
+#   - watchGlobally: true → Watch all namespaces
+#   - Annotation-based → Only restart annotated workloads
+#
+# Dependencies: None (foundational management tool)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -5,6 +31,8 @@ metadata:
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "-1"  # Deploy early
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -13,8 +41,24 @@ spec:
     targetRevision: 1.1.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Reloader Configuration
+        # -------------------------------------------------------------------
         reloader:
+          # Watch all namespaces for changes
           watchGlobally: true
+          
+          # Only reload workloads with annotation:
+          #   reloader.stakater.com/auto: "true"
+          # Set to false to reload ALL workloads referencing changed CM/Secrets
+          isArgoRollouts: false
+          
+          # Logging
+          logFormat: json
+          
+          # -------------------------------------------------------------------
+          # Resource Limits (RPi optimized - very lightweight)
+          # -------------------------------------------------------------------
           resources:
             limits:
               cpu: 100m
@@ -22,9 +66,11 @@ spec:
             requests:
               cpu: 10m
               memory: 64Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: kube-system
+  
   syncPolicy:
     automated:
       prune: true

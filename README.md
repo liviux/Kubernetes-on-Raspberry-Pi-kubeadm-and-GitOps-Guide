@@ -4194,27 +4194,172 @@ kubectl get applications -n argocd
 
 ## 9. Phase 5: Security & Management Stack
 
-Now that the GitOps engine is running, we utilize it to deploy the infrastructure dependencies required for a secure, production-grade environment.
+Now that the GitOps engine is running, we utilize it to deploy the infrastructure dependencies required for a secure, production-grade environment. This phase establishes the **Defense in Depth** layers and **Day 2 Operations** tooling.
+
+### Phase 5 Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      SECURITY & MANAGEMENT ARCHITECTURE                         │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│   ┌─────────────────────────────────────────────────────────────────────────┐  │
+│   │                      STORAGE FOUNDATION LAYER                            │  │
+│   │                                                                          │  │
+│   │    ┌─────────────┐                                                       │  │
+│   │    │   MinIO     │◄─── S3-Compatible Object Storage                      │  │
+│   │    │   (S3 API)  │                                                       │  │
+│   │    └──────┬──────┘                                                       │  │
+│   │           │                                                              │  │
+│   │    ┌──────┴──────────────────────────────────┐                          │  │
+│   │    │              │              │           │                          │  │
+│   │    ▼              ▼              ▼           ▼                          │  │
+│   │ ┌──────┐    ┌──────────┐   ┌──────┐   ┌──────────┐                     │  │
+│   │ │Velero│    │  Harbor  │   │ Loki │   │  Thanos  │                     │  │
+│   │ │Backup│    │ Registry │   │ Logs │   │ Metrics  │                     │  │
+│   │ └──────┘    └──────────┘   └──────┘   └──────────┘                     │  │
+│   └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                 │
+│   ┌─────────────────────────────────────────────────────────────────────────┐  │
+│   │                      SECURITY DEFENSE LAYERS                             │  │
+│   │                                                                          │  │
+│   │   BUILD TIME          DEPLOY TIME           RUN TIME                     │  │
+│   │   ──────────          ───────────           ────────                     │  │
+│   │   ┌─────────┐         ┌─────────┐          ┌─────────┐                  │  │
+│   │   │  Trivy  │────────►│ Kyverno │─────────►│  Falco  │                  │  │
+│   │   │  Scan   │         │ Policies│          │  eBPF   │                  │  │
+│   │   └─────────┘         └─────────┘          └─────────┘                  │  │
+│   │        │                   │                    │                        │  │
+│   │        ▼                   ▼                    ▼                        │  │
+│   │   Block vulnerable    Reject non-          Alert on                     │  │
+│   │   images at push      compliant pods       suspicious                   │  │
+│   │                                            syscalls                      │  │
+│   └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                 │
+│   ┌─────────────────────────────────────────────────────────────────────────┐  │
+│   │                      MANAGEMENT AUTOMATION                               │  │
+│   │                                                                          │  │
+│   │   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │  │
+│   │   │  Reloader   │    │Descheduler  │    │   OpenBao   │                 │  │
+│   │   │             │    │             │    │   (Vault)   │                 │  │
+│   │   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘                 │  │
+│   │          │                  │                  │                         │  │
+│   │          ▼                  ▼                  ▼                         │  │
+│   │   Auto-restart         Rebalance           Secrets                      │  │
+│   │   on ConfigMap         workloads           injection                    │  │
+│   │   changes              across nodes                                      │  │
+│   └─────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 5 Components
+
+| Component | Version | Category | Purpose | Depends On |
+|-----------|---------|----------|---------|------------|
+| **MinIO** | 5.2.0 | Storage | S3-compatible object storage | Longhorn |
+| **Cert-Manager** | 1.16.0 | Security | TLS certificate automation | - |
+| **Harbor** | 1.15.0 | Security | Private container registry | MinIO |
+| **Velero** | 5.1.0 | Management | Backup & disaster recovery | MinIO |
+| **OpenBao** | 0.1.0 | Security | Secrets management (Vault fork) | Longhorn |
+| **Kyverno** | 3.1.4 | Security | Policy enforcement | - |
+| **Falco** | 4.0.0 | Security | Runtime threat detection | - |
+| **Reloader** | 1.1.0 | Management | ConfigMap/Secret reload | - |
+| **Descheduler** | 0.31.0 | Management | Workload rebalancing | - |
+
+### Deployment Order (Sync Waves)
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     PHASE 5 SYNC WAVE ORDER                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Wave -2        Wave -1        Wave 0         Wave 1         Wave 2        │
+│  ────────       ────────       ──────         ──────         ──────        │
+│                                                                             │
+│  ┌──────┐      ┌────────┐     ┌───────┐     ┌───────┐     ┌──────────┐    │
+│  │MinIO │─────►│Cert-Mgr│────►│Kyverno│────►│ Falco │────►│  Harbor  │    │
+│  │      │      │Reloader│     │OpenBao│     │       │     │  Velero  │    │
+│  └──────┘      └────────┘     └───────┘     └───────┘     └──────────┘    │
+│     │              │              │             │              │           │
+│     ▼              ▼              ▼             ▼              ▼           │
+│  S3 buckets    TLS certs      Admission     Runtime       Dependent       │
+│  available     automation     webhooks      monitoring    services        │
+│                                ready                                       │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│  Dependencies flow left to right. Later waves depend on earlier ones.      │
+│  ═══════════════════════════════════════════════════════════════════════   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### 9.1 Object Storage (MinIO)
+
 **File:** `gitops/storage/minio.yaml`
 
 Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. Since we are on bare metal, we self-host **MinIO** to provide this API.
-*   **Storage:** Uses Longhorn (HDD) for the data backing.
-*   **Buckets:** Automatically provisions buckets for `velero`, `loki`, `harbor`, and `thanos`.
-*   **Access:** Exposed via Gateway API HTTPRoute (`minio.192.168.0.210.nip.io`).
+
+**Why MinIO?**
+
+| Feature | Benefit for RPi Cluster |
+|---------|-------------------------|
+| **S3 Compatible** | Works with any tool expecting AWS S3 |
+| **Lightweight** | Single binary, ~256MB memory |
+| **Auto-bucket** | Creates required buckets on startup |
+| **Web Console** | Easy management UI |
+
+**Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `mode` | `standalone` | Single instance (no distributed mode on RPi) |
+| `persistence.size` | `50Gi` | Storage for all S3 data |
+| `persistence.storageClass` | `longhorn` | HDD-backed storage |
+| `buckets` | velero, harbor, loki-data, thanos-data | Pre-created buckets |
+
+**Access:**
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Console | http://minio.192.168.0.210.nip.io | admin / password123 |
+| API | http://minio.storage.svc:9000 | (internal) |
+
+> ⚠️ **Security Warning:** Change the default credentials (`admin`/`password123`) in production!
 
 <details>
 <summary>📄 Click to expand full gitops/storage/minio.yaml</summary>
 
 ```yaml
+# =============================================================================
+# MinIO - S3-Compatible Object Storage
+# =============================================================================
+# Provides S3 API for Cloud Native tools that expect object storage.
+# This is the foundation for backup, logging, and metrics storage.
+#
+# Buckets Created:
+#   - velero: Cluster backups
+#   - harbor: Container image layers
+#   - loki-data: Log storage
+#   - thanos-data: Long-term metrics
+#
+# Access:
+#   - Console: http://minio.192.168.0.210.nip.io
+#   - API: http://minio.storage.svc.cluster.local:9000
+#   - Credentials: admin / password123 (CHANGE IN PRODUCTION!)
+#
+# Dependencies: Longhorn storage class
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: minio
   namespace: argocd
   annotations:
+    argocd.argoproj.io/sync-wave: "-2"
     argocd.argoproj.io/sync-options: ServerSideApply=true
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4223,21 +4368,35 @@ spec:
     targetRevision: 5.2.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Deployment Mode
+        # -------------------------------------------------------------------
         mode: standalone
         replicas: 1
+        
+        # -------------------------------------------------------------------
+        # Storage Configuration
+        # -------------------------------------------------------------------
         persistence:
           enabled: true
           storageClass: longhorn
           size: 50Gi
           accessMode: ReadWriteOnce
         
+        # -------------------------------------------------------------------
+        # Resource Limits (RPi optimized)
+        # -------------------------------------------------------------------
         resources:
           requests:
+            cpu: 100m
             memory: 256Mi
           limits:
+            cpu: 500m
             memory: 512Mi
-
-        # Create buckets automatically on startup
+        
+        # -------------------------------------------------------------------
+        # Auto-Create Buckets
+        # -------------------------------------------------------------------
         buckets:
           - name: velero
             policy: none
@@ -4251,63 +4410,99 @@ spec:
           - name: thanos-data
             policy: none
             purge: false
-
-        # Disable built-in ingress - we use Gateway API HTTPRoute
+        
+        # -------------------------------------------------------------------
+        # Ingress Configuration
+        # -------------------------------------------------------------------
         ingress:
-          enabled: false
-
-        # Default credentials (CHANGE IN PRODUCTION)
+          enabled: true
+          ingressClassName: traefik
+          hosts:
+            - minio.192.168.0.210.nip.io
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+        
+        consoleIngress:
+          enabled: true
+          ingressClassName: traefik
+          hosts:
+            - minio-console.192.168.0.210.nip.io
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+        
+        # -------------------------------------------------------------------
+        # Credentials (CHANGE IN PRODUCTION!)
+        # -------------------------------------------------------------------
         rootUser: admin
         rootPassword: password123
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: storage
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
----
-# HTTPRoute for MinIO Console (Gateway API)
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: minio-console
-  namespace: storage
-spec:
-  parentRefs:
-    - name: main-gateway
-      namespace: traefik-system
-  hostnames:
-    - "minio.192.168.0.210.nip.io"
-  rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
-        - name: minio-console
-          port: 9001
+      - ServerSideApply=true
 ```
 
 </details>
 
 ### 9.2 Certificate Automation (Cert-Manager)
+
 **File:** `gitops/infrastructure/cert-manager.yaml`
 
-Cert-Manager handles TLS certificates within the cluster.
-*   **Self-Signed Issuer:** Configured to issue self-signed certificates locally. This prevents the "Not Secure" browser warnings from escalating into connection errors, while avoiding the complexity of external DNS validation (Let's Encrypt) for this private setup.
+Cert-Manager automates TLS certificate management within the cluster.
+
+**Why Cert-Manager?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Automatic Renewal** | Certificates auto-renew before expiry |
+| **Multiple Issuers** | Self-signed, Let's Encrypt, CA, Vault |
+| **Native Integration** | Works with Ingress and Gateway API |
+| **Lightweight** | ~100MB memory footprint |
+
+**Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `installCRDs` | `true` | Install Certificate, Issuer CRDs |
+| `namespace` | `cert-manager` | Standard namespace location |
+
+> 💡 **Note:** This setup uses self-signed certificates. For production with public DNS, configure Let's Encrypt issuers.
 
 <details>
 <summary>📄 Click to expand full gitops/infrastructure/cert-manager.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Cert-Manager - TLS Certificate Automation
+# =============================================================================
+# Handles automatic provisioning and renewal of TLS certificates.
+# Currently configured for self-signed certificates (internal use).
+#
+# For Let's Encrypt (production):
+#   1. Configure DNS provider credentials
+#   2. Create ClusterIssuer with ACME solver
+#   3. Update Ingress annotations
+#
+# Usage:
+#   Add to Ingress: cert-manager.io/cluster-issuer: "self-signed"
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: cert-manager
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4318,9 +4513,38 @@ spec:
       parameters:
         - name: installCRDs
           value: "true"
+      values: |
+        # Resource limits for RPi
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        
+        webhook:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+        
+        cainjector:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: cert-manager
+  
   syncPolicy:
     automated:
       prune: true
@@ -4332,22 +4556,68 @@ spec:
 </details>
 
 ### 9.3 Container Registry (Harbor)
+
 **File:** `gitops/security/harbor.yaml`
 
-Harbor serves as the local "Docker Hub".
-*   **Dependency:** Connects to the **MinIO** S3 service installed above for storing huge container images (keeping them off the SD cards).
-*   **Scanning:** Trivy is enabled to scan every uploaded image for CVEs.
-*   **Database:** Uses internal PostgreSQL backed by Longhorn.
+Harbor serves as the local "Docker Hub" - a private container registry with built-in security scanning.
+
+**Why Harbor?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Private Registry** | Keep images off public Docker Hub |
+| **Trivy Integration** | Scan images for CVEs on push |
+| **S3 Backend** | Store image layers in MinIO (not on SD cards) |
+| **RBAC** | Project-based access control |
+
+**Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `expose.type` | `ingress` | Access via Traefik |
+| `persistence.type` | `s3` | Store images in MinIO |
+| `trivy.enabled` | `true` | Vulnerability scanning |
+| `notary.enabled` | `false` | Save RAM (image signing disabled) |
+
+**Access:**
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Web UI | http://harbor.192.168.0.210.nip.io | admin / Harbor12345 |
+| Docker | docker login harbor.192.168.0.210.nip.io | (same) |
 
 <details>
 <summary>📄 Click to expand full gitops/security/harbor.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Harbor - Private Container Registry
+# =============================================================================
+# Enterprise-grade container registry with vulnerability scanning.
+# Images are stored in MinIO S3 to avoid filling SD cards.
+#
+# Features:
+#   - Trivy vulnerability scanning on push
+#   - S3 backend storage (MinIO)
+#   - Project-based access control
+#
+# Access:
+#   - Web: http://harbor.192.168.0.210.nip.io
+#   - Docker: docker login harbor.192.168.0.210.nip.io
+#   - Default: admin / Harbor12345
+#
+# Dependencies: MinIO (storage), Longhorn (database)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: harbor
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4356,6 +4626,9 @@ spec:
     targetRevision: 1.15.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Ingress Configuration
+        # -------------------------------------------------------------------
         expose:
           type: ingress
           ingress:
@@ -4365,7 +4638,12 @@ spec:
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
         
-        # Point to our local MinIO
+        # External URL for Docker client
+        externalURL: http://harbor.192.168.0.210.nip.io
+        
+        # -------------------------------------------------------------------
+        # S3 Storage Backend (MinIO)
+        # -------------------------------------------------------------------
         persistence:
           imageChartStorage:
             type: s3
@@ -4376,19 +4654,61 @@ spec:
               accesskey: admin
               secretkey: password123
               storageclass: STANDARD
-
-        # Disable Notary/ChartMuseum to save RAM on Pis
+        
+        # -------------------------------------------------------------------
+        # Components (RPi optimized)
+        # -------------------------------------------------------------------
+        # Disable heavy components to save RAM
         notary:
           enabled: false
         chartmuseum:
           enabled: false
         
-        # Keep Trivy for security scanning
+        # Enable security scanning
         trivy:
           enabled: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        
+        # -------------------------------------------------------------------
+        # Core Components Resources
+        # -------------------------------------------------------------------
+        core:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+        
+        portal:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+        
+        registry:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: harbor
+  
   syncPolicy:
     automated:
       prune: true
@@ -4400,21 +4720,73 @@ spec:
 </details>
 
 ### 9.4 Backup & Restore (Velero)
+
 **File:** `gitops/management/velero.yaml`
 
-Velero performs nightly backups of the cluster configuration and persistent volumes.
-*   **Target:** Stores backups in the `velero` bucket on MinIO.
-*   **Volume Snapshots:** Integrated with Longhorn CSI to take snapshots of the HDD data.
+Velero performs scheduled backups of cluster resources and persistent volumes, enabling disaster recovery.
+
+**Why Velero?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Cluster Backups** | Back up Kubernetes resources (YAML) |
+| **Volume Snapshots** | PV data via CSI snapshots |
+| **Scheduled** | Automated daily/weekly backups |
+| **Restore** | One-command cluster restore |
+
+**Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `provider` | `aws` | S3-compatible (MinIO) |
+| `bucket` | `velero` | Pre-created MinIO bucket |
+| `s3Url` | MinIO internal service | Backup destination |
+
+**Backup Commands:**
+
+```bash
+# Create manual backup
+velero backup create manual-backup --include-namespaces default
+
+# List backups
+velero backup get
+
+# Restore from backup
+velero restore create --from-backup manual-backup
+```
 
 <details>
 <summary>📄 Click to expand full gitops/management/velero.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Velero - Backup & Disaster Recovery
+# =============================================================================
+# Provides scheduled backups of Kubernetes resources and persistent volumes.
+# Stores backups in MinIO S3 bucket for off-cluster durability.
+#
+# Features:
+#   - Scheduled cluster state backups
+#   - PersistentVolume snapshots via Longhorn CSI
+#   - Point-in-time recovery
+#
+# Commands:
+#   velero backup create <name>
+#   velero backup get
+#   velero restore create --from-backup <name>
+#
+# Dependencies: MinIO (velero bucket)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: velero
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4423,6 +4795,9 @@ spec:
     targetRevision: 5.1.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Backup Configuration
+        # -------------------------------------------------------------------
         configuration:
           provider: aws
           backupStorageLocation:
@@ -4435,6 +4810,9 @@ spec:
             config:
               region: minio
         
+        # -------------------------------------------------------------------
+        # MinIO Credentials
+        # -------------------------------------------------------------------
         credentials:
           useSecret: true
           secretContents:
@@ -4442,16 +4820,45 @@ spec:
               [default]
               aws_access_key_id = admin
               aws_secret_access_key = password123
-
+        
+        # -------------------------------------------------------------------
+        # AWS Plugin for S3
+        # -------------------------------------------------------------------
         initContainers:
           - name: velero-plugin-for-aws
             image: velero/velero-plugin-for-aws:v1.9.0
             volumeMounts:
               - mountPath: /target
                 name: plugins
+        
+        # -------------------------------------------------------------------
+        # Scheduled Backups
+        # -------------------------------------------------------------------
+        schedules:
+          daily-backup:
+            schedule: "0 2 * * *"  # 2 AM daily
+            template:
+              ttl: "168h"  # Keep for 7 days
+              includedNamespaces:
+                - "*"
+              excludedNamespaces:
+                - kube-system
+        
+        # -------------------------------------------------------------------
+        # Resource Limits (RPi optimized)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: velero
+  
   syncPolicy:
     automated:
       prune: true
@@ -4461,21 +4868,63 @@ spec:
 ```
 
 </details>
+
 ### 9.5 Secrets Management (OpenBao)
+
 **File:** `gitops/security/openbao.yaml`
-We use OpenBao (the community fork of Vault) to handle secrets securely.
-*   **Storage:** Uses Longhorn (HDD) to persist encrypted secrets.
-*   **UI:** Exposed internally via LoadBalancer.
+
+OpenBao (community fork of HashiCorp Vault) provides secure secrets management with encryption at rest.
+
+**Why OpenBao?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Open Source** | Community-maintained Vault fork |
+| **Encryption** | Secrets encrypted at rest |
+| **Dynamic Secrets** | Generate credentials on-demand |
+| **Audit Logging** | Track secret access |
+
+**Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `ha.enabled` | `false` | Single instance for RPi |
+| `dataStorage.size` | `10Gi` | Secret storage volume |
+| `ui.enabled` | `true` | Web management interface |
 
 <details>
 <summary>📄 Click to expand full gitops/security/openbao.yaml</summary>
 
 ```yaml
+# =============================================================================
+# OpenBao - Secrets Management
+# =============================================================================
+# Secure secrets management (HashiCorp Vault community fork).
+# Provides encrypted storage, dynamic secrets, and audit logging.
+#
+# Features:
+#   - Encryption at rest
+#   - Dynamic credential generation
+#   - Kubernetes auth integration
+#   - Audit logging
+#
+# First-time Setup:
+#   1. Port-forward: kubectl port-forward svc/openbao 8200:8200 -n security
+#   2. Initialize: bao operator init
+#   3. Unseal: bao operator unseal (use 3 of 5 keys)
+#
+# Dependencies: Longhorn storage
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: openbao
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4484,19 +4933,53 @@ spec:
     targetRevision: 0.1.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Server Configuration
+        # -------------------------------------------------------------------
         server:
+          # Standalone mode (no HA for RPi resources)
+          ha:
+            enabled: false
+          
+          # Persistent storage
           dataStorage:
             enabled: true
             size: 10Gi
             storageClass: longhorn
-          ha:
-            enabled: false # Standalone mode for Pi resources
+          
+          # Resource limits (RPi optimized)
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+        
+        # -------------------------------------------------------------------
+        # UI Configuration
+        # -------------------------------------------------------------------
         ui:
           enabled: true
-          serviceType: LoadBalancer
+          serviceType: ClusterIP
+        
+        # -------------------------------------------------------------------
+        # Injector (sidecar for secret injection)
+        # -------------------------------------------------------------------
+        injector:
+          enabled: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: security
+  
   syncPolicy:
     automated:
       prune: true
@@ -4508,18 +4991,62 @@ spec:
 </details>
 
 ### 9.6 Policy Enforcement (Kyverno)
+
 **File:** `gitops/security/kyverno.yaml`
-Kyverno enforces best practices (e.g., preventing root containers) without the complexity of OPA Gatekeeper.
+
+Kyverno enforces security best practices through admission control policies—no OPA Gatekeeper complexity required.
+
+**Why Kyverno?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Native YAML** | Policies written in Kubernetes YAML (no Rego) |
+| **Validate/Mutate/Generate** | Block, modify, or create resources |
+| **Audit Mode** | Test policies before enforcing |
+| **Lightweight** | ~128MB memory per controller |
+
+**Example Policies:**
+
+| Policy | Action |
+|--------|--------|
+| No `:latest` tags | Block pods using `image:latest` |
+| No privileged containers | Reject `securityContext.privileged: true` |
+| Require resource limits | Block pods without CPU/memory limits |
+| Required labels | Ensure all pods have `app` label |
 
 <details>
 <summary>📄 Click to expand full gitops/security/kyverno.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Kyverno - Policy Enforcement Engine
+# =============================================================================
+# Kubernetes-native policy engine using admission webhooks.
+# Enforces security best practices without OPA/Rego complexity.
+#
+# Features:
+#   - Validate: Block non-compliant resources
+#   - Mutate: Auto-fix resources on creation
+#   - Generate: Create companion resources
+#
+# Example Policy (add separately):
+#   Disallow :latest image tags
+#   Require resource limits
+#   Block privileged containers
+#
+# Test policies:
+#   kubectl run test --image=nginx:latest --dry-run=server
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: kyverno
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4528,17 +5055,53 @@ spec:
     targetRevision: 3.1.4
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Controller Replicas (single for RPi)
+        # -------------------------------------------------------------------
         admissionController:
           replicas: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+        
         backgroundController:
           replicas: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+        
         cleanupController:
           replicas: 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+        
         reportsController:
           replicas: 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: kyverno
+  
   syncPolicy:
     automated:
       prune: true
@@ -4550,18 +5113,65 @@ spec:
 </details>
 
 ### 9.7 Runtime Security (Falco)
+
 **File:** `gitops/security/falco.yaml`
-Monitors kernel syscalls to detect intrusions. We explicitly configure the **eBPF driver** because the traditional kernel module driver is often problematic on Ubuntu RPi kernels.
+
+Falco monitors kernel syscalls to detect intrusions and suspicious behavior at runtime.
+
+**Why Falco?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Kernel Monitoring** | Sees all syscalls, not just API calls |
+| **eBPF Driver** | Modern, no kernel module compilation |
+| **Rule-Based** | Customizable detection rules |
+| **Sidekick UI** | Web dashboard for alerts |
+
+**Detection Examples:**
+
+| Event | Alert |
+|-------|-------|
+| Shell in container | "Terminal shell opened in container" |
+| File system changes | "Write to /etc inside container" |
+| Network anomalies | "Unexpected outbound connection" |
+| Privilege escalation | "Setuid binary executed" |
+
+> ⚠️ **RPi Note:** We explicitly use the `ebpf` driver because the kernel module driver often fails on Ubuntu RPi kernels.
 
 <details>
 <summary>📄 Click to expand full gitops/security/falco.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Falco - Runtime Security Monitoring
+# =============================================================================
+# Kernel-level syscall monitoring for threat detection.
+# Uses eBPF driver (not kernel module) for RPi compatibility.
+#
+# Features:
+#   - Syscall monitoring via eBPF
+#   - Real-time alerting
+#   - Falcosidekick UI for visualization
+#
+# Example Detections:
+#   - Shell opened in container
+#   - File write in /etc
+#   - Unexpected network connections
+#   - Privilege escalation attempts
+#
+# View alerts:
+#   kubectl logs -n security -l app.kubernetes.io/name=falco
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: falco
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4570,15 +5180,58 @@ spec:
     targetRevision: 4.0.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Driver Configuration (eBPF for RPi)
+        # -------------------------------------------------------------------
         driver:
-          kind: ebpf
+          kind: ebpf  # Not kernel_module - avoids RPi kernel issues
+        
+        # -------------------------------------------------------------------
+        # Falcosidekick (Alert Forwarding + UI)
+        # -------------------------------------------------------------------
         falcosidekick:
           enabled: true
           webui:
             enabled: true
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 50m
+                memory: 64Mi
+        
+        # -------------------------------------------------------------------
+        # Resource Limits (DaemonSet on all nodes)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        
+        # -------------------------------------------------------------------
+        # Custom Rules (optional)
+        # -------------------------------------------------------------------
+        customRules:
+          custom-rules.yaml: |
+            # Alert on shell in any container
+            - rule: Shell in container
+              desc: Detect shell inside container
+              condition: >
+                spawned_process and container and
+                (proc.name = bash or proc.name = sh)
+              output: >
+                Shell opened (user=%user.name container=%container.name
+                image=%container.image.repository)
+              priority: WARNING
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: security
+  
   syncPolicy:
     automated:
       prune: true
@@ -4590,22 +5243,68 @@ spec:
 </details>
 
 ### 9.8 Configuration Reloader (Reloader)
+
 **File:** `gitops/management/reloader.yaml`
 
-Reloader watches for changes in ConfigMaps and Secrets, then automatically triggers rolling updates on associated Deployments/StatefulSets. This is essential for GitOps workflows where configuration changes should propagate without manual intervention.
+Reloader watches for changes in ConfigMaps and Secrets, then automatically triggers rolling updates on associated Deployments/StatefulSets.
 
-*   **Use Case:** When you update a Grafana dashboard ConfigMap, Reloader restarts Grafana automatically.
-*   **Footprint:** Extremely lightweight (~10MB RAM).
+**Why Reloader?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Auto-Restart** | No manual `kubectl rollout restart` |
+| **GitOps Friendly** | Config changes propagate automatically |
+| **Lightweight** | ~10MB RAM footprint |
+| **Selective** | Only restarts annotated workloads |
+
+**Usage:**
+
+Add this annotation to enable auto-reload:
+
+```yaml
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+```
+
+Or specify exact ConfigMaps/Secrets:
+
+```yaml
+metadata:
+  annotations:
+    configmap.reloader.stakater.com/reload: "my-configmap"
+    secret.reloader.stakater.com/reload: "my-secret"
+```
 
 <details>
 <summary>📄 Click to expand full gitops/management/reloader.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Reloader - ConfigMap/Secret Change Propagation
+# =============================================================================
+# Watches ConfigMaps and Secrets for changes, then triggers rolling
+# restarts on Deployments/StatefulSets that reference them.
+#
+# Essential for GitOps: when you update a ConfigMap in Git, the
+# corresponding pods automatically restart to pick up changes.
+#
+# Usage - Add annotation to Deployment:
+#   reloader.stakater.com/auto: "true"
+#
+# Or specify specific ConfigMaps:
+#   configmap.reloader.stakater.com/reload: "app-config"
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: reloader
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4615,17 +5314,25 @@ spec:
     helm:
       values: |
         reloader:
+          # Watch all namespaces
           watchGlobally: true
+          
+          # Resource limits (very lightweight)
           resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
             limits:
               cpu: 100m
               memory: 128Mi
-            requests:
-              cpu: 10m
-              memory: 64Mi
+          
+          # Logging
+          logFormat: json
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: kube-system
+  
   syncPolicy:
     automated:
       prune: true
@@ -4634,32 +5341,60 @@ spec:
 
 </details>
 
-**Usage:** Annotate your Deployments to enable auto-reload:
-```yaml
-metadata:
-  annotations:
-    reloader.stakater.com/auto: "true"
-```
-
 ### 9.9 Workload Rebalancing (Descheduler)
+
 **File:** `gitops/management/descheduler.yaml`
 
-On resource-constrained Raspberry Pi clusters, workloads can become imbalanced over time. The Descheduler periodically evicts pods based on configured strategies, allowing the scheduler to rebalance them across nodes.
+On resource-constrained Raspberry Pi clusters, workloads can become imbalanced over time. The Descheduler periodically evicts pods based on configured strategies, allowing the scheduler to rebalance them.
 
-*   **Strategies Enabled:**
-    *   `RemoveDuplicates`: Ensures replicas are spread across nodes.
-    *   `LowNodeUtilization`: Moves pods from overloaded nodes to underutilized ones.
-    *   `RemovePodsViolatingNodeAffinity`: Evicts pods that no longer satisfy node affinity rules.
+**Why Descheduler?**
+
+| Feature | Benefit |
+|---------|---------|
+| **Auto-Rebalance** | Even distribution across nodes |
+| **Node Affinity Fix** | Evict pods violating affinity rules |
+| **Duplicate Removal** | Spread replicas across nodes |
+| **Scheduled** | Runs on cron (every 15 min) |
+
+**Strategies Enabled:**
+
+| Strategy | Action |
+|----------|--------|
+| `RemoveDuplicates` | Spread replicas across different nodes |
+| `LowNodeUtilization` | Move pods from overloaded to underutilized nodes |
+| `RemovePodsViolatingNodeAffinity` | Evict pods not matching node affinity |
+
+> 💡 **Note:** Descheduler only evicts pods; the kube-scheduler handles new placement.
 
 <details>
 <summary>📄 Click to expand full gitops/management/descheduler.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Descheduler - Workload Rebalancing
+# =============================================================================
+# Periodically evicts pods to enable the scheduler to rebalance workloads
+# across nodes. Essential for resource-constrained RPi clusters.
+#
+# Strategies:
+#   - RemoveDuplicates: Spread replicas across nodes
+#   - LowNodeUtilization: Balance CPU/memory across nodes
+#   - RemovePodsViolatingNodeAffinity: Fix affinity violations
+#
+# Schedule: Runs every 15 minutes
+#
+# Note: Descheduler evicts pods; kube-scheduler places them
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: descheduler
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -4668,11 +5403,21 @@ spec:
     targetRevision: 0.31.0
     helm:
       values: |
-        schedule: "*/15 * * * *"  # Run every 15 minutes
+        # -------------------------------------------------------------------
+        # Schedule (cron expression)
+        # -------------------------------------------------------------------
+        schedule: "*/15 * * * *"  # Every 15 minutes
+        
+        # -------------------------------------------------------------------
+        # Descheduling Strategies
+        # -------------------------------------------------------------------
         deschedulerPolicy:
           strategies:
+            # Ensure pod replicas are spread across nodes
             RemoveDuplicates:
               enabled: true
+            
+            # Move pods from overloaded to underutilized nodes
             LowNodeUtilization:
               enabled: true
               params:
@@ -4683,11 +5428,17 @@ spec:
                   targetThresholds:
                     cpu: 50
                     memory: 50
+            
+            # Evict pods that no longer satisfy node affinity
             RemovePodsViolatingNodeAffinity:
               enabled: true
               params:
                 nodeAffinityType:
                   - requiredDuringSchedulingIgnoredDuringExecution
+        
+        # -------------------------------------------------------------------
+        # Resource Limits
+        # -------------------------------------------------------------------
         resources:
           requests:
             cpu: 50m
@@ -4695,9 +5446,11 @@ spec:
           limits:
             cpu: 100m
             memory: 128Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: kube-system
+  
   syncPolicy:
     automated:
       prune: true
@@ -4705,109 +5458,387 @@ spec:
 ```
 
 </details>
-
-*Note: Descheduler only evicts pods; it does not schedule them. The kube-scheduler handles placement after eviction.*
     
 ### 9.10 The Root Application (App of Apps)
+
 **File:** `gitops/root-app.yaml`
 
-This is the "One Ring to Rule Them All." Instead of applying the files above individually, we point ArgoCD to this single file (or eventually, to the Git repo containing it). It tells ArgoCD to deploy the entire stack defined in the `gitops/` directory structure.
+This is the **"One Ring to Rule Them All"**—the master Application that points ArgoCD at the entire `gitops/` directory, enabling recursive discovery of all child Applications.
+
+**How It Works:**
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        ROOT APP HIERARCHY                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                         ┌─────────────────┐                                │
+│                         │    root-app     │                                │
+│                         │   (This file)   │                                │
+│                         └────────┬────────┘                                │
+│                                  │                                          │
+│                         watches: gitops/                                    │
+│                                  │                                          │
+│         ┌────────────────────────┼────────────────────────┐                │
+│         ▼                        ▼                        ▼                │
+│  ┌─────────────┐         ┌─────────────┐         ┌─────────────┐          │
+│  │infrastructure│        │  security/  │         │ management/ │          │
+│  │/             │         │             │         │             │          │
+│  └──────┬──────┘         └──────┬──────┘         └──────┬──────┘          │
+│         │                       │                       │                   │
+│         ▼                       ▼                       ▼                   │
+│    cert-manager            kyverno                 reloader                │
+│                            falco                   descheduler             │
+│                            harbor                  velero                  │
+│                            openbao                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Configuration:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `repoURL` | Gitea repo URL | Source of truth for config |
+| `path` | `gitops` | Directory containing Applications |
+| `directory.recurse` | `true` | Find nested Application YAMLs |
 
 <details>
 <summary>📄 Click to expand full gitops/root-app.yaml</summary>
 
 ```yaml
+# =============================================================================
+# Root Application - App of Apps Pattern
+# =============================================================================
+# The master controller that points ArgoCD at the gitops/ directory.
+# ArgoCD recursively discovers and syncs all Application manifests.
+#
+# This is the ONLY manifest you need to apply manually. After this,
+# ArgoCD manages everything through Git reconciliation.
+#
+# Usage:
+#   1. Push gitops/ folder to Gitea repository
+#   2. Update repoURL below to your Gitea repo
+#   3. kubectl apply -f gitops/root-app.yaml
+#   4. Watch ArgoCD deploy everything automatically
+#
+# Excluded Paths:
+#   - apps/*: User applications (deploy separately)
+#   - services/*: Avoid recursive loops
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: root-app
   namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
+    # Update this to your Gitea repository URL
     repoURL: http://gitea.192.168.0.210.nip.io/liviu/home-cluster.git
     targetRevision: main
     path: gitops
     directory:
       recurse: true
-      exclude: "{apps/*,services/*}" # Avoid infinite loops with existing apps
+      # Exclude to avoid infinite loops
+      exclude: "{apps/*,services/*}"
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
+  
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
 ```
 
 </details>
 
 ### 9.11 Security Verification Script
+
 **File:** `tests/04_security_test.sh`
 
-This script verifies that your security policies are enforced and services are accessible.
-1.  **Kyverno:** Attempts to create a pod violating the "no-latest-tag" policy. It expects a failure.
-2.  **Falco:** Verifies the eBPF probes are running.
-3.  **Harbor:** Checks API availability.
+This script verifies that all security components are functioning correctly.
+
+**Test Coverage:**
+
+| Test | Component | Expected Result |
+|------|-----------|-----------------|
+| Policy Enforcement | Kyverno | Block pods with `:latest` tag |
+| Runtime Monitoring | Falco | eBPF probes running |
+| Registry Access | Harbor | API returns HTTP 200 |
+| Secrets Management | OpenBao | Service responding |
+| Backup System | Velero | Server pod running |
 
 <details>
 <summary>📄 Click to expand full tests/04_security_test.sh</summary>
 
 ```bash
 #!/bin/bash
-echo "=== SECURITY STACK VERIFICATION ==="
+# =============================================================================
+# Phase 5 Security Stack Verification Test
+# =============================================================================
+# Verifies all security and management components:
+#   - Kyverno policy enforcement
+#   - Falco runtime security
+#   - Harbor container registry
+#   - OpenBao secrets management
+#   - Velero backup system
+#   - MinIO object storage
+#
+# Prerequisites:
+#   - Phase 5 components deployed
+#   - kubectl configured for the cluster
+#
+# Usage: bash tests/04_security_test.sh
+# =============================================================================
 
-# 1. Kyverno Policy Test
-echo "Testing Kyverno Policy Enforcement..."
-# We try to run a pod that violates policies. It MUST fail for the test to pass.
-kubectl run kyverno-test-fail --image=nginx:latest --dry-run=server 2>&1 | grep "disallowed" > /dev/null
-if [ $? -eq 0 ]; then
-    echo "✅ Kyverno blocked 'latest' tag: PASS"
+set -e
+
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║          PHASE 5: SECURITY & MANAGEMENT VERIFICATION                  ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+# -----------------------------------------------------------------------------
+# Test 1: MinIO Object Storage
+# -----------------------------------------------------------------------------
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 1: MinIO Object Storage                                        │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+MINIO_PODS=$(kubectl get pods -n storage -l app=minio --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$MINIO_PODS" -ge 1 ]; then
+    echo "✅ MinIO is running"
+    ((TESTS_PASSED++))
+    
+    # Check API endpoint
+    MINIO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://minio.192.168.0.210.nip.io/minio/health/live 2>/dev/null || echo "000")
+    if [ "$MINIO_STATUS" == "200" ]; then
+        echo "  ✅ MinIO API accessible"
+    fi
 else
-    echo "⚠️  Kyverno allowed 'latest' tag (Policies might not be loaded yet)"
+    echo "❌ MinIO not running"
+    ((TESTS_FAILED++))
 fi
 
-# 2. Falco Status
-echo "Checking Falco (Runtime Security)..."
-PODS=$(kubectl get pods -n security -l app.kubernetes.io/name=falco | grep Running | wc -l)
-if [ "$PODS" -ge 1 ]; then
-    echo "✅ Falco eBPF Probes Running"
+# -----------------------------------------------------------------------------
+# Test 2: Kyverno Policy Enforcement
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 2: Kyverno Policy Enforcement                                  │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+KYVERNO_PODS=$(kubectl get pods -n kyverno --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$KYVERNO_PODS" -ge 1 ]; then
+    echo "✅ Kyverno is running ($KYVERNO_PODS pods)"
+    ((TESTS_PASSED++))
+    
+    # Test policy enforcement (should fail)
+    echo "  Testing policy enforcement..."
+    if kubectl run kyverno-test --image=nginx:latest --dry-run=server 2>&1 | grep -q "blocked\|denied\|disallowed"; then
+        echo "  ✅ Policy blocked :latest tag"
+    else
+        echo "  ⚠️  Policy not enforcing (may not be configured yet)"
+    fi
 else
-    echo "❌ Falco is not running"
+    echo "❌ Kyverno not running"
+    ((TESTS_FAILED++))
+fi
+
+# -----------------------------------------------------------------------------
+# Test 3: Falco Runtime Security
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 3: Falco Runtime Security                                      │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+FALCO_PODS=$(kubectl get pods -n security -l app.kubernetes.io/name=falco --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$FALCO_PODS" -ge 1 ]; then
+    echo "✅ Falco eBPF probes running ($FALCO_PODS pods)"
+    ((TESTS_PASSED++))
+else
+    echo "❌ Falco not running"
+    ((TESTS_FAILED++))
+fi
+
+# -----------------------------------------------------------------------------
+# Test 4: Harbor Container Registry
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 4: Harbor Container Registry                                   │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+HARBOR_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.0.210.nip.io/api/v2.0/ping 2>/dev/null || echo "000")
+if [ "$HARBOR_STATUS" == "200" ]; then
+    echo "✅ Harbor API accessible (HTTP 200)"
+    ((TESTS_PASSED++))
+else
+    echo "❌ Harbor API not accessible (HTTP $HARBOR_STATUS)"
+    ((TESTS_FAILED++))
+fi
+
+# -----------------------------------------------------------------------------
+# Test 5: Velero Backup System
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 5: Velero Backup System                                        │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+VELERO_PODS=$(kubectl get pods -n velero -l app.kubernetes.io/name=velero --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$VELERO_PODS" -ge 1 ]; then
+    echo "✅ Velero server is running"
+    ((TESTS_PASSED++))
+    
+    # Check backup location
+    BSL_STATUS=$(kubectl get backupstoragelocation -n velero default -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+    echo "  Backup Storage Location: $BSL_STATUS"
+else
+    echo "❌ Velero not running"
+    ((TESTS_FAILED++))
+fi
+
+# -----------------------------------------------------------------------------
+# Test 6: OpenBao Secrets Management
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 6: OpenBao Secrets Management                                  │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+OPENBAO_PODS=$(kubectl get pods -n security -l app.kubernetes.io/name=openbao --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$OPENBAO_PODS" -ge 1 ]; then
+    echo "✅ OpenBao is running"
+    ((TESTS_PASSED++))
+else
+    echo "⚠️  OpenBao not running (may need initialization)"
+fi
+
+# -----------------------------------------------------------------------------
+# Test 7: Reloader
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Test 7: Reloader ConfigMap Watcher                                  │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+RELOADER_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=reloader --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [ "$RELOADER_PODS" -ge 1 ]; then
+    echo "✅ Reloader is running"
+    ((TESTS_PASSED++))
+else
+    echo "❌ Reloader not running"
+    ((TESTS_FAILED++))
+fi
+
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║                    VERIFICATION SUMMARY                               ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "  Tests Passed: $TESTS_PASSED"
+echo "  Tests Failed: $TESTS_FAILED"
+echo ""
+
+if [ $TESTS_FAILED -eq 0 ]; then
+    echo "  ✅ All Phase 5 security tests passed!"
+    echo ""
+    echo "Access URLs:"
+    echo "  • MinIO:  http://minio.192.168.0.210.nip.io (admin/password123)"
+    echo "  • Harbor: http://harbor.192.168.0.210.nip.io (admin/Harbor12345)"
+    exit 0
+else
+    echo "  ❌ Some tests failed. Check component status above."
     exit 1
 fi
-
-# 3. Harbor Registry
-echo "Checking Harbor Registry..."
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.0.210.nip.io/api/v2.0/ping)
-if [ "$STATUS" -eq 200 ]; then
-    echo "✅ Harbor API is Live (200 OK)"
-else
-    echo "❌ Harbor API Unreachable (HTTP $STATUS)"
-    exit 1
-fi
-
-echo "=== SECURITY CHECK COMPLETE ==="
 ```
 
 </details>
 
 ### 9.12 Phase 5 Execution Steps
 
-1.  **Commit Files:** Ensure the files above are created in your local `gitops/` folder.
-2.  **Push to Gitea:**
-    ```bash
-    git add .
-    git commit -m "Add Security and Management stack"
-    git push origin main
-    ```
-3.  **Apply Root App:**
-    ```bash
-    kubectl apply -f gitops/root-app.yaml
-    ```
-4.  **Verification:**
-    *   **MinIO Console:** `http://minio.192.168.0.210.nip.io` (User: `admin`, Pass: `password123`)
-    *   **Harbor Registry:** `http://harbor.192.168.0.210.nip.io` (Default User: `admin`, Pass: `Harbor12345`)
+Execute these commands after Phase 4 (GitOps) is complete:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     PHASE 5 EXECUTION CHECKLIST                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  □ Step 1: Verify gitops/ files exist locally                              │
+│  □ Step 2: Push to Gitea repository                                        │
+│  □ Step 3: Apply root-app.yaml                                             │
+│  □ Step 4: Monitor ArgoCD sync progress                                    │
+│  □ Step 5: Run verification script                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Step 1: Verify Local Files**
+
+Ensure all gitops/ files are created:
+
+```bash
+ls -la gitops/storage/
+ls -la gitops/security/
+ls -la gitops/management/
+ls -la gitops/infrastructure/
+```
+
+**Step 2: Push to Gitea**
+
+```bash
+cd /path/to/your/repo
+git add .
+git commit -m "Add Phase 5: Security and Management stack"
+git push origin main
+```
+
+**Step 3: Apply Root Application**
+
+```bash
+kubectl apply -f gitops/root-app.yaml
+```
+
+**Step 4: Monitor Sync Progress**
+
+```bash
+# Watch ArgoCD applications
+kubectl get applications -n argocd -w
+
+# Check specific application status
+kubectl get application -n argocd minio -o yaml | grep -A5 status:
+```
+
+**Step 5: Run Verification**
+
+```bash
+bash tests/04_security_test.sh
+```
+
+**Access Credentials:**
+
+| Service | URL | Username | Password |
+|---------|-----|----------|----------|
+| MinIO Console | http://minio.192.168.0.210.nip.io | admin | password123 |
+| Harbor Registry | http://harbor.192.168.0.210.nip.io | admin | Harbor12345 |
+
+> ⚠️ **Security Reminder:** Change all default passwords before exposing services externally!
 
 ## 10. Phase 6: Advanced Observability
 

@@ -1,8 +1,34 @@
+# =============================================================================
+# Descheduler - Workload Rebalancing
+# =============================================================================
+# Evicts pods based on scheduling policies to allow Kubernetes scheduler
+# to reschedule them on more appropriate nodes.
+#
+# Why Descheduler on Raspberry Pi?
+#   - Limited resources per node (4GB/8GB RAM)
+#   - Uneven distribution after node restarts or failures
+#   - Prevents "hot spots" where one node is overloaded
+#   - Works with kube-scheduler to maintain balance
+#
+# Strategies Enabled:
+#   - RemoveDuplicates: Spread replicas across different nodes
+#   - LowNodeUtilization: Move pods from overloaded to underutilized nodes
+#   - RemovePodsViolatingNodeAffinity: Evict pods that no longer match affinity
+#
+# Schedule: Every 15 minutes (*/15 * * * *)
+#
+# Dependencies: None (works with built-in kube-scheduler)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: descheduler
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
@@ -11,34 +37,57 @@ spec:
     targetRevision: 0.31.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Execution Schedule
+        # -------------------------------------------------------------------
         # Run every 15 minutes to rebalance workloads
         schedule: "*/15 * * * *"
         
+        # -------------------------------------------------------------------
+        # Descheduler Policy
+        # -------------------------------------------------------------------
         deschedulerPolicy:
           strategies:
-            # Ensure pod replicas are spread across nodes
+            # -----------------------------------------------------------------
+            # RemoveDuplicates
+            # Ensures pod replicas are spread across different nodes
+            # Important for HA - don't want all replicas on one node
+            # -----------------------------------------------------------------
             RemoveDuplicates:
               enabled: true
             
-            # Move pods from overloaded to underutilized nodes
+            # -----------------------------------------------------------------
+            # LowNodeUtilization
+            # Moves pods from overloaded to underutilized nodes
+            # Critical for RPi where memory is limited
+            # -----------------------------------------------------------------
             LowNodeUtilization:
               enabled: true
               params:
                 nodeResourceUtilizationThresholds:
+                  # Nodes below these thresholds are "underutilized"
                   thresholds:
                     cpu: 20
                     memory: 20
+                  # Nodes above these thresholds are candidates for eviction
                   targetThresholds:
                     cpu: 50
                     memory: 50
             
-            # Evict pods that no longer satisfy node affinity
+            # -----------------------------------------------------------------
+            # RemovePodsViolatingNodeAffinity
+            # Evicts pods that no longer satisfy node affinity rules
+            # Useful after node labels change
+            # -----------------------------------------------------------------
             RemovePodsViolatingNodeAffinity:
               enabled: true
               params:
                 nodeAffinityType:
                   - requiredDuringSchedulingIgnoredDuringExecution
         
+        # -------------------------------------------------------------------
+        # Resource Limits (RPi optimized - runs as CronJob)
+        # -------------------------------------------------------------------
         resources:
           requests:
             cpu: 50m
@@ -46,9 +95,11 @@ spec:
           limits:
             cpu: 100m
             memory: 128Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: kube-system
+  
   syncPolicy:
     automated:
       prune: true

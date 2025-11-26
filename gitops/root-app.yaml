@@ -1,21 +1,73 @@
+# =============================================================================
+# Root Application - GitOps "App of Apps" Pattern
+# =============================================================================
+# This is the master ArgoCD Application that manages all other Applications.
+# Once applied, ArgoCD will automatically discover and deploy everything in
+# the gitops/ directory of your repository.
+#
+# How It Works:
+#   1. Root App watches the gitops/ directory in the Git repository
+#   2. ArgoCD finds all Application manifests recursively
+#   3. Each Application is synced automatically
+#   4. Changes in Git trigger automatic deployments
+#
+# Hierarchy:
+#   root-app.yaml
+#   └── gitops/
+#       ├── infrastructure/    # cert-manager, etc.
+#       ├── observability/     # Prometheus, Grafana, Loki, etc.
+#       ├── security/          # Kyverno, Falco, etc.
+#       ├── management/        # Velero, Reloader, Descheduler
+#       ├── storage/           # MinIO, etc.
+#       ├── cicd/              # Argo Workflows, Events, etc.
+#       └── services/          # Gitea, etc.
+#
+# Exclusions:
+#   - apps/* and services/* are excluded to prevent infinite loops
+#   - These contain actual workloads, not ArgoCD Applications
+#
+# Initial Setup:
+#   kubectl apply -f gitops/root-app.yaml
+#
+# Dependencies: ArgoCD must be running (bootstrap/argocd/install.sh)
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: root-app
   namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
+    # -------------------------------------------------------------------------
+    # Git Repository (your Gitea instance)
+    # Update this URL to match your repository location
+    # -------------------------------------------------------------------------
     repoURL: http://gitea.192.168.0.210.nip.io/liviu/home-cluster.git
     targetRevision: main
     path: gitops
+    
+    # -------------------------------------------------------------------------
+    # Directory Configuration
+    # -------------------------------------------------------------------------
     directory:
+      # Recursively discover all YAML files in subdirectories
       recurse: true
-      exclude: "{apps/*,services/*}" # Avoid infinite loops with existing apps
+      
+      # Exclude patterns to prevent infinite application loops
+      # These directories contain actual workloads, not ArgoCD Applications
+      exclude: "{apps/*,services/*}"
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
+  
   syncPolicy:
     automated:
+      # Remove resources that are no longer in Git
       prune: true
+      # Auto-heal any manual changes (restore to Git state)
       selfHeal: true
