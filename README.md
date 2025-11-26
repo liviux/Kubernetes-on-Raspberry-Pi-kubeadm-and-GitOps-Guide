@@ -15,65 +15,64 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [OS & Network Setup](#os--network-setup)
     *   [Local Client Configuration](#local-client-configuration)
     *   [Ansible Configuration](#ansible-configuration)
-5.  [Deployment Roadmap](#5-deployment-roadmap)
-6.  [Phase 1: Infrastructure Provisioning](#6-phase-1-infrastructure-provisioning)
-    *   [6.1 OS Preparation Playbook](#61-os-preparation-playbook)
-    *   [6.2 Kubernetes Binaries Playbook](#62-kubernetes-binaries-playbook)
-    *   [6.3 Infrastructure Verification](#63-infrastructure-verification)
-    *   [6.4 Phase 1 Execution Steps](#64-phase-1-execution-steps)
-7.  [Phase 2: Cluster Bootstrap](#7-phase-2-cluster-bootstrap)
-    *   [7.1 Cluster Initialization Playbook](#71-cluster-initialization-playbook)
-    *   [7.2 Metrics Server](#72-metrics-server)
-    *   [7.3 Network Verification Script](#73-network-verification-script)
-    *   [7.4 Phase 2 Execution Steps](#74-phase-2-execution-steps)
-8.  [Phase 3: Storage Foundation](#8-phase-3-storage-foundation)
-    *   [8.1 Storage Mounting Playbook](#81-storage-mounting-playbook)
-    *   [8.2 Longhorn Bootstrap Script](#82-longhorn-bootstrap-script)
-    *   [8.3 Storage Verification Script](#83-storage-verification-script)
-    *   [8.4 Phase 3 Execution Steps](#84-phase-3-execution-steps)
-9.  [Phase 4: GitOps & Observability](#9-phase-4-gitops--observability)
-    *   [9.1 Gateway API Bootstrap (Traefik)](#91-gateway-api-bootstrap-traefik)
-    *   [9.2 GitOps Bootstrap (ArgoCD)](#92-gitops-bootstrap-argocd)
-    *   [9.3 Source Control Service (Gitea)](#93-source-control-service-gitea)
-    *   [9.4 The "App of Apps" Pattern](#94-the-app-of-apps-pattern)
-    *   [9.5 Phase 4 Execution Steps](#95-phase-4-execution-steps)
-10. [Phase 5: Security & Management Stack](#10-phase-5-security--management-stack)
-    *   [10.1 Object Storage (MinIO)](#101-object-storage-minio)
-    *   [10.2 Certificate Automation (Cert-Manager)](#102-certificate-automation-cert-manager)
-    *   [10.3 Container Registry (Harbor)](#103-container-registry-harbor)
-    *   [10.4 Backup & Restore (Velero)](#104-backup--restore-velero)
-    *   [10.5 Secrets Management (OpenBao)](#105-secrets-management-openbao)
-    *   [10.6 Policy Enforcement (Kyverno)](#106-policy-enforcement-kyverno)
-    *   [10.7 Runtime Security (Falco)](#107-runtime-security-falco)
-    *   [10.8 Configuration Reloader (Reloader)](#108-configuration-reloader-reloader)
-    *   [10.9 Workload Rebalancing (Descheduler)](#109-workload-rebalancing-descheduler)
-    *   [10.10 The Root Application (App of Apps)](#1010-the-root-application-app-of-apps)
-    *   [10.11 Security Verification Script](#1011-security-verification-script)
-    *   [10.12 Phase 5 Execution Steps](#1012-phase-5-execution-steps)
-11. [Phase 6: Advanced Observability](#11-phase-6-advanced-observability)
-    *   [11.1 Log Aggregation (Loki Stack)](#111-log-aggregation-loki-stack)
-    *   [11.2 Log Collection (Fluent Bit)](#112-log-collection-fluent-bit)
-    *   [11.3 Distributed Tracing (OpenTelemetry)](#113-distributed-tracing-opentelemetry)
-    *   [11.4 Tracing Backend (Jaeger)](#114-tracing-backend-jaeger)
-    *   [11.5 Traffic Analysis (Kubeshark)](#115-traffic-analysis-kubeshark)
-    *   [11.6 Cost Management (OpenCost)](#116-cost-management-opencost)
-    *   [11.7 AI Diagnostics (K8sGPT)](#117-ai-diagnostics-k8sgpt)
-    *   [11.8 Observability Verification Script](#118-observability-verification-script)
-    *   [11.9 Phase 6 Execution Steps](#119-phase-6-execution-steps)
-12. [Phase 7: CI/CD & Developer Experience](#12-phase-7-cicd--developer-experience)
-    *   [12.1 Image Automation (Argo Image Updater)](#121-image-automation-argo-image-updater)
-    *   [12.2 CI Engine (Argo Workflows)](#122-ci-engine-argo-workflows)
-    *   [12.3 Event Bus (Argo Events)](#123-event-bus-argo-events)
-    *   [12.4 Security Tooling (Trivy)](#124-security-tooling-trivy)
-    *   [12.5 Local Development (Skaffold)](#125-local-development-skaffold)
-    *   [12.6 CI/CD Verification Script](#126-cicd-verification-script)
-    *   [12.7 Phase 7 Execution Steps](#127-phase-7-execution-steps)
-13. [Phase 8: Day 2 Operations & Maintenance](#13-phase-8-day-2-operations--maintenance)
-    *   [13.1 Upgrading Kubernetes](#131-upgrading-kubernetes)
-    *   [13.2 OS Patching](#132-os-patching)
-    *   [13.3 Cluster Reset (The Nuclear Option)](#133-cluster-reset-the-nuclear-option)
-    *   [13.4 Backup & Disaster Recovery](#134-backup--disaster-recovery)
-    *   [13.5 Troubleshooting Cheatsheet](#135-troubleshooting-cheatsheet)
+5.  [Phase 1: Infrastructure Provisioning](#5-phase-1-infrastructure-provisioning)
+    *   [5.1 OS Preparation Playbook](#51-os-preparation-playbook)
+    *   [5.2 Kubernetes Binaries Playbook](#52-kubernetes-binaries-playbook)
+    *   [5.3 Infrastructure Verification](#53-infrastructure-verification)
+    *   [5.4 Phase 1 Execution Steps](#54-phase-1-execution-steps)
+6.  [Phase 2: Cluster Bootstrap](#6-phase-2-cluster-bootstrap)
+    *   [6.1 Cluster Initialization Playbook](#61-cluster-initialization-playbook)
+    *   [6.2 Metrics Server](#62-metrics-server)
+    *   [6.3 Network Verification Script](#63-network-verification-script)
+    *   [6.4 Phase 2 Execution Steps](#64-phase-2-execution-steps)
+7.  [Phase 3: Storage Foundation](#7-phase-3-storage-foundation)
+    *   [7.1 Storage Mounting Playbook](#71-storage-mounting-playbook)
+    *   [7.2 Longhorn Bootstrap Script](#72-longhorn-bootstrap-script)
+    *   [7.3 Storage Verification Script](#73-storage-verification-script)
+    *   [7.4 Phase 3 Execution Steps](#74-phase-3-execution-steps)
+8.  [Phase 4: GitOps & Observability](#8-phase-4-gitops--observability)
+    *   [8.1 Gateway API Bootstrap (Traefik)](#81-gateway-api-bootstrap-traefik)
+    *   [8.2 GitOps Bootstrap (ArgoCD)](#82-gitops-bootstrap-argocd)
+    *   [8.3 Source Control Service (Gitea)](#83-source-control-service-gitea)
+    *   [8.4 The "App of Apps" Pattern](#84-the-app-of-apps-pattern)
+    *   [8.5 Phase 4 Execution Steps](#85-phase-4-execution-steps)
+9.  [Phase 5: Security & Management Stack](#9-phase-5-security--management-stack)
+    *   [9.1 Object Storage (MinIO)](#91-object-storage-minio)
+    *   [9.2 Certificate Automation (Cert-Manager)](#92-certificate-automation-cert-manager)
+    *   [9.3 Container Registry (Harbor)](#93-container-registry-harbor)
+    *   [9.4 Backup & Restore (Velero)](#94-backup--restore-velero)
+    *   [9.5 Secrets Management (OpenBao)](#95-secrets-management-openbao)
+    *   [9.6 Policy Enforcement (Kyverno)](#96-policy-enforcement-kyverno)
+    *   [9.7 Runtime Security (Falco)](#97-runtime-security-falco)
+    *   [9.8 Configuration Reloader (Reloader)](#98-configuration-reloader-reloader)
+    *   [9.9 Workload Rebalancing (Descheduler)](#99-workload-rebalancing-descheduler)
+    *   [9.10 The Root Application (App of Apps)](#910-the-root-application-app-of-apps)
+    *   [9.11 Security Verification Script](#911-security-verification-script)
+    *   [9.12 Phase 5 Execution Steps](#912-phase-5-execution-steps)
+10. [Phase 6: Advanced Observability](#10-phase-6-advanced-observability)
+    *   [10.1 Log Aggregation (Loki Stack)](#101-log-aggregation-loki-stack)
+    *   [10.2 Log Collection (Fluent Bit)](#102-log-collection-fluent-bit)
+    *   [10.3 Distributed Tracing (OpenTelemetry)](#103-distributed-tracing-opentelemetry)
+    *   [10.4 Tracing Backend (Jaeger)](#104-tracing-backend-jaeger)
+    *   [10.5 Traffic Analysis (Kubeshark)](#105-traffic-analysis-kubeshark)
+    *   [10.6 Cost Management (OpenCost)](#106-cost-management-opencost)
+    *   [10.7 AI Diagnostics (K8sGPT)](#107-ai-diagnostics-k8sgpt)
+    *   [10.8 Observability Verification Script](#108-observability-verification-script)
+    *   [10.9 Phase 6 Execution Steps](#109-phase-6-execution-steps)
+11. [Phase 7: CI/CD & Developer Experience](#11-phase-7-cicd--developer-experience)
+    *   [11.1 Image Automation (Argo Image Updater)](#111-image-automation-argo-image-updater)
+    *   [11.2 CI Engine (Argo Workflows)](#112-ci-engine-argo-workflows)
+    *   [11.3 Event Bus (Argo Events)](#113-event-bus-argo-events)
+    *   [11.4 Security Tooling (Trivy)](#114-security-tooling-trivy)
+    *   [11.5 Local Development (Skaffold)](#115-local-development-skaffold)
+    *   [11.6 CI/CD Verification Script](#116-cicd-verification-script)
+    *   [11.7 Phase 7 Execution Steps](#117-phase-7-execution-steps)
+12. [Phase 8: Day 2 Operations & Maintenance](#12-phase-8-day-2-operations--maintenance)
+    *   [12.1 Upgrading Kubernetes](#121-upgrading-kubernetes)
+    *   [12.2 OS Patching](#122-os-patching)
+    *   [12.3 Cluster Reset (The Nuclear Option)](#123-cluster-reset-the-nuclear-option)
+    *   [12.4 Backup & Disaster Recovery](#124-backup--disaster-recovery)
+    *   [12.5 Troubleshooting Cheatsheet](#125-troubleshooting-cheatsheet)
 
 ---
 
@@ -754,6 +753,37 @@ With constrained hardware, careful resource allocation is critical. Below is the
 | **Portainer** | Web cluster UI | Visual container management |
 | **Hubble UI** | Network visualization | Service dependency maps |
 
+#### **G. Deployment Sequence**
+
+The following diagram shows the order of operations. Phases 1-4 are manual; phases 5+ are automated via ArgoCD sync waves.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         DEPLOYMENT SEQUENCE                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
+│  │  PHASE 1    │───►│  PHASE 2    │───►│  PHASE 3    │───►│  PHASE 4    │  │
+│  │Infrastructure│   │  Bootstrap  │    │   Storage   │    │   GitOps    │  │
+│  │  (Ansible)  │    │  (kubeadm)  │    │ (Longhorn)  │    │  (ArgoCD)   │  │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘  │
+│        │                  │                  │                  │          │
+│        ▼                  ▼                  ▼                  ▼          │
+│   OS + Binaries      K8s + Cilium       HDD + MinIO      App of Apps      │
+│                                                                  │          │
+│                                              ┌───────────────────┘          │
+│                                              ▼                              │
+│                                    ┌─────────────────┐                     │
+│                                    │    PHASE 5+     │                     │
+│                                    │  (Automated)    │                     │
+│                                    │  ArgoCD syncs   │                     │
+│                                    │  all remaining  │                     │
+│                                    │   components    │                     │
+│                                    └─────────────────┘                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 3. Repository Directory Structure
@@ -1173,48 +1203,11 @@ ansible -i hosts big -m shell -a "lsblk"
 
 ---
 
-## 5. Deployment Roadmap
-
-This roadmap outlines the specific order of operations required to bootstrap the cluster.
-
-### Phase 1: Infrastructure (Ansible)
-**Goal:** "Kubernetes Ready" hardware.
-1.  **OS Tuning:** Update packages, disable Swap/WiFi/Bluetooth, set GPU memory to 16MB.
-2.  **Kernel & Network:** Load `overlay`/`br_netfilter` modules; enable IP forwarding.
-3.  **Cgroups:** Append `cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1` to boot config.
-4.  **Dependencies:** Install `containerd`, `open-iscsi`, `nfs-common`, `ipset`.
-5.  **Binaries:** Install `kubeadm`, `kubelet`, `kubectl` (locked versions), `helm`, `etcdctl`, `cilium-cli`.
-
-### Phase 2: Cluster Bootstrap
-**Goal:** A running API server and networked nodes.
-1.  **Init:** Run `kubeadm init` on `rpi4-1`.
-2.  **Networking:** Install **Cilium** immediately to allow nodes to become Ready. Configure L2 Announcements.
-3.  **Join:** Run `kubeadm join` on workers.
-4.  **Labeling:** Apply labels (`hardware/storage=hdd`, `hardware/ram=8gb`) to distinguish the nodes.
-
-### Phase 3: Storage Foundation
-**Goal:** Persistent storage for the GitOps engine.
-1.  **HDD Setup:** Format and mount the 1TB drive to `/var/lib/longhorn`.
-2.  **Longhorn Install:** Deploy Longhorn with strict affinity settings (Replica Count: 1, Control Plane only).
-3.  **MinIO Install:** Deploy MinIO on top of Longhorn to provide S3-compatible storage.
-
-### Phase 4: GitOps & Observability
-**Goal:** Automated application management.
-1.  **ArgoCD:** Deploy ArgoCD.
-2.  **App of Apps:** Apply the root manifest. ArgoCD takes over and installs the Observability, Security, and Management stacks defined in the `gitops/` directory.
-
-### Phase 5: CI/CD & DevEx
-**Goal:** Developer productivity.
-1.  **Argo Workflows & Events:** Deploy the CI engine and Event Bus.
-2.  **Integration:** Configure Harbor for image pushing and Security scanners (Trivy/ZAP) within the pipelines.
-
----
-
-## 6. Phase 1: Infrastructure Provisioning
+## 5. Phase 1: Infrastructure Provisioning
 
 This phase transforms the raw Ubuntu OS into a "Kubernetes Ready" node. It handles low-level kernel tuning, disables unnecessary hardware to save resources, and installs the immutable versions of the Kubernetes binaries.
 
-### 6.1 OS Preparation Playbook
+### 5.1 OS Preparation Playbook
 **File:** `ansible/playbooks/01_node_prep.yml`
 
 This playbook performs the following critical tasks:
@@ -1350,7 +1343,7 @@ This playbook performs the following critical tasks:
       when: cgroup_update.changed or apt_action.changed
 ```
 
-### 6.2 Kubernetes Binaries Playbook
+### 5.2 Kubernetes Binaries Playbook
 **File:** `ansible/playbooks/02_k8s_binaries.yml`
 
 This playbook installs the core software stack.
@@ -1450,7 +1443,7 @@ This playbook installs the core software stack.
       when: "'big' in group_names"
 ```
 
-### 6.3 Infrastructure Verification
+### 5.3 Infrastructure Verification
 **File:** `tests/01_infra_test.sh`
 
 This script validates that Phase 1 successfully prepared the nodes.
@@ -1493,7 +1486,7 @@ ansible -i ansible/hosts all -m shell -a "cat /proc/cgroups | grep memory | grep
 echo "=== PHASE 1 COMPLETE ==="
 ```
 
-### 6.4 Phase 1 Execution Steps
+### 5.4 Phase 1 Execution Steps
 
 Run the following commands from your management machine to execute Phase 1.
 
@@ -1513,11 +1506,11 @@ Run the following commands from your management machine to execute Phase 1.
     bash tests/01_infra_test.sh
     ```
 
-## 7. Phase 2: Cluster Bootstrap
+## 6. Phase 2: Cluster Bootstrap
 
 In this phase, we initialize the Control Plane, install the networking layer (Cilium), and join the worker nodes.
 
-### 7.1 Cluster Initialization Playbook
+### 6.1 Cluster Initialization Playbook
 **File:** `ansible/playbooks/03_cluster_init.yml`
 
 This complex playbook performs the following:
@@ -1653,7 +1646,7 @@ This complex playbook performs the following:
       loop: "{{ groups['small'] }}"
 ```
 
-### 7.2 Metrics Server
+### 6.2 Metrics Server
 **File:** `bootstrap/metrics-server/install.sh`
 
 Metrics Server is a cluster-wide aggregator of resource usage data. It is **required** for:
@@ -1691,7 +1684,7 @@ echo "Verify with: kubectl top nodes"
 
 *Note: The `--kubelet-insecure-tls` flag is required because kubeadm generates self-signed certificates for the kubelet.*
 
-### 7.3 Network Verification Script
+### 6.3 Network Verification Script
 **File:** `tests/02_network_test.sh`
 
 Checks if all nodes are Ready (Cilium success) and if the Control Plane has the correct storage labels.
@@ -1737,7 +1730,7 @@ fi
 echo "=== PHASE 2 COMPLETE ==="
 ```
 
-### 7.4 Phase 2 Execution Steps
+### 6.4 Phase 2 Execution Steps
 
 1.  **Run the Cluster Initialization:**
     ```bash
@@ -1756,13 +1749,13 @@ echo "=== PHASE 2 COMPLETE ==="
     bash tests/02_network_test.sh
     ```
 
-## 8. Phase 3: Storage Foundation
+## 7. Phase 3: Storage Foundation
 
 In this phase, we enable the persistent storage layer. Since Raspberry Pis use SD cards (which are slow and unreliable for heavy writes), we utilize the **1TB HDD** attached to the Control Plane (`rpi4-1`).
 
 We install **Longhorn** as the storage provider. We configure it with **Strict Affinity** rules: it will serve volumes to the entire cluster, but the physical data will *only* be written to the HDD on `rpi4-1`.
 
-### 8.1 Storage Mounting Playbook
+### 7.1 Storage Mounting Playbook
 **File:** `ansible/playbooks/04_storage_mount.yml`
 
 This playbook runs only on the `big` (Control Plane) node. It formats the USB HDD (if necessary) and mounts it persistently to the path Longhorn expects.
@@ -1811,7 +1804,7 @@ This playbook runs only on the `big` (Control Plane) node. It formats the USB HD
         msg: "Storage mounted: {{ df_out.stdout }}"
 ```
 
-### 8.2 Longhorn Bootstrap Script
+### 7.2 Longhorn Bootstrap Script
 **File:** `bootstrap/longhorn/install.sh`
 
 This script installs Longhorn via Helm and applies the critical "Day 2" configurations to protect your hardware.
@@ -1861,7 +1854,7 @@ done
 echo "=== LONGHORN INSTALLED & CONFIGURED ==="
 ```
 
-### 8.3 Storage Verification Script
+### 7.3 Storage Verification Script
 **File:** `tests/03_storage_test.sh`
 
 This script creates a real Persistent Volume Claim (PVC) and a Pod to verify that:
@@ -1949,7 +1942,7 @@ fi
 echo "=== PHASE 3 COMPLETE ==="
 ```
 
-### 8.4 Phase 3 Execution Steps
+### 7.4 Phase 3 Execution Steps
 
 1.  **Mount the HDD:**
     *(Ensure your HDD is plugged into `rpi4-1` and check `lsblk` to confirm the device name matches the playbook vars).*
@@ -1968,7 +1961,7 @@ echo "=== PHASE 3 COMPLETE ==="
     bash tests/03_storage_test.sh
     ```
 
-## 9. Phase 4: GitOps & Observability
+## 8. Phase 4: GitOps & Observability
 
 We now move up the stack to the application layer. Instead of managing tools individually, we establish the **GitOps Loop**.
 
@@ -1978,7 +1971,7 @@ We now move up the stack to the application layer. Instead of managing tools ind
 3.  **Gitea:** The internal Git server where our cluster configuration will live.
 4.  **App of Apps:** A single manifest that tells ArgoCD to install everything else (Observability, Security, etc.).
 
-### 9.1 Gateway API Bootstrap (Traefik)
+### 8.1 Gateway API Bootstrap (Traefik)
 **File:** `bootstrap/traefik/install.sh`
 
 This script installs **Traefik v3** as a Gateway API implementation. Gateway API is the successor to Ingress, providing:
@@ -2067,7 +2060,7 @@ echo "External IP should be assigned shortly."
 echo "Gateway: main-gateway.traefik-system"
 ```
 
-### 9.2 GitOps Bootstrap (ArgoCD)
+### 8.2 GitOps Bootstrap (ArgoCD)
 **File:** `bootstrap/argocd/install.sh`
 
 This script installs **ArgoCD**.
@@ -2124,7 +2117,7 @@ echo "URL: http://argocd.192.168.0.210.nip.io"
 echo "Get Password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
 ```
 
-### 9.3 Source Control Service (Gitea)
+### 8.3 Source Control Service (Gitea)
 **File:** `gitops/services/gitea.yaml`
 
 This is our first **Declarative Application**. Instead of a shell script, this is a YAML file we feed to ArgoCD.
@@ -2229,7 +2222,7 @@ spec:
           port: 3000
 ```
 
-### 9.4 The "App of Apps" Pattern
+### 8.4 The "App of Apps" Pattern
 **File:** `gitops/app-of-apps.yaml`
 
 This is the master controller. It points to your Git repository (once created in Gitea) and recursively installs everything else defined in the `gitops/` folder (Security, Observability, Management).
@@ -2294,7 +2287,7 @@ spec:
       - ServerSideApply=true
 ```
 
-### 9.5 Phase 4 Execution Steps
+### 8.5 Phase 4 Execution Steps
 
 1.  **Install Traefik:**
     ```bash
@@ -2325,11 +2318,11 @@ spec:
     ```
     *Verify: Open `http://grafana.192.168.0.210.nip.io`.*
 
-## 10. Phase 5: Security & Management Stack
+## 9. Phase 5: Security & Management Stack
 
 Now that the GitOps engine is running, we utilize it to deploy the infrastructure dependencies required for a secure, production-grade environment.
 
-### 10.1 Object Storage (MinIO)
+### 9.1 Object Storage (MinIO)
 **File:** `gitops/storage/minio.yaml`
 
 Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. Since we are on bare metal, we self-host **MinIO** to provide this API.
@@ -2421,7 +2414,7 @@ spec:
           port: 9001
 ```
 
-### 10.2 Certificate Automation (Cert-Manager)
+### 9.2 Certificate Automation (Cert-Manager)
 **File:** `gitops/infrastructure/cert-manager.yaml`
 
 Cert-Manager handles TLS certificates within the cluster.
@@ -2454,7 +2447,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 10.3 Container Registry (Harbor)
+### 9.3 Container Registry (Harbor)
 **File:** `gitops/security/harbor.yaml`
 
 Harbor serves as the local "Docker Hub".
@@ -2517,7 +2510,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 10.4 Backup & Restore (Velero)
+### 9.4 Backup & Restore (Velero)
 **File:** `gitops/management/velero.yaml`
 
 Velero performs nightly backups of the cluster configuration and persistent volumes.
@@ -2574,7 +2567,7 @@ spec:
     syncOptions:
       - CreateNamespace=true
 ```
-### 10.5 Secrets Management (OpenBao)
+### 9.5 Secrets Management (OpenBao)
 **File:** `gitops/security/openbao.yaml`
 We use OpenBao (the community fork of Vault) to handle secrets securely.
 *   **Storage:** Uses Longhorn (HDD) to persist encrypted secrets.
@@ -2615,7 +2608,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 10.6 Policy Enforcement (Kyverno)
+### 9.6 Policy Enforcement (Kyverno)
 **File:** `gitops/security/kyverno.yaml`
 Kyverno enforces best practices (e.g., preventing root containers) without the complexity of OPA Gatekeeper.
 
@@ -2652,7 +2645,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 10.7 Runtime Security (Falco)
+### 9.7 Runtime Security (Falco)
 **File:** `gitops/security/falco.yaml`
 Monitors kernel syscalls to detect intrusions. We explicitly configure the **eBPF driver** because the traditional kernel module driver is often problematic on Ubuntu RPi kernels.
 
@@ -2687,7 +2680,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 10.8 Configuration Reloader (Reloader)
+### 9.8 Configuration Reloader (Reloader)
 **File:** `gitops/management/reloader.yaml`
 
 Reloader watches for changes in ConfigMaps and Secrets, then automatically triggers rolling updates on associated Deployments/StatefulSets. This is essential for GitOps workflows where configuration changes should propagate without manual intervention.
@@ -2734,7 +2727,7 @@ metadata:
     reloader.stakater.com/auto: "true"
 ```
 
-### 10.9 Workload Rebalancing (Descheduler)
+### 9.9 Workload Rebalancing (Descheduler)
 **File:** `gitops/management/descheduler.yaml`
 
 On resource-constrained Raspberry Pi clusters, workloads can become imbalanced over time. The Descheduler periodically evicts pods based on configured strategies, allowing the scheduler to rebalance them across nodes.
@@ -2796,7 +2789,7 @@ spec:
 
 *Note: Descheduler only evicts pods; it does not schedule them. The kube-scheduler handles placement after eviction.*
     
-### 10.10 The Root Application (App of Apps)
+### 9.10 The Root Application (App of Apps)
 **File:** `gitops/root-app.yaml`
 
 This is the "One Ring to Rule Them All." Instead of applying the files above individually, we point ArgoCD to this single file (or eventually, to the Git repo containing it). It tells ArgoCD to deploy the entire stack defined in the `gitops/` directory structure.
@@ -2825,7 +2818,7 @@ spec:
       selfHeal: true
 ```
 
-### 10.11 Security Verification Script
+### 9.11 Security Verification Script
 **File:** `tests/04_security_test.sh`
 
 This script verifies that your security policies are enforced and services are accessible.
@@ -2870,7 +2863,7 @@ fi
 echo "=== SECURITY CHECK COMPLETE ==="
 ```
 
-### 10.12 Phase 5 Execution Steps
+### 9.12 Phase 5 Execution Steps
 
 1.  **Commit Files:** Ensure the files above are created in your local `gitops/` folder.
 2.  **Push to Gitea:**
@@ -2887,11 +2880,11 @@ echo "=== SECURITY CHECK COMPLETE ==="
     *   **MinIO Console:** `http://minio.192.168.0.210.nip.io` (User: `admin`, Pass: `password123`)
     *   **Harbor Registry:** `http://harbor.192.168.0.210.nip.io` (Default User: `admin`, Pass: `Harbor12345`)
 
-## 11. Phase 6: Advanced Observability
+## 10. Phase 6: Advanced Observability
 
 In this phase, we complete the observability pillar. Metrics (Prometheus) tell you *what* is happening, but Logs (Loki) tell you *why*. We also add cost estimation and AI analysis to help manage the cluster.
 
-### 11.1 Log Aggregation (Loki & Promtail)
+### 10.1 Log Aggregation (Loki Stack)
 **File:** `gitops/observability/loki-stack.yaml`
 
 We use the **PLG Stack** (Promtail, Loki, Grafana).
@@ -2946,7 +2939,7 @@ spec:
       prune: true
       selfHeal: true
 ```
-### 11.2 Log Collection (Fluent Bit)
+### 10.2 Log Collection (Fluent Bit)
 **File:** `gitops/observability/fluent-bit.yaml`
 *Note:* You requested Fluentd, but **Fluent Bit** is the industry standard for Edge/Raspberry Pi. It is written in C (vs Ruby for Fluentd) and uses ~10x less RAM. It is configured here to forward logs to the Loki stack.
 
@@ -2981,7 +2974,7 @@ spec:
       selfHeal: true
 ```
 
-### 11.3 Distributed Tracing (OpenTelemetry)
+### 10.3 Distributed Tracing (OpenTelemetry)
 **File:** `gitops/observability/opentelemetry.yaml`
 Installs the OpenTelemetry Operator. This allows you to inject tracing sidecars into your applications automatically.
 
@@ -3005,7 +2998,7 @@ spec:
       prune: true
       selfHeal: true
 ```
-### 11.4 Tracing Backend (Jaeger)
+### 10.4 Tracing Backend (Jaeger)
 **File:** `gitops/observability/jaeger.yaml`
 
 Jaeger provides the UI to visualize the distributed traces collected by OpenTelemetry.
@@ -3075,7 +3068,7 @@ spec:
           port: 16686
 ```
 
-### 11.5 Traffic Analysis (Kubeshark)
+### 10.5 Traffic Analysis (Kubeshark)
 **File:** `gitops/observability/kubeshark.yaml`
 Provides deep visibility into API traffic (HTTP, REST, gRPC, GraphQL) similar to Wireshark, but for K8s.
 
@@ -3108,7 +3101,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.6 Cost Management (OpenCost)
+### 10.6 Cost Management (OpenCost)
 **File:** `gitops/observability/opencost.yaml`
 
 OpenCost calculates the resource consumption (CPU/RAM/Storage) of every pod and estimates a "cloud cost" equivalent. This is excellent for understanding which namespace is hogging resources on your Raspberry Pis.
@@ -3166,7 +3159,7 @@ spec:
           port: 9090
 ```
 
-### 11.7 AI Diagnostics (K8sGPT)
+### 10.7 AI Diagnostics (K8sGPT)
 **File:** `gitops/observability/k8sgpt.yaml`
 
 K8sGPT scans your cluster for issues (CrashLoops, PVC failures, Service misconfigs) and uses an AI backend to explain the fix in plain English.
@@ -3195,7 +3188,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.8 Observability Verification Script
+### 10.8 Observability Verification Script
 **File:** `tests/05_observability_test.sh`
 
 This script ensures data is flowing through your pipelines.
@@ -3240,7 +3233,7 @@ kubectl get pods -n observability -l app.kubernetes.io/name=k8sgpt-operator | gr
 echo "=== OBSERVABILITY CHECK COMPLETE ==="
 ```
 
-### 11.9 Phase 6 Execution Steps
+### 10.9 Phase 6 Execution Steps
 
 1.  **Commit:** Save the YAML files to `gitops/observability/` locally.
     ```bash
@@ -3261,11 +3254,11 @@ echo "=== OBSERVABILITY CHECK COMPLETE ==="
     *   Open `http://opencost.192.168.0.210.nip.io`.
     *   You should see a breakdown of costs per namespace.
 
-## 12. Phase 7: CI/CD & Developer Experience
+## 11. Phase 7: CI/CD & Developer Experience
 
 In this final phase, we establish the machinery that builds, tests, and releases code. We replace manual `docker build` commands with an automated pipeline and ensure every change is scanned for security vulnerabilities before reaching production.
 
-### 12.1 Image Automation (Argo Image Updater)
+### 11.1 Image Automation (Argo Image Updater)
 **File:** `gitops/cicd/argo-image-updater.yaml`
 
 This component watches your **Harbor** registry. When a CI pipeline pushes a new image tag (e.g., `v1.0.1`), this tool automatically updates the Git repository (modifying the ArgoCD Application) to reflect the new version.
@@ -3301,7 +3294,7 @@ spec:
       selfHeal: true
 ```
 
-### 12.2 CI Engine (Argo Workflows)
+### 11.2 CI Engine (Argo Workflows)
 **File:** `gitops/cicd/argo-workflows.yaml`
 
 Argo Workflows is a Kubernetes-native workflow engine. It creates Pods to run your build steps (clone, build, push, test).
@@ -3361,7 +3354,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 12.3 Event Bus (Argo Events)
+### 11.3 Event Bus (Argo Events)
 **File:** `gitops/cicd/argo-events.yaml`
 
 Argo Events listens for external triggers (like a `git push` to your Gitea repo) and triggers an Argo Workflow.
@@ -3403,7 +3396,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 12.4 Security Tooling (Trivy & OWASP ZAP)
+### 11.4 Security Tooling (Trivy)
 
 Rather than installing these as standalone long-running services, we install the **Trivy Operator** to scan the running cluster, and we provide the configurations to run ZAP/Trivy inside CI pipelines.
 
@@ -3442,7 +3435,7 @@ spec:
 > **Note on OWASP ZAP:**
 > OWASP ZAP is best run as a step in your **Argo Workflow** (`WorkflowTemplate`) against a staging URL. It does not require a standalone Helm installation for this architecture.
 
-### 12.5 Local Development (Skaffold) (optional)
+### 11.5 Local Development (Skaffold)
 
 To enable rapid iteration on your local machine without pushing git commits for every line of code change, use **Skaffold**.
 
@@ -3473,7 +3466,7 @@ deploy:
     *   Skaffold will watch your source files.
     *   On save, it builds the image, pushes to Harbor, and redeploys to the Raspberry Pi cluster in seconds.
 
-### 12.6 CI/CD Verification Script
+### 11.6 CI/CD Verification Script
 **File:** `tests/06_cicd_test.sh`
 
 Verifies the build machinery components.
@@ -3517,7 +3510,7 @@ fi
 echo "=== CI/CD CHECK COMPLETE ==="
 ```
 
-### 12.7 Phase 7 Execution Steps
+### 11.7 Phase 7 Execution Steps
 
 1.  **Commit & Push:**
     Save the YAML files to `gitops/cicd/` and `gitops/security/`.
@@ -3544,11 +3537,11 @@ echo "=== CI/CD CHECK COMPLETE ==="
     kubectl get vulnerabilityreports -A
     ```
 
-## 13. Phase 8: Day 2 Operations & Maintenance
+## 12. Phase 8: Day 2 Operations & Maintenance
 
 This section outlines the routine tasks required to keep the cluster secure and up-to-date.
 
-### 13.1 Upgrading Kubernetes
+### 12.1 Upgrading Kubernetes
 Since we pinned versions in Ansible, upgrades must be deliberate.
 **Upgrade Order:** Control Plane -> Workers.
 
@@ -3568,7 +3561,7 @@ Since we pinned versions in Ansible, upgrades must be deliberate.
     sudo systemctl restart kubelet
     ```
 
-### 13.2 OS Patching
+### 12.2 OS Patching
 To apply Linux security patches without downtime, drain nodes one by one.
 
 ```bash
@@ -3581,7 +3574,7 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml --limit rpi
 # 3. Uncordon (Allow workloads back)
 kubectl uncordon rpi4-2
 ```
-### 13.3 Cluster Reset (The Nuclear Option)
+### 12.3 Cluster Reset (The Nuclear Option)
 **File:** `ansible/playbooks/05_reset_cluster.yml`
 
 This playbook is a safety net for your learning process. If you misconfigure the cluster or networking beyond repair, run this to wipe the nodes clean so you can restart from Phase 2 (Cluster Init) without re-flashing SD cards.
@@ -3632,7 +3625,7 @@ ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml
 ```
 
 
-### 13.4 Backup & Disaster Recovery
+### 12.4 Backup & Disaster Recovery
 We utilize **Velero** (installed in Phase 5).
 
 *   **Manual Backup:**
@@ -3647,7 +3640,7 @@ We utilize **Velero** (installed in Phase 5).
     velero restore create --from-backup manual-backup-2025-11-20
     ```
 
-### 13.5 Troubleshooting Cheatsheet
+### 12.5 Troubleshooting Cheatsheet
 *   **Cilium Connectivity:** `cilium connectivity test`
 *   **Longhorn Disk Pressure:** Check UI for "Schedulable" status on `rpi4-1`.
 *   **DNS Issues:** `kubectl run -it --rm --restart=Never busybox --image=busybox:1.28 -- nslookup kubernetes.default`
