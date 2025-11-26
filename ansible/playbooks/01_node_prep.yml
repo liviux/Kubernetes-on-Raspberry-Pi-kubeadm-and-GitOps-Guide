@@ -1,120 +1,349 @@
 ---
+# =============================================================================
+# Phase 1 - OS Preparation & Tuning
+# =============================================================================
+# Prepares Raspberry Pi nodes for Kubernetes by:
+#   - Installing required packages and dependencies
+#   - Disabling swap (Kubernetes requirement)
+#   - Loading kernel modules for networking and storage
+#   - Enabling cgroups for resource management
+#   - Optimizing hardware (disable WiFi/BT, reduce GPU memory)
+#   - Installing and configuring containerd runtime
+#
+# Usage: ansible-playbook -i hosts playbooks/01_node_prep.yml
+# Tags:  packages, swap, kernel, cgroups, hardware, containerd
+# =============================================================================
+
 - name: Phase 1 - OS Preparation & Tuning
   hosts: all
   become: true
+  gather_facts: true
+
   vars:
+    # Raspberry Pi GPU memory allocation (MB) - minimum for headless
     gpu_mem: 16
+    # Containerd pause image for Kubernetes
+    sandbox_image: "registry.k8s.io/pause:3.10"
+
+  # =========================================================================
+  # HANDLERS - Triggered by notify, run once at end
+  # =========================================================================
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Reboot required
+      ansible.builtin.reboot:
+        msg: "Rebooting for kernel/cgroup changes"
+        connect_timeout: 5
+        reboot_timeout: 300
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: uptime
+
+  # =========================================================================
+  # TASKS
+  # =========================================================================
   tasks:
-    # --- SYSTEM UPDATES & DEPENDENCIES ---
+    # -----------------------------------------------------------------------
+    # PRE-FLIGHT CHECKS
+    # -----------------------------------------------------------------------
+    - name: Verify we're running on ARM64
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+        fail_msg: "This playbook is designed for ARM64 (Raspberry Pi). Detected: {{ ansible_architecture }}"
+        success_msg: "Architecture verified: {{ ansible_architecture }}"
+      tags: [preflight]
+
+    - name: Display target node info
+      ansible.builtin.debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          RAM: {{ ansible_memtotal_mb }} MB
+          CPUs: {{ ansible_processor_vcpus }}
+      tags: [preflight]
+
+    # -----------------------------------------------------------------------
+    # SYSTEM UPDATES & DEPENDENCIES
+    # -----------------------------------------------------------------------
     - name: Update apt cache and upgrade packages
-      apt:
-        update_cache: yes
+      ansible.builtin.apt:
+        update_cache: true
         upgrade: dist
+        cache_valid_time: 3600
       register: apt_action
       retries: 5
       delay: 10
+      until: apt_action is succeeded
+      tags: [packages]
 
-    - name: Install Critical Dependencies
-      apt:
+    - name: Install Kubernetes dependencies
+      ansible.builtin.apt:
         name:
+          # Core utilities
           - apt-transport-https
           - ca-certificates
           - curl
           - gnupg
           - lsb-release
-          - open-iscsi  # Required for Longhorn
-          - nfs-common  # Required for RWX volumes
-          - cryptsetup  # Required for OpenBao/Longhorn encryption
-          - ipset       # Required for Cilium
-          - conntrack   # Required by Kubeadm
-          - socat       # Required by Helm/Port-forwarding
-          - git         # Required for GitOps operations
+          - software-properties-common
+          # Storage (Longhorn requirements)
+          - open-iscsi
+          - nfs-common
+          - cryptsetup
+          # Networking (Cilium/Kubeadm requirements)
+          - ipset
+          - ipvsadm
+          - conntrack
+          - ethtool
+          # Utilities
+          - socat
+          - git
           - jq
+          - htop
+          - iotop
         state: present
+      tags: [packages]
 
-    - name: Disable Swap (Runtime)
-      command: swapoff -a
-      when: ansible_swaptionals['type'] is defined
+    - name: Enable iscsid service for Longhorn
+      ansible.builtin.service:
+        name: iscsid
+        state: started
+        enabled: true
+      tags: [packages]
 
-    - name: Disable Swap (Permanent)
-      replace:
+    # -----------------------------------------------------------------------
+    # SWAP CONFIGURATION
+    # -----------------------------------------------------------------------
+    - name: Disable swap immediately
+      ansible.builtin.command: swapoff -a
+      changed_when: true
+      tags: [swap]
+
+    - name: Remove swap entry from fstab
+      ansible.builtin.replace:
         path: /etc/fstab
-        regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
-        replace: '# \1'
+        regexp: '^([^#].*?\sswap\s+.*)$'
+        replace: '# \1 # Disabled for Kubernetes'
+      tags: [swap]
 
-    # --- KERNEL & NETWORK TUNING ---
-    - name: Load Kernel Modules
-      blockinfile:
-        path: /etc/modules-load.d/k8s.conf
-        create: yes
-        block: |
+    - name: Disable swap service (if exists)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop:
+        - dphys-swapfile
+        - swap.target
+      failed_when: false
+      tags: [swap]
+
+    # -----------------------------------------------------------------------
+    # KERNEL MODULES
+    # -----------------------------------------------------------------------
+    - name: Configure persistent kernel modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          # Kubernetes required kernel modules
           overlay
           br_netfilter
-          iscsi_tcp 
+          # Longhorn iSCSI support
+          iscsi_tcp
+          # IPVS for kube-proxy (optional, better performance)
+          ip_vs
+          ip_vs_rr
+          ip_vs_wrr
+          ip_vs_sh
+          nf_conntrack
+        mode: '0644'
+      notify: Reboot required
+      tags: [kernel]
 
-    - name: Load modules immediately
-      shell: |
-        modprobe overlay
-        modprobe br_netfilter
-        modprobe iscsi_tcp
+    - name: Load kernel modules immediately
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+        - iscsi_tcp
+        - ip_vs
+        - ip_vs_rr
+        - ip_vs_wrr
+        - ip_vs_sh
+        - nf_conntrack
+      tags: [kernel]
 
-    - name: Configure Sysctl
-      blockinfile:
-        path: /etc/sysctl.d/k8s.conf
-        create: yes
-        block: |
+    # -----------------------------------------------------------------------
+    # SYSCTL NETWORK TUNING
+    # -----------------------------------------------------------------------
+    - name: Configure sysctl for Kubernetes networking
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubernetes.conf
+        content: |
+          # Kubernetes networking requirements
           net.bridge.bridge-nf-call-iptables  = 1
           net.bridge.bridge-nf-call-ip6tables = 1
           net.ipv4.ip_forward                 = 1
+          net.ipv6.conf.all.forwarding        = 1
 
-    - name: Apply Sysctl params
-      command: sysctl --system
+          # Performance tuning for containers
+          net.core.somaxconn                  = 32768
+          net.ipv4.tcp_max_syn_backlog        = 32768
+          net.core.netdev_max_backlog         = 32768
 
-    # --- RASPBERRY PI SPECIFIC ---
-    - name: Enable Cgroups in cmdline.txt
-      shell: |
-        cmdline=$(cat /boot/firmware/cmdline.txt)
-        if [[ "$cmdline" != *"cgroup_enable=cpuset"* ]]; then
-            sed -i 's/$/ cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt
-            echo "updated"
-        fi
-      register: cgroup_update
-      changed_when: "'updated' in cgroup_update.stdout"
+          # Increase inotify limits (for many pods)
+          fs.inotify.max_user_watches         = 524288
+          fs.inotify.max_user_instances       = 8192
 
-    - name: Optimize Hardware (Disable WiFi/BT/GPU)
-      blockinfile:
+          # File descriptor limits
+          fs.file-max                         = 2097152
+
+          # Disable IPv6 if not needed (saves memory)
+          # net.ipv6.conf.all.disable_ipv6    = 1
+          # net.ipv6.conf.default.disable_ipv6 = 1
+        mode: '0644'
+      notify: Apply sysctl
+      tags: [kernel]
+
+    - name: Apply sysctl parameters now
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+      tags: [kernel]
+
+    # -----------------------------------------------------------------------
+    # RASPBERRY PI SPECIFIC - CGROUPS
+    # -----------------------------------------------------------------------
+    - name: Check if cgroups already enabled
+      ansible.builtin.shell: |
+        grep -q "cgroup_enable=cpuset" /boot/firmware/cmdline.txt && echo "enabled" || echo "disabled"
+      register: cgroup_status
+      changed_when: false
+      tags: [cgroups]
+
+    - name: Enable cgroups in boot cmdline
+      ansible.builtin.shell: |
+        sed -i 's/$/ cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt
+      when: cgroup_status.stdout == "disabled"
+      notify: Reboot required
+      tags: [cgroups]
+
+    # -----------------------------------------------------------------------
+    # RASPBERRY PI SPECIFIC - HARDWARE OPTIMIZATION
+    # -----------------------------------------------------------------------
+    - name: Configure Raspberry Pi hardware optimizations
+      ansible.builtin.blockinfile:
         path: /boot/firmware/config.txt
+        marker: "# {mark} KUBERNETES OPTIMIZATIONS"
         block: |
+          # Reduce GPU memory (headless server)
           gpu_mem={{ gpu_mem }}
+
+          # Disable unused hardware to save power/memory
           dtoverlay=disable-bt
           dtoverlay=disable-wifi
 
-    # --- CONTAINER RUNTIME ---
-    - name: Install Containerd
-      apt:
+          # Disable audio (saves resources)
+          dtparam=audio=off
+
+          # Enable hardware watchdog
+          dtparam=watchdog=on
+
+          # Optimize for server workload
+          arm_boost=1
+      notify: Reboot required
+      tags: [hardware]
+
+    # -----------------------------------------------------------------------
+    # CONTAINER RUNTIME - CONTAINERD
+    # -----------------------------------------------------------------------
+    - name: Install containerd
+      ansible.builtin.apt:
         name: containerd
         state: present
+      tags: [containerd]
 
-    - name: Generate default containerd config
-      shell: |
-        mkdir -p /etc/containerd
+    - name: Create containerd config directory
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+      tags: [containerd]
+
+    - name: Generate containerd default config
+      ansible.builtin.shell: |
         containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+      tags: [containerd]
 
-    - name: Configure SystemdCgroup
-      replace:
+    - name: Configure containerd for Kubernetes
+      ansible.builtin.replace:
         path: /etc/containerd/config.toml
-        regexp: 'SystemdCgroup = false'
-        replace: 'SystemdCgroup = true'
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - regexp: 'SystemdCgroup = false'
+          replace: 'SystemdCgroup = true'
+        - regexp: 'sandbox_image = ".*"'
+          replace: 'sandbox_image = "{{ sandbox_image }}"'
+      notify: Restart containerd
+      tags: [containerd]
 
-    - name: Restart Containerd
-      service:
+    - name: Enable and start containerd
+      ansible.builtin.service:
         name: containerd
-        state: restarted
-        enabled: yes
+        state: started
+        enabled: true
+      tags: [containerd]
 
-    # --- REBOOT HANDLER ---
-    - name: Reboot Node
-      reboot:
-        msg: "Rebooting for Kernel/Cgroup changes"
-        post_reboot_delay: 30
-      when: cgroup_update.changed or apt_action.changed
+    # -----------------------------------------------------------------------
+    # FINAL VALIDATION
+    # -----------------------------------------------------------------------
+    - name: Verify swap is disabled
+      ansible.builtin.command: swapon --show
+      register: swap_check
+      changed_when: false
+      failed_when: swap_check.stdout != ""
+      tags: [validate]
+
+    - name: Verify required kernel modules
+      ansible.builtin.shell: |
+        lsmod | grep -E "^(overlay|br_netfilter|iscsi_tcp)" | wc -l
+      register: modules_check
+      changed_when: false
+      failed_when: modules_check.stdout | int < 3
+      tags: [validate]
+
+    - name: Verify containerd is running
+      ansible.builtin.command: systemctl is-active containerd
+      register: containerd_check
+      changed_when: false
+      failed_when: containerd_check.stdout != "active"
+      tags: [validate]
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════
+          ✅ Node preparation complete: {{ inventory_hostname }}
+          ════════════════════════════════════════════════════════════════
+          • Packages installed
+          • Swap disabled
+          • Kernel modules loaded
+          • Sysctl tuned for Kubernetes
+          • Containerd configured with SystemdCgroup
+          {% if cgroup_status.stdout == "disabled" %}
+          ⚠️  REBOOT REQUIRED for cgroup changes!
+          {% endif %}
+      tags: [validate]

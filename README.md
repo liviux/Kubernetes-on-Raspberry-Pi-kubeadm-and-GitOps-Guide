@@ -1205,306 +1205,960 @@ ansible -i hosts big -m shell -a "lsblk"
 
 ## 5. Phase 1: Infrastructure Provisioning
 
-This phase transforms the raw Ubuntu OS into a "Kubernetes Ready" node. It handles low-level kernel tuning, disables unnecessary hardware to save resources, and installs the immutable versions of the Kubernetes binaries.
+This phase transforms raw Ubuntu Server installations into "Kubernetes Ready" nodes. It handles low-level kernel tuning, disables unnecessary hardware to conserve resources on constrained Raspberry Pi hardware, and installs version-locked Kubernetes binaries.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     PHASE 1 OVERVIEW                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
+│  │   01_node   │───►│   02_k8s    │───►│   Reboot    │───►│   Verify    │  │
+│  │   _prep.yml │    │ _binaries   │    │  (if needed)│    │  01_infra   │  │
+│  │             │    │    .yml     │    │             │    │  _test.sh   │  │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘  │
+│        │                  │                                                 │
+│        ▼                  ▼                                                 │
+│   • System updates    • K8s repo (1.31)                                    │
+│   • Dependencies      • kubelet/kubeadm                                    │
+│   • Swap disabled     • kubectl + hold                                     │
+│   • Kernel modules    • helm (CP only)                                     │
+│   • Sysctl tuning     • cilium-cli (CP)                                    │
+│   • Cgroups enabled   • etcdctl (CP)                                       │
+│   • WiFi/BT disabled                                                       │
+│   • Containerd                                                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### 5.1 OS Preparation Playbook
+
 **File:** `ansible/playbooks/01_node_prep.yml`
 
-This playbook performs the following critical tasks:
-1.  **System Updates:** Upgrades all packages.
-2.  **Dependencies:** Installs `open-iscsi` (required for Longhorn), `nfs-common`, and `ipset`.
-3.  **Swap:** Disables swap permanently (required for Kubelet).
-4.  **Kernel Modules:** Loads `overlay` and `br_netfilter` for container networking.
-5.  **Sysctl:** Enables IP forwarding and bridge traversing.
-6.  **Cgroups:** Modifies `/boot/firmware/cmdline.txt` to enable memory and cpuset cgroups (critical for RPi 4).
-7.  **Hardware Optimization:** Disables WiFi and Bluetooth; limits GPU memory to 16MB.
-8.  **Container Runtime:** Installs and configures `containerd` with `SystemdCgroup = true`.
+This playbook prepares the base OS for Kubernetes. It runs on **all nodes** and performs these critical tasks:
+
+| Task | Purpose | Why It's Required |
+|------|---------|-------------------|
+| Pre-flight Checks | Verify ARM64 architecture | Ensures correct target platform |
+| System Updates | Upgrade all packages | Security patches, latest drivers |
+| Dependencies | Install `open-iscsi`, `nfs-common`, `ipset`, `ipvsadm` | Longhorn storage, RWX volumes, Cilium, IPVS |
+| Swap Disable | Remove swap permanently + mask services | Kubelet refuses to start with swap enabled |
+| Kernel Modules | Load `overlay`, `br_netfilter`, `iscsi_tcp`, `ip_vs*` | Container networking, storage, IPVS mode |
+| Sysctl Tuning | IP forwarding, bridge netfilter, inotify limits | Pod networking, many-pods support |
+| Cgroups | Enable memory and cpuset cgroups | Resource limits, CPU pinning |
+| Hardware Optimization | Disable WiFi/BT/Audio, limit GPU to 16MB, enable watchdog | Free ~100MB RAM, reduce power, auto-recovery |
+| Container Runtime | Install containerd with SystemdCgroup + correct pause image | Required runtime for Kubernetes 1.24+ |
+| Validation | Verify swap, modules, containerd | Catch issues before proceeding |
+
+> ⚠️ **Important:** This playbook will reboot nodes if cgroup or kernel parameters change. Plan for ~5 minutes downtime per node.
+
+<details>
+<summary>📄 Click to expand full playbook</summary>
 
 ```yaml
 ---
+# =============================================================================
+# Phase 1 - OS Preparation & Tuning
+# =============================================================================
+# Prepares Raspberry Pi nodes for Kubernetes by:
+#   - Installing required packages and dependencies
+#   - Disabling swap (Kubernetes requirement)
+#   - Loading kernel modules for networking and storage
+#   - Enabling cgroups for resource management
+#   - Optimizing hardware (disable WiFi/BT, reduce GPU memory)
+#   - Installing and configuring containerd runtime
+#
+# Usage: ansible-playbook -i hosts playbooks/01_node_prep.yml
+# Tags:  packages, swap, kernel, cgroups, hardware, containerd
+# =============================================================================
+
 - name: Phase 1 - OS Preparation & Tuning
   hosts: all
   become: true
+  gather_facts: true
+
   vars:
+    # Raspberry Pi GPU memory allocation (MB) - minimum for headless
     gpu_mem: 16
+    # Containerd pause image for Kubernetes
+    sandbox_image: "registry.k8s.io/pause:3.10"
+
+  # =========================================================================
+  # HANDLERS - Triggered by notify, run once at end
+  # =========================================================================
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Reboot required
+      ansible.builtin.reboot:
+        msg: "Rebooting for kernel/cgroup changes"
+        connect_timeout: 5
+        reboot_timeout: 300
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: uptime
+
+  # =========================================================================
+  # TASKS
+  # =========================================================================
   tasks:
-    # --- SYSTEM UPDATES & DEPENDENCIES ---
+    # -----------------------------------------------------------------------
+    # PRE-FLIGHT CHECKS
+    # -----------------------------------------------------------------------
+    - name: Verify we're running on ARM64
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "aarch64"
+        fail_msg: "This playbook is designed for ARM64 (Raspberry Pi). Detected: {{ ansible_architecture }}"
+        success_msg: "Architecture verified: {{ ansible_architecture }}"
+      tags: [preflight]
+
+    - name: Display target node info
+      ansible.builtin.debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          RAM: {{ ansible_memtotal_mb }} MB
+          CPUs: {{ ansible_processor_vcpus }}
+      tags: [preflight]
+
+    # -----------------------------------------------------------------------
+    # SYSTEM UPDATES & DEPENDENCIES
+    # -----------------------------------------------------------------------
     - name: Update apt cache and upgrade packages
-      apt:
-        update_cache: yes
+      ansible.builtin.apt:
+        update_cache: true
         upgrade: dist
+        cache_valid_time: 3600
       register: apt_action
       retries: 5
       delay: 10
+      until: apt_action is succeeded
+      tags: [packages]
 
-    - name: Install Critical Dependencies
-      apt:
+    - name: Install Kubernetes dependencies
+      ansible.builtin.apt:
         name:
+          # Core utilities
           - apt-transport-https
           - ca-certificates
           - curl
           - gnupg
           - lsb-release
-          - open-iscsi  # Required for Longhorn
-          - nfs-common  # Required for RWX volumes
-          - cryptsetup  # Required for OpenBao/Longhorn encryption
-          - ipset       # Required for Cilium
-          - conntrack   # Required by Kubeadm
-          - socat       # Required by Helm/Port-forwarding
-          - git         # Required for GitOps operations
+          - software-properties-common
+          # Storage (Longhorn requirements)
+          - open-iscsi
+          - nfs-common
+          - cryptsetup
+          # Networking (Cilium/Kubeadm requirements)
+          - ipset
+          - ipvsadm
+          - conntrack
+          - ethtool
+          # Utilities
+          - socat
+          - git
           - jq
+          - htop
+          - iotop
         state: present
+      tags: [packages]
 
-    - name: Disable Swap (Runtime)
-      command: swapoff -a
-      when: ansible_swaptionals['type'] is defined
+    - name: Enable iscsid service for Longhorn
+      ansible.builtin.service:
+        name: iscsid
+        state: started
+        enabled: true
+      tags: [packages]
 
-    - name: Disable Swap (Permanent)
-      replace:
+    # -----------------------------------------------------------------------
+    # SWAP CONFIGURATION
+    # -----------------------------------------------------------------------
+    - name: Disable swap immediately
+      ansible.builtin.command: swapoff -a
+      changed_when: true
+      tags: [swap]
+
+    - name: Remove swap entry from fstab
+      ansible.builtin.replace:
         path: /etc/fstab
-        regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
-        replace: '# \1'
+        regexp: '^([^#].*?\sswap\s+.*)$'
+        replace: '# \1 # Disabled for Kubernetes'
+      tags: [swap]
 
-    # --- KERNEL & NETWORK TUNING ---
-    - name: Load Kernel Modules
-      blockinfile:
-        path: /etc/modules-load.d/k8s.conf
-        create: yes
-        block: |
+    - name: Disable swap service (if exists)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop:
+        - dphys-swapfile
+        - swap.target
+      failed_when: false
+      tags: [swap]
+
+    # -----------------------------------------------------------------------
+    # KERNEL MODULES
+    # -----------------------------------------------------------------------
+    - name: Configure persistent kernel modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          # Kubernetes required kernel modules
           overlay
           br_netfilter
-          iscsi_tcp 
+          # Longhorn iSCSI support
+          iscsi_tcp
+          # IPVS for kube-proxy (optional, better performance)
+          ip_vs
+          ip_vs_rr
+          ip_vs_wrr
+          ip_vs_sh
+          nf_conntrack
+        mode: '0644'
+      notify: Reboot required
+      tags: [kernel]
 
-    - name: Load modules immediately
-      shell: |
-        modprobe overlay
-        modprobe br_netfilter
-        modprobe iscsi_tcp
+    - name: Load kernel modules immediately
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+        - iscsi_tcp
+        - ip_vs
+        - ip_vs_rr
+        - ip_vs_wrr
+        - ip_vs_sh
+        - nf_conntrack
+      tags: [kernel]
 
-    - name: Configure Sysctl
-      blockinfile:
-        path: /etc/sysctl.d/k8s.conf
-        create: yes
-        block: |
+    # -----------------------------------------------------------------------
+    # SYSCTL NETWORK TUNING
+    # -----------------------------------------------------------------------
+    - name: Configure sysctl for Kubernetes networking
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubernetes.conf
+        content: |
+          # Kubernetes networking requirements
           net.bridge.bridge-nf-call-iptables  = 1
           net.bridge.bridge-nf-call-ip6tables = 1
           net.ipv4.ip_forward                 = 1
+          net.ipv6.conf.all.forwarding        = 1
 
-    - name: Apply Sysctl params
-      command: sysctl --system
+          # Performance tuning for containers
+          net.core.somaxconn                  = 32768
+          net.ipv4.tcp_max_syn_backlog        = 32768
+          net.core.netdev_max_backlog         = 32768
 
-    # --- RASPBERRY PI SPECIFIC ---
-    - name: Enable Cgroups in cmdline.txt
-      shell: |
-        cmdline=$(cat /boot/firmware/cmdline.txt)
-        if [[ "$cmdline" != *"cgroup_enable=cpuset"* ]]; then
-            sed -i 's/$/ cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt
-            echo "updated"
-        fi
-      register: cgroup_update
-      changed_when: "'updated' in cgroup_update.stdout"
+          # Increase inotify limits (for many pods)
+          fs.inotify.max_user_watches         = 524288
+          fs.inotify.max_user_instances       = 8192
 
-    - name: Optimize Hardware (Disable WiFi/BT/GPU)
-      blockinfile:
+          # File descriptor limits
+          fs.file-max                         = 2097152
+        mode: '0644'
+      notify: Apply sysctl
+      tags: [kernel]
+
+    - name: Apply sysctl parameters now
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+      tags: [kernel]
+
+    # -----------------------------------------------------------------------
+    # RASPBERRY PI SPECIFIC - CGROUPS
+    # -----------------------------------------------------------------------
+    - name: Check if cgroups already enabled
+      ansible.builtin.shell: |
+        grep -q "cgroup_enable=cpuset" /boot/firmware/cmdline.txt && echo "enabled" || echo "disabled"
+      register: cgroup_status
+      changed_when: false
+      tags: [cgroups]
+
+    - name: Enable cgroups in boot cmdline
+      ansible.builtin.shell: |
+        sed -i 's/$/ cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt
+      when: cgroup_status.stdout == "disabled"
+      notify: Reboot required
+      tags: [cgroups]
+
+    # -----------------------------------------------------------------------
+    # RASPBERRY PI SPECIFIC - HARDWARE OPTIMIZATION
+    # -----------------------------------------------------------------------
+    - name: Configure Raspberry Pi hardware optimizations
+      ansible.builtin.blockinfile:
         path: /boot/firmware/config.txt
+        marker: "# {mark} KUBERNETES OPTIMIZATIONS"
         block: |
+          # Reduce GPU memory (headless server)
           gpu_mem={{ gpu_mem }}
+
+          # Disable unused hardware to save power/memory
           dtoverlay=disable-bt
           dtoverlay=disable-wifi
 
-    # --- CONTAINER RUNTIME ---
-    - name: Install Containerd
-      apt:
+          # Disable audio (saves resources)
+          dtparam=audio=off
+
+          # Enable hardware watchdog
+          dtparam=watchdog=on
+
+          # Optimize for server workload
+          arm_boost=1
+      notify: Reboot required
+      tags: [hardware]
+
+    # -----------------------------------------------------------------------
+    # CONTAINER RUNTIME - CONTAINERD
+    # -----------------------------------------------------------------------
+    - name: Install containerd
+      ansible.builtin.apt:
         name: containerd
         state: present
+      tags: [containerd]
 
-    - name: Generate default containerd config
-      shell: |
-        mkdir -p /etc/containerd
+    - name: Create containerd config directory
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+      tags: [containerd]
+
+    - name: Generate containerd default config
+      ansible.builtin.shell: |
         containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+      tags: [containerd]
 
-    - name: Configure SystemdCgroup
-      replace:
+    - name: Configure containerd for Kubernetes
+      ansible.builtin.replace:
         path: /etc/containerd/config.toml
-        regexp: 'SystemdCgroup = false'
-        replace: 'SystemdCgroup = true'
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - regexp: 'SystemdCgroup = false'
+          replace: 'SystemdCgroup = true'
+        - regexp: 'sandbox_image = ".*"'
+          replace: 'sandbox_image = "{{ sandbox_image }}"'
+      notify: Restart containerd
+      tags: [containerd]
 
-    - name: Restart Containerd
-      service:
+    - name: Enable and start containerd
+      ansible.builtin.service:
         name: containerd
-        state: restarted
-        enabled: yes
+        state: started
+        enabled: true
+      tags: [containerd]
 
-    # --- REBOOT HANDLER ---
-    - name: Reboot Node
-      reboot:
-        msg: "Rebooting for Kernel/Cgroup changes"
-        post_reboot_delay: 30
-      when: cgroup_update.changed or apt_action.changed
+    # -----------------------------------------------------------------------
+    # FINAL VALIDATION
+    # -----------------------------------------------------------------------
+    - name: Verify swap is disabled
+      ansible.builtin.command: swapon --show
+      register: swap_check
+      changed_when: false
+      failed_when: swap_check.stdout != ""
+      tags: [validate]
+
+    - name: Verify required kernel modules
+      ansible.builtin.shell: |
+        lsmod | grep -E "^(overlay|br_netfilter|iscsi_tcp)" | wc -l
+      register: modules_check
+      changed_when: false
+      failed_when: modules_check.stdout | int < 3
+      tags: [validate]
+
+    - name: Verify containerd is running
+      ansible.builtin.command: systemctl is-active containerd
+      register: containerd_check
+      changed_when: false
+      failed_when: containerd_check.stdout != "active"
+      tags: [validate]
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════
+          ✅ Node preparation complete: {{ inventory_hostname }}
+          ════════════════════════════════════════════════════════════════
+          • Packages installed
+          • Swap disabled
+          • Kernel modules loaded
+          • Sysctl tuned for Kubernetes
+          • Containerd configured with SystemdCgroup
+          {% if cgroup_status.stdout == "disabled" %}
+          ⚠️  REBOOT REQUIRED for cgroup changes!
+          {% endif %}
+      tags: [validate]
 ```
 
+</details>
+
 ### 5.2 Kubernetes Binaries Playbook
+
 **File:** `ansible/playbooks/02_k8s_binaries.yml`
 
-This playbook installs the core software stack.
-1.  **Repository:** Adds the official `pkgs.k8s.io` v1.31 repository. I picked 1.31 so at the end of the guide to do an upgrade too to latest version.
-2.  **Packages:** Installs `kubelet`, `kubeadm`, and `kubectl`.
-3.  **Version Locking:** Uses `dpkg --set-selections` to "hold" the packages. This prevents `apt upgrade` from accidentally updating Kubernetes and breaking the cluster.
-4.  **Tools:** Installs `helm` and `cilium-cli` for later bootstrap steps.
+This playbook installs the Kubernetes toolchain on all nodes. We deliberately install version **1.31** (not latest) so we can demonstrate an upgrade procedure later in the guide.
+
+| Package | Installed On | Purpose |
+|---------|--------------|---------|
+| `kubelet` | All nodes | Node agent that runs pods |
+| `kubeadm` | All nodes | Cluster bootstrap tool |
+| `kubectl` | All nodes | CLI for cluster interaction |
+| `helm` | Control plane only | Package manager for K8s apps |
+| `cilium-cli` | Control plane only | CNI management tool |
+| `etcd-client` | Control plane only | Direct etcd access for debugging |
+| `k9s` | Control plane only | Terminal UI for cluster management |
+
+> 💡 **Version Locking:** The playbook uses `dpkg --set-selections` to "hold" packages at 1.31.x. This prevents `apt upgrade` from accidentally updating Kubernetes and breaking your cluster.
+
+<details>
+<summary>📄 Click to expand full playbook</summary>
 
 ```yaml
 ---
+# =============================================================================
+# Phase 1 - Install Kubernetes Binaries
+# =============================================================================
+# Installs the Kubernetes toolchain on all nodes:
+#   - Adds official Kubernetes APT repository
+#   - Installs kubelet, kubeadm, kubectl (version-locked)
+#   - Installs management tools on control plane only
+#
+# Note: We install 1.31 (not latest) to demonstrate upgrades later.
+#
+# Usage: ansible-playbook -i hosts playbooks/02_k8s_binaries.yml
+# Tags:  repo, packages, tools, validate
+# =============================================================================
+
 - name: Phase 1 - Install Kubernetes Binaries
   hosts: all
   become: true
+  gather_facts: true
+
   vars:
+    # Kubernetes version - deliberately not latest for upgrade demo
     k8s_version_major: "1.31"
     k8s_pkg_version: "1.31.*"
+    
+    # Tool versions (latest stable)
+    helm_version: "latest"
+    cilium_cli_version: "latest"
+
+  # =========================================================================
+  # TASKS
+  # =========================================================================
   tasks:
-    # --- KUBERNETES REPO ---
-    - name: Create keyring directory
-      file:
+    # -----------------------------------------------------------------------
+    # PRE-FLIGHT CHECKS
+    # -----------------------------------------------------------------------
+    - name: Verify containerd is running
+      ansible.builtin.command: systemctl is-active containerd
+      register: containerd_status
+      changed_when: false
+      failed_when: containerd_status.stdout != "active"
+      tags: [preflight]
+
+    - name: Display installation plan
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════
+          Installing Kubernetes {{ k8s_version_major }} on {{ inventory_hostname }}
+          ════════════════════════════════════════════════════════════════
+          Role: {{ 'Control Plane' if 'big' in group_names else 'Worker' }}
+          Packages: kubelet, kubeadm, kubectl ({{ k8s_pkg_version }})
+          {% if 'big' in group_names %}
+          Extra tools: helm, cilium-cli, etcdctl
+          {% endif %}
+      tags: [preflight]
+
+    # -----------------------------------------------------------------------
+    # KUBERNETES APT REPOSITORY
+    # -----------------------------------------------------------------------
+    - name: Create apt keyrings directory
+      ansible.builtin.file:
         path: /etc/apt/keyrings
         state: directory
         mode: '0755'
+      tags: [repo]
 
-    - name: Download K8s Signing Key
-      get_url:
+    - name: Download Kubernetes GPG key
+      ansible.builtin.get_url:
         url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major }}/deb/Release.key"
-        dest: /tmp/k8s-release.key
+        dest: /tmp/kubernetes-release.key
+        mode: '0644'
+      tags: [repo]
 
-    - name: Dearmor K8s Key
-      shell: |
-        cat /tmp/k8s-release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg --yes
+    - name: Convert and install GPG key
+      ansible.builtin.shell: |
+        gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg < /tmp/kubernetes-release.key
       args:
         creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      tags: [repo]
 
-    - name: Add K8s Apt Repository
-      apt_repository:
+    - name: Add Kubernetes apt repository
+      ansible.builtin.apt_repository:
         repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major }}/deb/ /"
         state: present
         filename: kubernetes
+        update_cache: true
+      tags: [repo]
 
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-
-    # --- INSTALL PACKAGES (ALL NODES) ---
-    - name: Install Kubelet, Kubeadm, Kubectl
-      apt:
+    # -----------------------------------------------------------------------
+    # KUBERNETES PACKAGES (ALL NODES)
+    # -----------------------------------------------------------------------
+    - name: Install Kubernetes packages
+      ansible.builtin.apt:
         name:
-          - kubelet={{ k8s_pkg_version }}
-          - kubeadm={{ k8s_pkg_version }}
-          - kubectl={{ k8s_pkg_version }}
+          - "kubelet={{ k8s_pkg_version }}"
+          - "kubeadm={{ k8s_pkg_version }}"
+          - "kubectl={{ k8s_pkg_version }}"
         state: present
-        allow_downgrade: yes
+        allow_downgrade: true
+      tags: [packages]
 
-    - name: Hold K8s Packages
-      dpkg_selections:
+    - name: Hold Kubernetes packages at current version
+      ansible.builtin.dpkg_selections:
         name: "{{ item }}"
         selection: hold
       loop:
         - kubelet
         - kubeadm
         - kubectl
+      tags: [packages]
 
-    - name: Enable Kubelet Service
-      service:
+    - name: Enable kubelet service (starts after kubeadm init)
+      ansible.builtin.service:
         name: kubelet
-        enabled: yes
+        enabled: true
+      tags: [packages]
 
-    # --- CONTROL PLANE TOOLS (CP ONLY) ---
-    - name: Install Management Tools on Control Plane
+    - name: Configure kubelet extra args for Raspberry Pi
+      ansible.builtin.copy:
+        dest: /etc/default/kubelet
+        content: |
+          # Extra kubelet arguments for Raspberry Pi
+          KUBELET_EXTRA_ARGS="--node-ip={{ ansible_default_ipv4.address }}"
+        mode: '0644'
+      tags: [packages]
+
+    # -----------------------------------------------------------------------
+    # CONTROL PLANE TOOLS (CP ONLY)
+    # -----------------------------------------------------------------------
+    - name: Install control plane management tools
+      when: "'big' in group_names"
+      tags: [tools]
       block:
+        # etcdctl - for etcd debugging
         - name: Install etcdctl
-          apt:
+          ansible.builtin.apt:
             name: etcd-client
             state: present
 
-        - name: Download Helm Installer
-          get_url:
+        # Helm - Kubernetes package manager
+        - name: Check if Helm is installed
+          ansible.builtin.command: helm version --short
+          register: helm_check
+          changed_when: false
+          failed_when: false
+
+        - name: Download Helm installer
+          ansible.builtin.get_url:
             url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
             dest: /tmp/get_helm.sh
             mode: '0700'
+          when: helm_check.rc != 0
 
-        - name: Run Helm Installer
-          shell: /tmp/get_helm.sh
-          args:
-            creates: /usr/local/bin/helm
+        - name: Install Helm
+          ansible.builtin.command: /tmp/get_helm.sh
+          when: helm_check.rc != 0
+          environment:
+            DESIRED_VERSION: "{{ helm_version if helm_version != 'latest' else '' }}"
 
-        - name: Download Cilium CLI
-          unarchive:
-            src: https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-arm64.tar.gz
+        # Cilium CLI - CNI management
+        - name: Check if Cilium CLI is installed
+          ansible.builtin.command: cilium version --client
+          register: cilium_check
+          changed_when: false
+          failed_when: false
+
+        - name: Get latest Cilium CLI version
+          ansible.builtin.uri:
+            url: https://api.github.com/repos/cilium/cilium-cli/releases/latest
+            return_content: true
+          register: cilium_release
+          when: cilium_check.rc != 0 and cilium_cli_version == "latest"
+
+        - name: Set Cilium CLI version
+          ansible.builtin.set_fact:
+            cilium_install_version: "{{ cilium_release.json.tag_name | default('v0.16.0') }}"
+          when: cilium_check.rc != 0
+
+        - name: Download and install Cilium CLI
+          ansible.builtin.unarchive:
+            src: "https://github.com/cilium/cilium-cli/releases/download/{{ cilium_install_version }}/cilium-linux-arm64.tar.gz"
             dest: /usr/local/bin
-            remote_src: yes
+            remote_src: true
             mode: '0755'
-            include: 
+            include:
               - cilium
+          when: cilium_check.rc != 0
+
+        # k9s - Terminal UI (optional but very useful)
+        - name: Check if k9s is installed
+          ansible.builtin.command: k9s version --short
+          register: k9s_check
+          changed_when: false
+          failed_when: false
+
+        - name: Get latest k9s version
+          ansible.builtin.uri:
+            url: https://api.github.com/repos/derailed/k9s/releases/latest
+            return_content: true
+          register: k9s_release
+          when: k9s_check.rc != 0
+
+        - name: Download and install k9s
+          ansible.builtin.unarchive:
+            src: "https://github.com/derailed/k9s/releases/download/{{ k9s_release.json.tag_name }}/k9s_Linux_arm64.tar.gz"
+            dest: /usr/local/bin
+            remote_src: true
+            mode: '0755'
+            include:
+              - k9s
+          when: k9s_check.rc != 0
+
+    # -----------------------------------------------------------------------
+    # BASH COMPLETION (ALL NODES)
+    # -----------------------------------------------------------------------
+    - name: Setup kubectl bash completion
+      ansible.builtin.shell: |
+        kubectl completion bash > /etc/bash_completion.d/kubectl
+      args:
+        creates: /etc/bash_completion.d/kubectl
+      tags: [tools]
+
+    - name: Setup kubeadm bash completion
+      ansible.builtin.shell: |
+        kubeadm completion bash > /etc/bash_completion.d/kubeadm
+      args:
+        creates: /etc/bash_completion.d/kubeadm
+      tags: [tools]
+
+    # -----------------------------------------------------------------------
+    # VALIDATION
+    # -----------------------------------------------------------------------
+    - name: Verify kubeadm installation
+      ansible.builtin.command: kubeadm version -o short
+      register: kubeadm_version
+      changed_when: false
+      tags: [validate]
+
+    - name: Verify kubelet installation
+      ansible.builtin.command: kubelet --version
+      register: kubelet_version
+      changed_when: false
+      tags: [validate]
+
+    - name: Verify kubectl installation
+      ansible.builtin.command: kubectl version --client -o yaml
+      register: kubectl_version
+      changed_when: false
+      tags: [validate]
+
+    - name: Verify Helm installation (control plane)
+      ansible.builtin.command: helm version --short
+      register: helm_version_check
+      changed_when: false
       when: "'big' in group_names"
+      tags: [validate]
+
+    - name: Verify Cilium CLI installation (control plane)
+      ansible.builtin.command: cilium version --client
+      register: cilium_version_check
+      changed_when: false
+      when: "'big' in group_names"
+      tags: [validate]
+
+    - name: Display installation summary
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════
+          ✅ Kubernetes binaries installed on {{ inventory_hostname }}
+          ════════════════════════════════════════════════════════════════
+          kubeadm: {{ kubeadm_version.stdout }}
+          kubelet: {{ kubelet_version.stdout }}
+          kubectl: {{ kubectl_version.stdout | regex_search('gitVersion: ([^\s]+)', '\1') | first }}
+          {% if 'big' in group_names %}
+          helm:    {{ helm_version_check.stdout | default('installed') }}
+          cilium:  {{ cilium_version_check.stdout_lines[0] | default('installed') }}
+          {% endif %}
+          
+          ⚡ Ready for cluster initialization (Phase 2)
+      tags: [validate]
 ```
 
+</details>
+
 ### 5.3 Infrastructure Verification
+
 **File:** `tests/01_infra_test.sh`
 
-This script validates that Phase 1 successfully prepared the nodes.
+This script validates that Phase 1 successfully prepared all nodes. Run it before proceeding to Phase 2.
+
+**What It Checks:**
+
+| Category | Checks | Pass Criteria |
+|----------|--------|---------------|
+| **Connectivity** | Ansible ping, SSH to all nodes | All 4 nodes respond |
+| **K8s Binaries** | kubeadm, kubelet, kubectl, helm, cilium-cli | Version 1.31.x installed |
+| **OS Config** | Swap, cgroups, IP forwarding, bridge netfilter | Swap off, cgroups enabled |
+| **Kernel Modules** | overlay, br_netfilter, iscsi_tcp, ip_vs, nf_conntrack | All modules loaded |
+| **Container Runtime** | containerd status, SystemdCgroup, pause image, iscsid | All services active |
+| **Hardware** | GPU mem, WiFi/BT disabled, watchdog | RPi optimizations applied |
+| **Packages** | open-iscsi, nfs-common, ipset, ipvsadm, conntrack | All dependencies installed |
+
+<details>
+<summary>📄 Click to expand full test script</summary>
 
 ```bash
 #!/bin/bash
-echo "=== INFRASTRUCTURE VERIFICATION SUITE ==="
+# =============================================================================
+# Phase 1 Infrastructure Verification Script
+# =============================================================================
+# This script validates that all nodes are properly prepared for Kubernetes.
+# Run from the repository root after executing the Phase 1 Ansible playbooks.
+#
+# Usage: bash tests/01_infra_test.sh
+# =============================================================================
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║           PHASE 1: INFRASTRUCTURE VERIFICATION SUITE                  ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+PASS=0
+FAIL=0
+WARN=0
 
 check() {
-    NAME=$1
-    CMD=$2
-    if eval $CMD; then
-        echo "✅ $NAME: PASS"
+    local NAME=$1
+    local CMD=$2
+    if eval "$CMD" > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ $NAME: PASS${NC}"
+        ((PASS++))
     else
-        echo "❌ $NAME: FAIL"
-        exit 1
+        echo -e "${RED}❌ $NAME: FAIL${NC}"
+        ((FAIL++))
     fi
 }
 
-echo "1. Checking Ansible Connectivity..."
-ansible -i ansible/hosts all -m ping > /dev/null && echo "✅ Ansible Ping: PASS" || exit 1
+warn_check() {
+    local NAME=$1
+    local CMD=$2
+    if eval "$CMD" > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ $NAME: PASS${NC}"
+        ((PASS++))
+    else
+        echo -e "${YELLOW}⚠️  $NAME: WARN (optional)${NC}"
+        ((WARN++))
+    fi
+}
 
-echo "2. Checking Kubernetes Binaries..."
-ansible -i ansible/hosts all -m shell -a "kubeadm version" > /dev/null && echo "✅ Kubeadm: PASS"
-ansible -i ansible/hosts all -m shell -a "helm version" > /dev/null && echo "✅ Helm: PASS"
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 1. CONNECTIVITY TESTS                                               │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 
-echo "3. Checking Swap Status..."
-# Returns 1 (PASS) if grep finds no swap entries
-ansible -i ansible/hosts all -m shell -a "swapon --show" | grep -v "rc=0" | grep -q "" 
-if [ $? -eq 1 ]; then
-    echo "✅ Swap Disabled: PASS"
+check "Ansible ping (all nodes)" "ansible -i ansible/hosts all -m ping"
+check "SSH connection (control plane)" "ansible -i ansible/hosts big -m shell -a 'echo connected'"
+check "SSH connection (workers)" "ansible -i ansible/hosts small -m shell -a 'echo connected'"
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 2. KUBERNETES BINARY TESTS                                          │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+check "kubeadm installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short'"
+check "kubelet installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubelet --version'"
+check "kubectl installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubectl version --client -o yaml'"
+check "Kubernetes version 1.31" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short | grep -q v1.31'"
+check "Helm installed (CP)" "ansible -i ansible/hosts big -m shell -a 'helm version --short'"
+check "Cilium CLI installed (CP)" "ansible -i ansible/hosts big -m shell -a 'cilium version --client'"
+check "etcdctl installed (CP)" "ansible -i ansible/hosts big -m shell -a 'which etcdctl'"
+warn_check "k9s installed (CP)" "ansible -i ansible/hosts big -m shell -a 'k9s version --short'"
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 3. OS CONFIGURATION TESTS                                           │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+# Check swap is disabled
+SWAP_OUTPUT=$(ansible -i ansible/hosts all -m shell -a "swapon --show" 2>/dev/null | grep -E "^[a-zA-Z]" | grep -v SUCCESS || true)
+if [ -z "$SWAP_OUTPUT" ]; then
+    echo -e "${GREEN}✅ Swap disabled (all nodes): PASS${NC}"
+    ((PASS++))
 else
-    echo "❌ Swap Active (FAIL)"
+    echo -e "${RED}❌ Swap disabled (all nodes): FAIL - Swap still active${NC}"
+    ((FAIL++))
+fi
+
+check "Cgroups memory enabled" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^memory.*1$\" /proc/cgroups'"
+check "Cgroups cpuset enabled" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^cpuset.*1$\" /proc/cgroups'"
+check "IP forwarding enabled" "ansible -i ansible/hosts all -m shell -a 'sysctl net.ipv4.ip_forward | grep -q \"= 1\"'"
+check "Bridge netfilter iptables" "ansible -i ansible/hosts all -m shell -a 'sysctl net.bridge.bridge-nf-call-iptables | grep -q \"= 1\"'"
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 4. KERNEL MODULE TESTS                                              │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+check "Kernel module: overlay" "ansible -i ansible/hosts all -m shell -a 'lsmod | grep -q ^overlay'"
+check "Kernel module: br_netfilter" "ansible -i ansible/hosts all -m shell -a 'lsmod | grep -q ^br_netfilter'"
+check "Kernel module: iscsi_tcp" "ansible -i ansible/hosts all -m shell -a 'lsmod | grep -q ^iscsi_tcp'"
+check "Kernel module: ip_vs" "ansible -i ansible/hosts all -m shell -a 'lsmod | grep -q ^ip_vs'"
+check "Kernel module: nf_conntrack" "ansible -i ansible/hosts all -m shell -a 'lsmod | grep -q ^nf_conntrack'"
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 5. CONTAINER RUNTIME TESTS                                          │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+check "containerd running" "ansible -i ansible/hosts all -m shell -a 'systemctl is-active containerd | grep -q active'"
+check "containerd enabled" "ansible -i ansible/hosts all -m shell -a 'systemctl is-enabled containerd | grep -q enabled'"
+check "containerd SystemdCgroup" "ansible -i ansible/hosts all -m shell -a 'grep -q \"SystemdCgroup = true\" /etc/containerd/config.toml'"
+check "containerd pause image" "ansible -i ansible/hosts all -m shell -a 'grep -q \"sandbox_image.*pause:3\" /etc/containerd/config.toml'"
+check "iscsid service running" "ansible -i ansible/hosts all -m shell -a 'systemctl is-active iscsid | grep -q active'"
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 6. HARDWARE OPTIMIZATION TESTS (Raspberry Pi Specific)              │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+check "GPU memory limited" "ansible -i ansible/hosts all -m shell -a 'grep -q \"gpu_mem=16\" /boot/firmware/config.txt'"
+check "WiFi disabled" "ansible -i ansible/hosts all -m shell -a 'grep -q \"disable-wifi\" /boot/firmware/config.txt'"
+check "Bluetooth disabled" "ansible -i ansible/hosts all -m shell -a 'grep -q \"disable-bt\" /boot/firmware/config.txt'"
+warn_check "Audio disabled" "ansible -i ansible/hosts all -m shell -a 'grep -q \"audio=off\" /boot/firmware/config.txt'"
+warn_check "Watchdog enabled" "ansible -i ansible/hosts all -m shell -a 'grep -q \"watchdog=on\" /boot/firmware/config.txt'"
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 7. PACKAGE TESTS                                                    │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+check "open-iscsi installed" "ansible -i ansible/hosts all -m shell -a 'dpkg -l | grep -q open-iscsi'"
+check "nfs-common installed" "ansible -i ansible/hosts all -m shell -a 'dpkg -l | grep -q nfs-common'"
+check "ipset installed" "ansible -i ansible/hosts all -m shell -a 'dpkg -l | grep -q ipset'"
+check "ipvsadm installed" "ansible -i ansible/hosts all -m shell -a 'dpkg -l | grep -q ipvsadm'"
+check "conntrack installed" "ansible -i ansible/hosts all -m shell -a 'dpkg -l | grep -q conntrack'"
+
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║                          SUMMARY                                      ║"
+echo "╠═══════════════════════════════════════════════════════════════════════╣"
+printf "║  Passed: %-3d  │  Failed: %-3d  │  Warnings: %-3d               ║\n" $PASS $FAIL $WARN
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+
+if [ $FAIL -gt 0 ]; then
+    echo ""
+    echo "⚠️  Some tests failed. Review the output above and check node logs:"
+    echo "   ansible -i ansible/hosts all -m shell -a 'journalctl -n 50'"
+    echo ""
+    echo "Common fixes:"
+    echo "  • Swap still active: reboot nodes after playbook"
+    echo "  • Missing modules: check /etc/modules-load.d/k8s.conf"
+    echo "  • containerd issues: systemctl restart containerd"
     exit 1
 fi
 
-echo "4. Checking Cgroups (Memory)..."
-ansible -i ansible/hosts all -m shell -a "cat /proc/cgroups | grep memory | grep 1" > /dev/null && echo "✅ Cgroups: PASS"
-
-echo "=== PHASE 1 COMPLETE ==="
+echo ""
+echo "🎉 PHASE 1 COMPLETE - All nodes are Kubernetes-ready!"
+echo "   Proceed to Phase 2: Cluster Bootstrap"
+echo ""
+echo "   Next command:"
+echo "   ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml"
 ```
+
+</details>
 
 ### 5.4 Phase 1 Execution Steps
 
-Run the following commands from your management machine to execute Phase 1.
+Execute the following commands from your **management machine** (WSL/Linux/Mac):
 
-1.  **Prepare the Nodes:**
-    This will reboot the nodes if kernel parameters or cgroups are updated.
-    ```bash
-    ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
-    ```
+```bash
+# Navigate to the repository root
+cd ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide
 
-2.  **Install Software:**
-    ```bash
-    ansible-playbook -i ansible/hosts ansible/playbooks/02_k8s_binaries.yml
-    ```
+# Step 1: Prepare the OS (installs deps, disables swap, configures kernel)
+# ⚠️ Nodes will reboot if cgroups or kernel parameters change
+ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
 
-3.  **Verify State:**
-    ```bash
-    bash tests/01_infra_test.sh
-    ```
+# Wait for nodes to come back online (~2-3 minutes after reboot)
+sleep 180
+
+# Step 2: Install Kubernetes binaries (kubeadm, kubelet, kubectl, helm)
+ansible-playbook -i ansible/hosts ansible/playbooks/02_k8s_binaries.yml
+
+# Step 3: Verify everything is ready
+bash tests/01_infra_test.sh
+```
+
+**Expected Output:**
+
+```text
+╔═══════════════════════════════════════════════════════════════════════╗
+║           PHASE 1: INFRASTRUCTURE VERIFICATION SUITE                  ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ 1. CONNECTIVITY TESTS                                               │
+└─────────────────────────────────────────────────────────────────────┘
+✅ Ansible ping (all nodes): PASS
+✅ SSH connection (control plane): PASS
+✅ SSH connection (workers): PASS
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ 2. KUBERNETES BINARY TESTS                                          │
+└─────────────────────────────────────────────────────────────────────┘
+✅ kubeadm installed (all): PASS
+✅ kubelet installed (all): PASS
+✅ kubectl installed (all): PASS
+✅ Kubernetes version 1.31: PASS
+✅ Helm installed (CP): PASS
+✅ Cilium CLI installed (CP): PASS
+...
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║                          SUMMARY                                      ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║  Passed: 35   │  Failed: 0    │  Warnings: 2                         ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+🎉 PHASE 1 COMPLETE - All nodes are Kubernetes-ready!
+   Proceed to Phase 2: Cluster Bootstrap
+```
+
+> ✅ **Checkpoint:** If all tests pass, proceed to Phase 2. If any fail, check `/var/log/syslog` on the affected node.
+
+---
 
 ## 6. Phase 2: Cluster Bootstrap
 

@@ -1,88 +1,280 @@
 ---
+# =============================================================================
+# Phase 1 - Install Kubernetes Binaries
+# =============================================================================
+# Installs the Kubernetes toolchain on all nodes:
+#   - Adds official Kubernetes APT repository
+#   - Installs kubelet, kubeadm, kubectl (version-locked)
+#   - Installs management tools on control plane only
+#
+# Note: We install 1.31 (not latest) to demonstrate upgrades later.
+#
+# Usage: ansible-playbook -i hosts playbooks/02_k8s_binaries.yml
+# Tags:  repo, packages, tools, validate
+# =============================================================================
+
 - name: Phase 1 - Install Kubernetes Binaries
   hosts: all
   become: true
+  gather_facts: true
+
   vars:
+    # Kubernetes version - deliberately not latest for upgrade demo
     k8s_version_major: "1.31"
     k8s_pkg_version: "1.31.*"
+    
+    # Tool versions (latest stable)
+    helm_version: "latest"
+    cilium_cli_version: "latest"
+
+  # =========================================================================
+  # TASKS
+  # =========================================================================
   tasks:
-    # --- KUBERNETES REPO ---
-    - name: Create keyring directory
-      file:
+    # -----------------------------------------------------------------------
+    # PRE-FLIGHT CHECKS
+    # -----------------------------------------------------------------------
+    - name: Verify containerd is running
+      ansible.builtin.command: systemctl is-active containerd
+      register: containerd_status
+      changed_when: false
+      failed_when: containerd_status.stdout != "active"
+      tags: [preflight]
+
+    - name: Display installation plan
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════
+          Installing Kubernetes {{ k8s_version_major }} on {{ inventory_hostname }}
+          ════════════════════════════════════════════════════════════════
+          Role: {{ 'Control Plane' if 'big' in group_names else 'Worker' }}
+          Packages: kubelet, kubeadm, kubectl ({{ k8s_pkg_version }})
+          {% if 'big' in group_names %}
+          Extra tools: helm, cilium-cli, etcdctl
+          {% endif %}
+      tags: [preflight]
+
+    # -----------------------------------------------------------------------
+    # KUBERNETES APT REPOSITORY
+    # -----------------------------------------------------------------------
+    - name: Create apt keyrings directory
+      ansible.builtin.file:
         path: /etc/apt/keyrings
         state: directory
         mode: '0755'
+      tags: [repo]
 
-    - name: Download K8s Signing Key
-      get_url:
+    - name: Download Kubernetes GPG key
+      ansible.builtin.get_url:
         url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major }}/deb/Release.key"
-        dest: /tmp/k8s-release.key
+        dest: /tmp/kubernetes-release.key
+        mode: '0644'
+      tags: [repo]
 
-    - name: Dearmor K8s Key
-      shell: |
-        cat /tmp/k8s-release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg --yes
+    - name: Convert and install GPG key
+      ansible.builtin.shell: |
+        gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg < /tmp/kubernetes-release.key
       args:
         creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      tags: [repo]
 
-    - name: Add K8s Apt Repository
-      apt_repository:
+    - name: Add Kubernetes apt repository
+      ansible.builtin.apt_repository:
         repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major }}/deb/ /"
         state: present
         filename: kubernetes
+        update_cache: true
+      tags: [repo]
 
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-
-    # --- INSTALL PACKAGES (ALL NODES) ---
-    - name: Install Kubelet, Kubeadm, Kubectl
-      apt:
+    # -----------------------------------------------------------------------
+    # KUBERNETES PACKAGES (ALL NODES)
+    # -----------------------------------------------------------------------
+    - name: Install Kubernetes packages
+      ansible.builtin.apt:
         name:
-          - kubelet={{ k8s_pkg_version }}
-          - kubeadm={{ k8s_pkg_version }}
-          - kubectl={{ k8s_pkg_version }}
+          - "kubelet={{ k8s_pkg_version }}"
+          - "kubeadm={{ k8s_pkg_version }}"
+          - "kubectl={{ k8s_pkg_version }}"
         state: present
-        allow_downgrade: yes
+        allow_downgrade: true
+      tags: [packages]
 
-    - name: Hold K8s Packages
-      dpkg_selections:
+    - name: Hold Kubernetes packages at current version
+      ansible.builtin.dpkg_selections:
         name: "{{ item }}"
         selection: hold
       loop:
         - kubelet
         - kubeadm
         - kubectl
+      tags: [packages]
 
-    - name: Enable Kubelet Service
-      service:
+    - name: Enable kubelet service (starts after kubeadm init)
+      ansible.builtin.service:
         name: kubelet
-        enabled: yes
+        enabled: true
+      tags: [packages]
 
-    # --- CONTROL PLANE TOOLS (CP ONLY) ---
-    - name: Install Management Tools on Control Plane
+    - name: Configure kubelet extra args for Raspberry Pi
+      ansible.builtin.copy:
+        dest: /etc/default/kubelet
+        content: |
+          # Extra kubelet arguments for Raspberry Pi
+          KUBELET_EXTRA_ARGS="--node-ip={{ ansible_default_ipv4.address }}"
+        mode: '0644'
+      tags: [packages]
+
+    # -----------------------------------------------------------------------
+    # CONTROL PLANE TOOLS (CP ONLY)
+    # -----------------------------------------------------------------------
+    - name: Install control plane management tools
+      when: "'big' in group_names"
+      tags: [tools]
       block:
+        # etcdctl - for etcd debugging
         - name: Install etcdctl
-          apt:
+          ansible.builtin.apt:
             name: etcd-client
             state: present
 
-        - name: Download Helm Installer
-          get_url:
+        # Helm - Kubernetes package manager
+        - name: Check if Helm is installed
+          ansible.builtin.command: helm version --short
+          register: helm_check
+          changed_when: false
+          failed_when: false
+
+        - name: Download Helm installer
+          ansible.builtin.get_url:
             url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
             dest: /tmp/get_helm.sh
             mode: '0700'
+          when: helm_check.rc != 0
 
-        - name: Run Helm Installer
-          shell: /tmp/get_helm.sh
-          args:
-            creates: /usr/local/bin/helm
+        - name: Install Helm
+          ansible.builtin.command: /tmp/get_helm.sh
+          when: helm_check.rc != 0
+          environment:
+            DESIRED_VERSION: "{{ helm_version if helm_version != 'latest' else '' }}"
 
-        - name: Download Cilium CLI
-          unarchive:
-            src: https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-arm64.tar.gz
+        # Cilium CLI - CNI management
+        - name: Check if Cilium CLI is installed
+          ansible.builtin.command: cilium version --client
+          register: cilium_check
+          changed_when: false
+          failed_when: false
+
+        - name: Get latest Cilium CLI version
+          ansible.builtin.uri:
+            url: https://api.github.com/repos/cilium/cilium-cli/releases/latest
+            return_content: true
+          register: cilium_release
+          when: cilium_check.rc != 0 and cilium_cli_version == "latest"
+
+        - name: Set Cilium CLI version
+          ansible.builtin.set_fact:
+            cilium_install_version: "{{ cilium_release.json.tag_name | default('v0.16.0') }}"
+          when: cilium_check.rc != 0
+
+        - name: Download and install Cilium CLI
+          ansible.builtin.unarchive:
+            src: "https://github.com/cilium/cilium-cli/releases/download/{{ cilium_install_version }}/cilium-linux-arm64.tar.gz"
             dest: /usr/local/bin
-            remote_src: yes
+            remote_src: true
             mode: '0755'
-            include: 
+            include:
               - cilium
+          when: cilium_check.rc != 0
+
+        # k9s - Terminal UI (optional but very useful)
+        - name: Check if k9s is installed
+          ansible.builtin.command: k9s version --short
+          register: k9s_check
+          changed_when: false
+          failed_when: false
+
+        - name: Get latest k9s version
+          ansible.builtin.uri:
+            url: https://api.github.com/repos/derailed/k9s/releases/latest
+            return_content: true
+          register: k9s_release
+          when: k9s_check.rc != 0
+
+        - name: Download and install k9s
+          ansible.builtin.unarchive:
+            src: "https://github.com/derailed/k9s/releases/download/{{ k9s_release.json.tag_name }}/k9s_Linux_arm64.tar.gz"
+            dest: /usr/local/bin
+            remote_src: true
+            mode: '0755'
+            include:
+              - k9s
+          when: k9s_check.rc != 0
+
+    # -----------------------------------------------------------------------
+    # BASH COMPLETION (ALL NODES)
+    # -----------------------------------------------------------------------
+    - name: Setup kubectl bash completion
+      ansible.builtin.shell: |
+        kubectl completion bash > /etc/bash_completion.d/kubectl
+      args:
+        creates: /etc/bash_completion.d/kubectl
+      tags: [tools]
+
+    - name: Setup kubeadm bash completion
+      ansible.builtin.shell: |
+        kubeadm completion bash > /etc/bash_completion.d/kubeadm
+      args:
+        creates: /etc/bash_completion.d/kubeadm
+      tags: [tools]
+
+    # -----------------------------------------------------------------------
+    # VALIDATION
+    # -----------------------------------------------------------------------
+    - name: Verify kubeadm installation
+      ansible.builtin.command: kubeadm version -o short
+      register: kubeadm_version
+      changed_when: false
+      tags: [validate]
+
+    - name: Verify kubelet installation
+      ansible.builtin.command: kubelet --version
+      register: kubelet_version
+      changed_when: false
+      tags: [validate]
+
+    - name: Verify kubectl installation
+      ansible.builtin.command: kubectl version --client -o yaml
+      register: kubectl_version
+      changed_when: false
+      tags: [validate]
+
+    - name: Verify Helm installation (control plane)
+      ansible.builtin.command: helm version --short
+      register: helm_version_check
+      changed_when: false
       when: "'big' in group_names"
+      tags: [validate]
+
+    - name: Verify Cilium CLI installation (control plane)
+      ansible.builtin.command: cilium version --client
+      register: cilium_version_check
+      changed_when: false
+      when: "'big' in group_names"
+      tags: [validate]
+
+    - name: Display installation summary
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════
+          ✅ Kubernetes binaries installed on {{ inventory_hostname }}
+          ════════════════════════════════════════════════════════════════
+          kubeadm: {{ kubeadm_version.stdout }}
+          kubelet: {{ kubelet_version.stdout }}
+          kubectl: {{ kubectl_version.stdout | regex_search('gitVersion: ([^\s]+)', '\1') | first }}
+          {% if 'big' in group_names %}
+          helm:    {{ helm_version_check.stdout | default('installed') }}
+          cilium:  {{ cilium_version_check.stdout_lines[0] | default('installed') }}
+          {% endif %}
+          
+          ⚡ Ready for cluster initialization (Phase 2)
+      tags: [validate]
