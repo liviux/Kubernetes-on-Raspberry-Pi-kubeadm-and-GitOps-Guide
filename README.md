@@ -2,6 +2,9 @@
 
 ## Table of Contents
 1.  [Introduction and Scope](#1-introduction-and-scope)
+    *   [Project Overview](#project-overview)
+    *   [Target Audience](#target-audience)
+    *   [Learning Outcomes](#learning-outcomes)
 2.  [Architecture Overview](#2-architecture-overview)
     *   [Hardware Topology](#hardware-topology)
     *   [Software Stack & Justification](#software-stack--justification)
@@ -18,15 +21,16 @@
     *   [6.4 Phase 1 Execution Steps](#64-phase-1-execution-steps)
 7.  [Phase 2: Cluster Bootstrap](#7-phase-2-cluster-bootstrap)
     *   [7.1 Cluster Initialization Playbook](#71-cluster-initialization-playbook)
-    *   [7.2 Network Verification Script](#72-network-verification-script)
-    *   [7.3 Phase 2 Execution Steps](#73-phase-2-execution-steps)
+    *   [7.2 Metrics Server](#72-metrics-server)
+    *   [7.3 Network Verification Script](#73-network-verification-script)
+    *   [7.4 Phase 2 Execution Steps](#74-phase-2-execution-steps)
 8.  [Phase 3: Storage Foundation](#8-phase-3-storage-foundation)
     *   [8.1 Storage Mounting Playbook](#81-storage-mounting-playbook)
     *   [8.2 Longhorn Bootstrap Script](#82-longhorn-bootstrap-script)
     *   [8.3 Storage Verification Script](#83-storage-verification-script)
     *   [8.4 Phase 3 Execution Steps](#84-phase-3-execution-steps)
 9.  [Phase 4: GitOps & Observability](#9-phase-4-gitops--observability)
-    *   [9.1 Ingress Bootstrap (Traefik)](#91-ingress-bootstrap-traefik)
+    *   [9.1 Gateway API Bootstrap (Traefik)](#91-gateway-api-bootstrap-traefik)
     *   [9.2 GitOps Bootstrap (ArgoCD)](#92-gitops-bootstrap-argocd)
     *   [9.3 Source Control Service (Gitea)](#93-source-control-service-gitea)
     *   [9.4 The "App of Apps" Pattern](#94-the-app-of-apps-pattern)
@@ -39,9 +43,11 @@
     *   [10.5 Secrets Management (OpenBao)](#105-secrets-management-openbao)
     *   [10.6 Policy Enforcement (Kyverno)](#106-policy-enforcement-kyverno)
     *   [10.7 Runtime Security (Falco)](#107-runtime-security-falco)
-    *   [10.8 The Root Application (App of Apps)](#108-the-root-application-app-of-apps)
-    *   [10.9 Security Verification Script](#109-security-verification-script)
-    *   [10.10 Phase 5 Execution Steps](#1010-phase-5-execution-steps)
+    *   [10.8 Configuration Reloader (Reloader)](#108-configuration-reloader-reloader)
+    *   [10.9 Workload Rebalancing (Descheduler)](#109-workload-rebalancing-descheduler)
+    *   [10.10 The Root Application (App of Apps)](#1010-the-root-application-app-of-apps)
+    *   [10.11 Security Verification Script](#1011-security-verification-script)
+    *   [10.12 Phase 5 Execution Steps](#1012-phase-5-execution-steps)
 11. [Phase 6: Advanced Observability](#11-phase-6-advanced-observability)
     *   [11.1 Log Aggregation (Loki Stack)](#111-log-aggregation-loki-stack)
     *   [11.2 Log Collection (Fluent Bit)](#112-log-collection-fluent-bit)
@@ -50,9 +56,8 @@
     *   [11.5 Traffic Analysis (Kubeshark)](#115-traffic-analysis-kubeshark)
     *   [11.6 Cost Management (OpenCost)](#116-cost-management-opencost)
     *   [11.7 AI Diagnostics (K8sGPT)](#117-ai-diagnostics-k8sgpt)
-    *   [11.8 Full Stack APM (SigNoz)](#118-full-stack-apm-signoz)
-    *   [11.9 Observability Verification Script](#119-observability-verification-script)
-    *   [11.10 Phase 6 Execution Steps](#1110-phase-6-execution-steps)
+    *   [11.8 Observability Verification Script](#118-observability-verification-script)
+    *   [11.9 Phase 6 Execution Steps](#119-phase-6-execution-steps)
 12. [Phase 7: CI/CD & Developer Experience](#12-phase-7-cicd--developer-experience)
     *   [12.1 Image Automation (Argo Image Updater)](#121-image-automation-argo-image-updater)
     *   [12.2 CI Engine (Argo Workflows)](#122-ci-engine-argo-workflows)
@@ -71,9 +76,81 @@
 ---
 
 ## 1. Introduction and Scope
-This project documents the establishment of a production-grade "Cloud Native" Kubernetes cluster on bare metal Raspberry Pi 4 hardware. The objective is to build a self-healing, observable, and secure platform managed entirely through **GitOps** principles.
 
-This guide serves as the definitive roadmap for reproducing the cluster from scratch. It ensures that the infrastructure provisioning (via Ansible) and the application state (via ArgoCD) are strictly version-controlled, automated, and reproducible.
+### Project Overview
+
+This project documents the establishment of a **production-grade, Cloud Native Kubernetes cluster** on bare metal Raspberry Pi 4 hardware. The objective is to build a self-healing, observable, and secure platform managed entirely through **GitOps principles**.
+
+The architecture mirrors enterprise-grade deployments while accounting for the unique constraints of edge computing on ARM64 hardware—limited RAM, SD card wear concerns, and single-HDD storage topology.
+
+**Core Philosophy:**
+- **Infrastructure as Code (IaC):** All infrastructure provisioning is automated via Ansible playbooks, ensuring repeatable deployments.
+- **GitOps:** Application state is declaratively defined in Git. ArgoCD continuously reconciles cluster state with the desired configuration.
+- **Immutable Infrastructure:** Nodes are treated as disposable. Configuration changes trigger redeployment rather than in-place modification.
+- **Defense in Depth:** Security is layered across network policies, runtime protection, image scanning, and policy enforcement.
+
+### Target Audience
+
+This guide is designed for:
+
+| Audience | Prerequisites | Expected Benefit |
+|----------|---------------|------------------|
+| **DevOps Engineers** | Familiarity with containers, basic Kubernetes concepts | Production-ready home lab for experimentation |
+| **Platform Engineers** | Experience with IaC tools (Terraform/Ansible) | Reference architecture for edge deployments |
+| **SREs** | Understanding of observability principles | Complete monitoring stack implementation |
+| **Developers** | Basic command-line proficiency | CI/CD pipeline for personal projects |
+| **Students** | Willingness to learn | Hands-on experience with enterprise tooling |
+
+**Assumed Knowledge:**
+- Linux command-line fundamentals (`ssh`, `sudo`, file navigation)
+- Basic YAML syntax
+- Understanding of IP networking (subnets, DHCP, DNS)
+- Familiarity with Git operations (`clone`, `commit`, `push`)
+
+### Learning Outcomes
+
+Upon completing this guide, you will be able to:
+
+1. **Infrastructure Provisioning**
+   - Configure Raspberry Pi hardware for Kubernetes workloads
+   - Automate node preparation using Ansible
+   - Manage version-locked Kubernetes binary installations
+
+2. **Cluster Operations**
+   - Bootstrap a multi-node Kubernetes cluster using `kubeadm`
+   - Implement eBPF-based networking with Cilium
+   - Configure bare-metal load balancing via L2 announcements
+
+3. **Storage Management**
+   - Deploy distributed block storage with strict hardware affinity
+   - Implement S3-compatible object storage for cloud-native tooling
+   - Protect SD cards from write amplification
+
+4. **GitOps Workflows**
+   - Implement the App of Apps pattern with ArgoCD
+   - Automate image updates based on registry tags
+   - Manage secrets securely with external secret stores
+
+5. **Observability**
+   - Deploy a complete metrics pipeline (Prometheus, Thanos, Grafana)
+   - Implement centralized logging (Fluent Bit, Loki)
+   - Configure distributed tracing (OpenTelemetry, Jaeger)
+
+6. **Security Hardening**
+   - Enforce pod security policies with Kyverno
+   - Implement runtime threat detection with Falco
+   - Integrate vulnerability scanning into CI/CD pipelines
+
+7. **CI/CD Pipelines**
+   - Build Kubernetes-native workflows with Argo Workflows
+   - Configure event-driven automation with Argo Events
+   - Implement automated security scanning gates
+
+**Hardware Limitations Acknowledged:**
+- **Single HDD:** All persistent storage relies on one physical disk. This is a single point of failure acceptable for a learning environment.
+- **4GB Worker RAM:** Some observability tools (Jaeger, Kubeshark) are configured with aggressive resource limits that may cause OOM under heavy load.
+- **SD Card Wear:** Longhorn is explicitly configured to never schedule replicas on worker nodes to protect SD cards.
+
 
 ---
 
@@ -102,16 +179,16 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 *   **Cilium:** The CNI plugin (Phase 2). Replaces `kube-proxy` with eBPF for superior performance. Configured with L2 Announcements to turn the Raspberry Pis into a physical Load Balancer.
 *   **Hubble:** Network observability tool (embedded in Cilium) for visualizing communication maps.
 *   **Tetragon:** eBPF-based security observability and runtime enforcement.
-*   **Traefik:** The Ingress Controller. Manages external access to services via LoadBalancer IPs requested from Cilium.
+*   **Traefik:** The Gateway API implementation. Manages external access to services via HTTPRoute resources and LoadBalancer IPs requested from Cilium. Gateway API is the successor to Ingress, providing more expressive routing capabilities.
 
 #### **C. Observability Stack** (Deployed via GitOps)
+*   **Metrics Server:** Cluster-wide resource metrics aggregator. Required for `kubectl top`, HPA, and VPA.
 *   **Prometheus Operator:** The standard for metrics collection and alerting.
 *   **Thanos:** Provides long-term storage for Prometheus metrics (deduplication and downsampling). *Depends on MinIO.*
 *   **Grafana:** Visualization for metrics and logs.
 *   **Fluent Bit:** Log collector. Gathers logs from all nodes.
 *   **Loki:** Log database. Stores logs indexed by labels. *Depends on MinIO.*
 *   **OpenTelemetry + Jaeger:** Distributed tracing. Tracks requests across microservices for latency debugging.
-*   **SigNoz:** Full-stack APM (Application Performance Monitoring). Included for redundancy and deep-dive performance analysis.
 *   **OpenCost:** Cloud cost allocation tool to estimate resource consumption.
 *   **Kube-state-metrics:** Exposes raw Kubernetes object metrics.
 *   **K8sGPT:** AI-powered diagnostics tool to explain cluster errors in plain English.
@@ -130,6 +207,8 @@ The cluster consists of four nodes, topologically separated into storage-heavy c
 *   **Longhorn:** Distributed block storage (Phase 3). Configured to strictly use the 1TB HDD on the control plane.
 *   **MinIO:** Object storage. **Required Dependency** for Thanos, Loki, and Velero to function on bare metal.
 *   **Velero:** Backup and disaster recovery. Backs up cluster state and volumes to MinIO.
+*   **Reloader:** Automatically triggers rolling updates when ConfigMaps or Secrets change. Essential for GitOps workflows.
+*   **Descheduler:** Rebalances workloads across nodes to optimize resource utilization on constrained hardware.
 *   **Portainer:** Visual web UI for simplified container management.
 *   **K9s:** Terminal-based UI for real-time cluster interaction.
 
@@ -160,7 +239,7 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 │   └── argocd/                      # Helm scripts to install ArgoCD
 ├── gitops/                          # APPLICATIONS (Declarative)
 │   ├── app-of-apps.yaml             # The Root Application
-│   ├── infrastructure/              # Core Networking & Ingress
+│   ├── infrastructure/              # Core Networking & Gateway API
 │   │   ├── traefik/
 │   │   └── cert-manager/
 │   ├── storage/                     # Storage Dependencies
@@ -168,12 +247,12 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 │   │   └── minio/                   # Object Store for Thanos/Loki/Velero
 │   ├── observability/               # Monitoring Stack
 │   │   ├── kube-prometheus-stack/   # Prom + Alertmanager + Grafana
+│   │   ├── metrics-server/          # Resource metrics for HPA/VPA
 │   │   ├── thanos/
 │   │   ├── loki-stack/
 │   │   ├── fluent-bit/
 │   │   ├── opentelemetry/
 │   │   ├── jaeger/
-│   │   ├── signoz/
 │   │   ├── opencost/
 │   │   ├── k8sgpt/
 │   │   └── kubeshark/
@@ -189,10 +268,12 @@ This structure separates infrastructure provisioning (Ansible), bootstrap script
 │   │   └── argo-image-updater/      # Image Updater
 │   └── management/                  # Ops Tools
 │       ├── velero/
+│       ├── reloader/                # Auto-restart on config changes
+│       ├── descheduler/             # Workload rebalancing
 │       └── portainer/
 └── tests/                           # VALIDATION
     ├── 01_infra_test.sh             # Verifies Nodes, RAM, HDD mounts
-    ├── 02_network_test.sh           # Verifies Cilium L2, DNS, Ingress
+    ├── 02_network_test.sh           # Verifies Cilium L2, DNS, Gateway API
     ├── 03_storage_test.sh           # Verifies PVC creation on HDD
     ├── 04_security_test.sh          # Verifies Kyverno, Falco, Harbor
     ├── 05_observability_test.sh     # Verifies Prom, Loki, K8sGPT
@@ -746,7 +827,45 @@ This complex playbook performs the following:
       loop: "{{ groups['small'] }}"
 ```
 
-### 7.2 Network Verification Script
+### 7.2 Metrics Server
+**File:** `bootstrap/metrics-server/install.sh`
+
+Metrics Server is a cluster-wide aggregator of resource usage data. It is **required** for:
+- `kubectl top nodes` and `kubectl top pods` commands
+- Horizontal Pod Autoscaler (HPA)
+- Vertical Pod Autoscaler (VPA)
+- Kubernetes Dashboard resource displays
+
+```bash
+#!/bin/bash
+set -e
+echo "=== METRICS SERVER BOOTSTRAP ==="
+
+# Install Metrics Server with ARM64 compatibility
+# We use --kubelet-insecure-tls because we're using self-signed certs
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+helm repo update
+
+helm upgrade --install metrics-server metrics-server/metrics-server \
+  --namespace kube-system \
+  --version 3.12.2 \
+  --set args[0]="--kubelet-insecure-tls" \
+  --set args[1]="--kubelet-preferred-address-types=InternalIP" \
+  --set resources.requests.cpu="100m" \
+  --set resources.requests.memory="200Mi" \
+  --set resources.limits.cpu="250m" \
+  --set resources.limits.memory="300Mi"
+
+echo "Waiting for Metrics Server to be ready..."
+kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
+
+echo "=== METRICS SERVER INSTALLED ==="
+echo "Verify with: kubectl top nodes"
+```
+
+*Note: The `--kubelet-insecure-tls` flag is required because kubeadm generates self-signed certificates for the kubelet.*
+
+### 7.3 Network Verification Script
 **File:** `tests/02_network_test.sh`
 
 Checks if all nodes are Ready (Cilium success) and if the Control Plane has the correct storage labels.
@@ -792,7 +911,7 @@ fi
 echo "=== PHASE 2 COMPLETE ==="
 ```
 
-### 7.3 Phase 2 Execution Steps
+### 7.4 Phase 2 Execution Steps
 
 1.  **Run the Cluster Initialization:**
     ```bash
@@ -800,7 +919,13 @@ echo "=== PHASE 2 COMPLETE ==="
     ```
     *Note: This will overwrite `~/.kube/config` on your local machine.*
 
-2.  **Verify Cluster Status:**
+2.  **Install Metrics Server:**
+    ```bash
+    bash bootstrap/metrics-server/install.sh
+    ```
+    *Verify: `kubectl top nodes` should return resource usage for all nodes.*
+
+3.  **Verify Cluster Status:**
     ```bash
     bash tests/02_network_test.sh
     ```
@@ -1027,35 +1152,45 @@ We now move up the stack to the application layer. Instead of managing tools ind
 3.  **Gitea:** The internal Git server where our cluster configuration will live.
 4.  **App of Apps:** A single manifest that tells ArgoCD to install everything else (Observability, Security, etc.).
 
-### 9.1 Ingress Bootstrap (Traefik)
+### 9.1 Gateway API Bootstrap (Traefik)
 **File:** `bootstrap/traefik/install.sh`
 
-This script installs **Traefik v3**. It is configured to:
+This script installs **Traefik v3** as a Gateway API implementation. Gateway API is the successor to Ingress, providing:
+*   **More expressive routing:** Header-based, query-based, and method-based routing
+*   **Role-based configuration:** Infrastructure admins manage Gateways, app teams manage HTTPRoutes
+*   **Portable:** Standard API across all implementations (Traefik, Cilium, NGINX, etc.)
+
+Traefik is configured to:
 *   Request the specific LoadBalancer IP (`192.168.0.210`) from Cilium.
-*   Redirect HTTP to HTTPS globally.
+*   Serve as the Gateway API controller via GatewayClass.
 *   Expose Prometheus metrics for the Observability stack.
 *   Enable JSON access logs for the Logging stack (Loki).
 
 ```bash
 #!/bin/bash
 set -e
-echo "=== PHASE 4a: TRAEFIK BOOTSTRAP ==="
+echo "=== PHASE 4a: TRAEFIK + GATEWAY API BOOTSTRAP ==="
 
-# 1. Add Repo
+# 1. Install Gateway API CRDs (required before Traefik)
+echo "Installing Gateway API CRDs..."
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+
+# 2. Add Repo
 helm repo add traefik https://traefik.github.io/charts
 helm repo update
 
-# 2. Install Traefik v3
-# We use --set-string for annotations to avoid Helm integer parsing errors on port "9100"
+# 3. Install Traefik v3 with Gateway API support
 echo "Deploying Traefik..."
 helm upgrade --install traefik traefik/traefik \
   --namespace traefik-system \
   --create-namespace \
-  --version 37.3.0 \
+  --version 34.0.0 \
   --set service.type=LoadBalancer \
-  --set loadBalancerIP=192.168.0.210 \
+  --set service.spec.loadBalancerIP=192.168.0.210 \
   --set ports.web.nodePort=null \
   --set ports.websecure.nodePort=null \
+  --set providers.kubernetesGateway.enabled=true \
+  --set providers.kubernetesCRD.enabled=true \
   --set providers.kubernetesCRD.allowCrossNamespace=true \
   --set logs.general.level=INFO \
   --set logs.access.enabled=true \
@@ -1071,16 +1206,47 @@ helm upgrade --install traefik traefik/traefik \
   --set resources.limits.memory="300Mi" \
   --wait
 
-echo "=== TRAEFIK INSTALLED ==="
+# 4. Create the shared Gateway resource
+echo "Creating Gateway resource..."
+cat <<EOF | kubectl apply -f -
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: main-gateway
+  namespace: traefik-system
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: wildcard-cert
+            namespace: traefik-system
+EOF
+
+echo "=== TRAEFIK + GATEWAY API INSTALLED ==="
 echo "External IP should be assigned shortly."
+echo "Gateway: main-gateway.traefik-system"
 ```
 
 ### 9.2 GitOps Bootstrap (ArgoCD)
 **File:** `bootstrap/argocd/install.sh`
 
 This script installs **ArgoCD**.
-*   **Insecure Mode:** We disable ArgoCD's internal TLS because Traefik handles SSL termination at the ingress level.
-*   **Ingress:** We automatically apply an Ingress rule so the UI is accessible at `argocd.192.168.0.210.nip.io`.
+*   **Insecure Mode:** We disable ArgoCD's internal TLS because Traefik handles SSL termination at the Gateway level.
+*   **HTTPRoute:** We apply a Gateway API HTTPRoute so the UI is accessible at `argocd.192.168.0.210.nip.io`.
 
 ```bash
 #!/bin/bash
@@ -1092,7 +1258,7 @@ helm repo add argo https://argoproj.github.io/argo-helm
 helm repo update
 
 # 2. Install ArgoCD
-# We use --insecure to offload TLS to Traefik
+# We use --insecure to offload TLS to Traefik Gateway
 echo "Deploying ArgoCD..."
 helm upgrade --install argocd argo/argo-cd \
   --namespace argocd \
@@ -1103,28 +1269,28 @@ helm upgrade --install argocd argo/argo-cd \
   --set global.logging.format=json \
   --wait
 
-# 3. Expose UI via Ingress
-echo "Creating Ingress Rule..."
+# 3. Expose UI via Gateway API HTTPRoute
+echo "Creating HTTPRoute for ArgoCD..."
 cat <<EOF | kubectl apply -f -
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: argocd-server
   namespace: argocd
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
+  parentRefs:
+    - name: main-gateway
+      namespace: traefik-system
+  hostnames:
+    - "argocd.192.168.0.210.nip.io"
   rules:
-  - host: argocd.192.168.0.210.nip.io
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: argocd-server
-            port:
-              number: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argocd-server
+          port: 80
 EOF
 
 echo "=== ARGOCD READY ==="
@@ -1193,18 +1359,13 @@ spec:
             persistence:
               size: 5Gi
 
+        # Disable built-in ingress - we use Gateway API HTTPRoute
         ingress:
-          enabled: true
-          className: traefik
-          hosts:
-            - host: gitea.192.168.0.210.nip.io
-              paths:
-                - path: /
-                  pathType: Prefix
-          annotations:
-            traefik.ingress.kubernetes.io/router.entrypoints: web
+          enabled: false
 
         service:
+          http:
+            type: ClusterIP
           ssh:
             type: LoadBalancer
             port: 2222
@@ -1219,6 +1380,27 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+---
+# HTTPRoute for Gitea (Gateway API)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  parentRefs:
+    - name: main-gateway
+      namespace: traefik-system
+  hostnames:
+    - "gitea.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: gitea-http
+          port: 3000
 ```
 
 ### 9.4 The "App of Apps" Pattern
@@ -1261,13 +1443,9 @@ spec:
             enabled: true
             storageClassName: longhorn
             size: 2Gi
+          # Disable built-in ingress - we use Gateway API HTTPRoute
           ingress:
-            enabled: true
-            ingressClassName: traefik
-            hosts:
-              - grafana.192.168.0.210.nip.io
-            annotations:
-              traefik.ingress.kubernetes.io/router.entrypoints: web
+            enabled: false
 
         alertmanager:
           alertmanagerSpec:
@@ -1331,7 +1509,7 @@ Now that the GitOps engine is running, we utilize it to deploy the infrastructur
 Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. Since we are on bare metal, we self-host **MinIO** to provide this API.
 *   **Storage:** Uses Longhorn (HDD) for the data backing.
 *   **Buckets:** Automatically provisions buckets for `velero`, `loki`, `harbor`, and `thanos`.
-*   **Access:** Exposed via Console Ingress (`minio.192.168.0.210.nip.io`).
+*   **Access:** Exposed via Gateway API HTTPRoute (`minio.192.168.0.210.nip.io`).
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -1378,13 +1556,9 @@ spec:
             policy: none
             purge: false
 
+        # Disable built-in ingress - we use Gateway API HTTPRoute
         ingress:
-          enabled: true
-          ingressClassName: traefik
-          hosts:
-            - minio.192.168.0.210.nip.io
-          annotations:
-            traefik.ingress.kubernetes.io/router.entrypoints: web
+          enabled: false
 
         # Default credentials (CHANGE IN PRODUCTION)
         rootUser: admin
@@ -1398,6 +1572,27 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+---
+# HTTPRoute for MinIO Console (Gateway API)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: minio-console
+  namespace: storage
+spec:
+  parentRefs:
+    - name: main-gateway
+      namespace: traefik-system
+  hostnames:
+    - "minio.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: minio-console
+          port: 9001
 ```
 
 ### 10.2 Certificate Automation (Cert-Manager)
@@ -1665,8 +1860,117 @@ spec:
     syncOptions:
       - CreateNamespace=true
 ```
+
+### 10.8 Configuration Reloader (Reloader)
+**File:** `gitops/management/reloader.yaml`
+
+Reloader watches for changes in ConfigMaps and Secrets, then automatically triggers rolling updates on associated Deployments/StatefulSets. This is essential for GitOps workflows where configuration changes should propagate without manual intervention.
+
+*   **Use Case:** When you update a Grafana dashboard ConfigMap, Reloader restarts Grafana automatically.
+*   **Footprint:** Extremely lightweight (~10MB RAM).
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: reloader
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://stakater.github.io/stakater-charts
+    chart: reloader
+    targetRevision: 1.1.0
+    helm:
+      values: |
+        reloader:
+          watchGlobally: true
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+**Usage:** Annotate your Deployments to enable auto-reload:
+```yaml
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+```
+
+### 10.9 Workload Rebalancing (Descheduler)
+**File:** `gitops/management/descheduler.yaml`
+
+On resource-constrained Raspberry Pi clusters, workloads can become imbalanced over time. The Descheduler periodically evicts pods based on configured strategies, allowing the scheduler to rebalance them across nodes.
+
+*   **Strategies Enabled:**
+    *   `RemoveDuplicates`: Ensures replicas are spread across nodes.
+    *   `LowNodeUtilization`: Moves pods from overloaded nodes to underutilized ones.
+    *   `RemovePodsViolatingNodeAffinity`: Evicts pods that no longer satisfy node affinity rules.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: descheduler
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://kubernetes-sigs.github.io/descheduler
+    chart: descheduler
+    targetRevision: 0.31.0
+    helm:
+      values: |
+        schedule: "*/15 * * * *"  # Run every 15 minutes
+        deschedulerPolicy:
+          strategies:
+            RemoveDuplicates:
+              enabled: true
+            LowNodeUtilization:
+              enabled: true
+              params:
+                nodeResourceUtilizationThresholds:
+                  thresholds:
+                    cpu: 20
+                    memory: 20
+                  targetThresholds:
+                    cpu: 50
+                    memory: 50
+            RemovePodsViolatingNodeAffinity:
+              enabled: true
+              params:
+                nodeAffinityType:
+                  - requiredDuringSchedulingIgnoredDuringExecution
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+*Note: Descheduler only evicts pods; it does not schedule them. The kube-scheduler handles placement after eviction.*
     
-### 10.8 The Root Application (App of Apps)
+### 10.10 The Root Application (App of Apps)
 **File:** `gitops/root-app.yaml`
 
 This is the "One Ring to Rule Them All." Instead of applying the files above individually, we point ArgoCD to this single file (or eventually, to the Git repo containing it). It tells ArgoCD to deploy the entire stack defined in the `gitops/` directory structure.
@@ -1694,7 +1998,8 @@ spec:
       prune: true
       selfHeal: true
 ```
-### 10.9 Security Verification Script
+
+### 10.11 Security Verification Script
 **File:** `tests/04_security_test.sh`
 
 This script verifies that your security policies are enforced and services are accessible.
@@ -1739,7 +2044,7 @@ fi
 echo "=== SECURITY CHECK COMPLETE ==="
 ```
 
-### 10.10 Phase 5 Execution Steps
+### 10.12 Phase 5 Execution Steps
 
 1.  **Commit Files:** Ensure the files above are created in your local `gitops/` folder.
 2.  **Push to Gitea:**
@@ -1908,14 +2213,10 @@ spec:
               memory: 512Mi
         storage:
           type: memory
+        # Disable built-in ingress - we use Gateway API HTTPRoute
         query:
           ingress:
-            enabled: true
-            ingressClassName: traefik
-            hosts:
-              - jaeger.192.168.0.210.nip.io
-            annotations:
-              traefik.ingress.kubernetes.io/router.entrypoints: web
+            enabled: false
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
@@ -1925,6 +2226,27 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+---
+# HTTPRoute for Jaeger UI (Gateway API)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: jaeger-query
+  namespace: monitoring
+spec:
+  parentRefs:
+    - name: main-gateway
+      namespace: traefik-system
+  hostnames:
+    - "jaeger.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: jaeger-query
+          port: 16686
 ```
 
 ### 11.5 Traffic Analysis (Kubeshark)
@@ -1985,13 +2307,9 @@ spec:
           prometheus:
             external:
               url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+        # Disable built-in ingress - we use Gateway API HTTPRoute
         ingress:
-          enabled: true
-          className: traefik
-          hosts:
-            - opencost.192.168.0.210.nip.io
-          annotations:
-            traefik.ingress.kubernetes.io/router.entrypoints: web
+          enabled: false
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
@@ -1999,6 +2317,27 @@ spec:
     automated:
       prune: true
       selfHeal: true
+---
+# HTTPRoute for OpenCost UI (Gateway API)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: opencost
+  namespace: monitoring
+spec:
+  parentRefs:
+    - name: main-gateway
+      namespace: traefik-system
+  hostnames:
+    - "opencost.192.168.0.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: opencost
+          port: 9090
 ```
 
 ### 11.7 AI Diagnostics (K8sGPT)
@@ -2030,65 +2369,7 @@ spec:
       - CreateNamespace=true
 ```
 
-### 11.8 Full Stack APM (SigNoz)
-**File:** `gitops/observability/signoz.yaml`
-
-SigNoz is an open-source alternative to Datadog. It provides traces, metrics, and logs in a single UI.
-*   **Warning:** SigNoz is resource-heavy (ClickHouse database). We configure it with strict limits to fit on the Pi cluster. It serves as a redundant learning tool alongside Prometheus.
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: signoz
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: https://charts.signoz.io
-    chart: signoz
-    targetRevision: 0.36.0
-    helm:
-      values: |
-        global:
-          storageClass: longhorn
-        
-        # Limit ClickHouse resource usage
-        clickhouse:
-          resources:
-            limits:
-              memory: 1Gi
-              cpu: 1000m
-            requests:
-              memory: 512Mi
-              cpu: 500m
-        
-        queryService:
-          resources:
-            limits:
-              memory: 512Mi
-        
-        frontend:
-          ingress:
-            enabled: true
-            className: traefik
-            hosts:
-              - host: signoz.192.168.0.210.nip.io
-                paths:
-                  - path: /
-                    pathType: Prefix
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: signoz
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
-```
-
-### 11.9 Observability Verification Script
+### 11.8 Observability Verification Script
 **File:** `tests/05_observability_test.sh`
 
 This script ensures data is flowing through your pipelines.
@@ -2133,7 +2414,7 @@ kubectl get pods -n observability -l app.kubernetes.io/name=k8sgpt-operator | gr
 echo "=== OBSERVABILITY CHECK COMPLETE ==="
 ```
 
-### 11.10 Phase 6 Execution Steps
+### 11.9 Phase 6 Execution Steps
 
 1.  **Commit:** Save the YAML files to `gitops/observability/` locally.
     ```bash
@@ -2153,10 +2434,6 @@ echo "=== OBSERVABILITY CHECK COMPLETE ==="
 3.  **Verify OpenCost:**
     *   Open `http://opencost.192.168.0.210.nip.io`.
     *   You should see a breakdown of costs per namespace.
-
-4.  **Verify SigNoz:**
-    *   Open `http://signoz.192.168.0.210.nip.io`.
-    *   Create an admin account and view the "Services" dashboard.
 
 ## 12. Phase 7: CI/CD & Developer Experience
 
@@ -2202,7 +2479,7 @@ spec:
 **File:** `gitops/cicd/argo-workflows.yaml`
 
 Argo Workflows is a Kubernetes-native workflow engine. It creates Pods to run your build steps (clone, build, push, test).
-*   **UI:** Exposed via Ingress.
+*   **UI:** Exposed via Gateway API HTTPRoute.
 *   **Persistence:** Uses MinIO (S3) to store build artifacts (logs, compiled binaries).
 *   **Executor:** Uses `pns` (Process Namespace Sharing) for efficiency on Raspberry Pi.
 
@@ -2221,15 +2498,11 @@ spec:
     helm:
       values: |
         server:
-          # Insecure mode handled by Traefik
+          # Insecure mode handled by Traefik Gateway
           extraArgs: ["--auth-mode=server"]
+          # Disable built-in ingress - we use Gateway API HTTPRoute
           ingress:
-            enabled: true
-            ingressClassName: traefik
-            hosts:
-              - workflows.192.168.0.210.nip.io
-            annotations:
-              traefik.ingress.kubernetes.io/router.entrypoints: web
+            enabled: false
         
         controller:
           workflowDefaults:
@@ -2573,6 +2846,7 @@ You should now have the following files created in your repository folder. **Thi
 ### 3. Bootstrap (Shell Scripts)
 *   `bootstrap/cilium/install.sh` *(Embedded in playbook, but good to have standalone)*
 *   `bootstrap/longhorn/install.sh`
+*   `bootstrap/metrics-server/install.sh`
 *   `bootstrap/traefik/install.sh`
 *   `bootstrap/argocd/install.sh`
 
@@ -2585,13 +2859,14 @@ You should now have the following files created in your repository folder. **Thi
 *   `gitops/observability/loki-stack.yaml`
 *   `gitops/observability/opencost.yaml`
 *   `gitops/observability/k8sgpt.yaml`
-*   `gitops/observability/signoz.yaml`
 *   `gitops/security/harbor.yaml`
 *   `gitops/security/trivy-operator.yaml`
 *   `gitops/cicd/argo-image-updater.yaml`
 *   `gitops/cicd/argo-workflows.yaml`
 *   `gitops/cicd/argo-events.yaml`
 *   `gitops/management/velero.yaml`
+*   `gitops/management/reloader.yaml`
+*   `gitops/management/descheduler.yaml`
 
 ### 5. Tests (Validation)
 *   `tests/01_infra_test.sh`

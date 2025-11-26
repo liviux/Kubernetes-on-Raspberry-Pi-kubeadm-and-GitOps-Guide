@@ -1,0 +1,55 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: descheduler
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://kubernetes-sigs.github.io/descheduler
+    chart: descheduler
+    targetRevision: 0.31.0
+    helm:
+      values: |
+        # Run every 15 minutes to rebalance workloads
+        schedule: "*/15 * * * *"
+        
+        deschedulerPolicy:
+          strategies:
+            # Ensure pod replicas are spread across nodes
+            RemoveDuplicates:
+              enabled: true
+            
+            # Move pods from overloaded to underutilized nodes
+            LowNodeUtilization:
+              enabled: true
+              params:
+                nodeResourceUtilizationThresholds:
+                  thresholds:
+                    cpu: 20
+                    memory: 20
+                  targetThresholds:
+                    cpu: 50
+                    memory: 50
+            
+            # Evict pods that no longer satisfy node affinity
+            RemovePodsViolatingNodeAffinity:
+              enabled: true
+              params:
+                nodeAffinityType:
+                  - requiredDuringSchedulingIgnoredDuringExecution
+        
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
