@@ -200,6 +200,7 @@ flowchart TB
             subgraph GitOps["🔄 GitOps Engine"]
                 ARGOCD["🐙 ArgoCD"]
                 IMGUPD["🖼️ Image Updater"]
+                GITEA[("🍵 Gitea<br/>GitOps Source")]
             end
             
             subgraph Observability["📊 Observability"]
@@ -233,10 +234,6 @@ flowchart TB
                 DESCHEDULER["⚖️ Descheduler"]
             end
         end
-    end
-    
-    subgraph GitRepo["📂 Source Control"]
-        GITEA[("🍵 Gitea<br/>GitOps Source")]
     end
 
     %% Traffic Flow
@@ -299,10 +296,10 @@ flowchart TB
     class W1,W2,W3 worker
     class HDD,LONGHORN,MINIO storage
     class CILIUM,TRAEFIK,GWAPI network
-    class ARGOCD,IMGUPD gitops
+    class ARGOCD,IMGUPD,GITEA gitops
     class PROM,THANOS,GRAFANA,LOKI,FLUENTBIT,OTEL,JAEGER,METRICS observe
     class CERTMGR,HARBOR,OPENBAO,KYVERNO,FALCO,TRIVY security
-    class USER,ROUTER,GITEA external
+    class USER,ROUTER external
 ```
 
 ### Deployment Sequence Diagram
