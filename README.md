@@ -758,130 +758,417 @@ With constrained hardware, careful resource allocation is critical. Below is the
 
 ## 3. Repository Directory Structure
 
-This structure separates infrastructure provisioning (Ansible), bootstrap scripts, and the declarative Application state (GitOps).
+This structure follows the **separation of concerns** principle:
+- **Imperative** (Ansible): One-time infrastructure provisioning
+- **Bootstrap** (Helm scripts): Pre-GitOps dependencies that ArgoCD needs to exist first
+- **Declarative** (GitOps): Everything managed by ArgoCD after bootstrap
 
 ```text
 .
-├── README.md                        # This guide
-├── ansible/                         # INFRASTRUCTURE (Imperative)
-│   ├── hosts                        # Inventory file defined below
-│   ├── ansible.cfg                  # Local Ansible config
-│   ├── playbooks/
-│   │   ├── 01_node_prep.yml         # OS config, Cgroups, Kernel modules, Dependencies
-│   │   ├── 02_k8s_binaries.yml      # Installing Kubeadm/Kubelet/Kubectl/Helm
-│   │   ├── 03_cluster_init.yml      # Bootstrap CP, Join Workers, Taints, Labels
-│   │   ├── 04_storage_mount.yml     # Formats and mounts HDD on CP
-│   │   └── 05_reset_cluster.yml     # Tear down script (for reproducibility)
-├── bootstrap/                       # BOOTSTRAP (Pre-GitOps)
-│   ├── cilium/                      # Helm scripts for CNI & L2 Announcements
-│   ├── longhorn/                    # Helm scripts for Storage (HDD constraints)
-│   └── argocd/                      # Helm scripts to install ArgoCD
-├── gitops/                          # APPLICATIONS (Declarative)
-│   ├── app-of-apps.yaml             # The Root Application
-│   ├── infrastructure/              # Core Networking & Gateway API
-│   │   ├── traefik/
-│   │   └── cert-manager/
-│   ├── storage/                     # Storage Dependencies
-│   │   ├── longhorn-config/         # Post-install configuration
-│   │   └── minio/                   # Object Store for Thanos/Loki/Velero
-│   ├── observability/               # Monitoring Stack
-│   │   ├── kube-prometheus-stack/   # Prom + Alertmanager + Grafana
-│   │   ├── metrics-server/          # Resource metrics for HPA/VPA
-│   │   ├── thanos/
-│   │   ├── loki-stack/
-│   │   ├── fluent-bit/
-│   │   ├── opentelemetry/
-│   │   ├── jaeger/
-│   │   ├── opencost/
-│   │   ├── k8sgpt/
-│   │   └── kubeshark/
-│   ├── security/                    # Security Stack
-│   │   ├── harbor/
-│   │   ├── openbao/
-│   │   ├── falco/
-│   │   ├── kyverno/
-│   │   └── trivy-operator/
-│   ├── cicd/                        # Build Pipelines
-│   │   ├── argo-workflows/          # CI Engine
-│   │   ├── argo-events/             # Webhook Events
-│   │   └── argo-image-updater/      # Image Updater
-│   └── management/                  # Ops Tools
-│       ├── velero/
-│       ├── reloader/                # Auto-restart on config changes
-│       ├── descheduler/             # Workload rebalancing
-│       └── portainer/
-└── tests/                           # VALIDATION
-    ├── 01_infra_test.sh             # Verifies Nodes, RAM, HDD mounts
-    ├── 02_network_test.sh           # Verifies Cilium L2, DNS, Gateway API
-    ├── 03_storage_test.sh           # Verifies PVC creation on HDD
-    ├── 04_security_test.sh          # Verifies Kyverno, Falco, Harbor
-    ├── 05_observability_test.sh     # Verifies Prom, Loki, K8sGPT
-    └── 06_cicd_test.sh              # Verifies Argo Workflows
+├── README.md                            # This comprehensive guide
+│
+├── ansible/                             # ══════════════════════════════════════
+│   │                                    # INFRASTRUCTURE PROVISIONING (Imperative)
+│   │                                    # Run once to prepare bare-metal nodes
+│   │                                    # ══════════════════════════════════════
+│   ├── hosts                            # Inventory: [big]=CP, [small]=workers
+│   ├── ansible.cfg                      # SSH settings, privilege escalation
+│   └── playbooks/
+│       ├── 01_node_prep.yml             # OS: swap, cgroups, kernel modules, containerd
+│       ├── 02_k8s_binaries.yml          # Install: kubeadm, kubelet, kubectl, helm, cilium-cli
+│       ├── 03_cluster_init.yml          # Bootstrap: kubeadm init/join, Cilium CNI, labels
+│       ├── 04_storage_mount.yml         # HDD: format ext4, mount /var/lib/longhorn, fstab
+│       └── 05_reset_cluster.yml         # Nuclear option: kubeadm reset, cleanup everything
+│
+├── bootstrap/                           # ══════════════════════════════════════
+│   │                                    # PRE-GITOPS DEPENDENCIES (Manual Helm)
+│   │                                    # Components ArgoCD needs before it can run
+│   │                                    # ══════════════════════════════════════
+│   ├── cilium/                          # CNI: eBPF networking, L2 LoadBalancer pool
+│   │   └── install.sh                   # → helm install cilium (skip-kube-proxy mode)
+│   ├── longhorn/                        # Storage: Block storage with HDD-only affinity
+│   │   └── install.sh                   # → helm install longhorn (replica=1, CP node)
+│   ├── metrics-server/                  # Metrics: Required for kubectl top, HPA, VPA
+│   │   └── install.sh                   # → helm install metrics-server (ARM64 flags)
+│   ├── traefik/                         # Gateway: Traefik + Gateway API CRDs
+│   │   └── install.sh                   # → kubectl apply CRDs, helm install traefik
+│   └── argocd/                          # GitOps: ArgoCD server + controllers
+│       └── install.sh                   # → helm install argocd (HA disabled for RPi)
+│
+├── gitops/                              # ══════════════════════════════════════
+│   │                                    # APPLICATIONS (Declarative GitOps)
+│   │                                    # Everything below is managed by ArgoCD
+│   │                                    # Sync-waves control deployment order
+│   │                                    # ══════════════════════════════════════
+│   ├── root-app.yaml                    # Points ArgoCD to this gitops/ directory
+│   ├── app-of-apps.yaml                 # Parent app that deploys all child apps
+│   │
+│   ├── infrastructure/                  # ──────────────────────────────────────
+│   │   │                                # LAYER 1: Core cluster infrastructure
+│   │   │                                # sync-wave: -5 (deploys first)
+│   │   │                                # ──────────────────────────────────────
+│   │   ├── cert-manager.yaml            # TLS: Let's Encrypt automation, ClusterIssuers
+│   │   └── traefik.yaml                 # Gateway: HTTPRoute definitions (if GitOps-managed)
+│   │
+│   ├── storage/                         # ──────────────────────────────────────
+│   │   │                                # LAYER 2: Persistent storage layer
+│   │   │                                # sync-wave: -4 (before apps need PVCs)
+│   │   │                                # ──────────────────────────────────────
+│   │   └── minio.yaml                   # S3: Object storage for Thanos/Loki/Velero
+│   │                                    #     PVC on Longhorn, credentials in Secret
+│   │
+│   ├── services/                        # ──────────────────────────────────────
+│   │   │                                # LAYER 3: Platform services
+│   │   │                                # sync-wave: -3
+│   │   │                                # ──────────────────────────────────────
+│   │   └── gitea.yaml                   # Git: Self-hosted repo, GitOps source of truth
+│   │                                    #     SQLite DB, PVC for repos, HTTPRoute
+│   │
+│   ├── observability/                   # ──────────────────────────────────────
+│   │   │                                # LAYER 4: Monitoring & debugging
+│   │   │                                # sync-wave: 0 (default)
+│   │   │                                # ──────────────────────────────────────
+│   │   ├── metrics-server.yaml          # Metrics: kubectl top, HPA, VPA support
+│   │   ├── loki-stack.yaml              # Logs: Loki + Promtail, S3 backend (MinIO)
+│   │   ├── fluent-bit.yaml              # Logs: DaemonSet collector → Loki
+│   │   ├── opentelemetry.yaml           # Traces: OTel Collector, OTLP receiver
+│   │   ├── jaeger.yaml                  # Traces: Jaeger UI + storage, HTTPRoute
+│   │   ├── opencost.yaml                # Cost: Resource cost estimation, Prom integration
+│   │   ├── k8sgpt.yaml                  # AI: GPT-powered cluster diagnostics
+│   │   └── kubeshark.yaml               # Debug: API traffic capture (Wireshark for K8s)
+│   │                                    #        ⚠️ High memory - disable when not needed
+│   │
+│   ├── security/                        # ──────────────────────────────────────
+│   │   │                                # LAYER 5: Security & compliance
+│   │   │                                # sync-wave: 1
+│   │   │                                # ──────────────────────────────────────
+│   │   ├── harbor.yaml                  # Registry: Private images, vulnerability DB
+│   │   │                                #           PVC for images, Trivy scanner
+│   │   ├── openbao.yaml                 # Secrets: Vault fork, KV secrets engine
+│   │   │                                #          Auto-unseal, K8s auth method
+│   │   ├── falco.yaml                   # Runtime: Syscall monitoring, threat detection
+│   │   │                                #          DaemonSet, kernel module or eBPF
+│   │   ├── kyverno.yaml                 # Policy: Admission controller, mutations
+│   │   │                                #          "Deny privileged", "Require labels"
+│   │   └── trivy-operator.yaml          # Scanner: Continuous image vulnerability scans
+│   │                                    #          CRDs: VulnerabilityReport, ConfigAudit
+│   │
+│   ├── cicd/                            # ──────────────────────────────────────
+│   │   │                                # LAYER 6: CI/CD pipelines
+│   │   │                                # sync-wave: 2
+│   │   │                                # ──────────────────────────────────────
+│   │   ├── argo-workflows.yaml          # CI: Kubernetes-native pipelines
+│   │   │                                #     WorkflowTemplates, Artifact storage
+│   │   ├── argo-events.yaml             # Events: Webhook triggers, EventSources
+│   │   │                                #         GitHub/Gitea webhooks → Workflows
+│   │   └── argo-image-updater.yaml      # CD: Watch registries, auto-bump image tags
+│   │                                    #     Annotations on Apps, write-back to Git
+│   │
+│   └── management/                      # ──────────────────────────────────────
+│       │                                # LAYER 7: Operations & maintenance
+│       │                                # sync-wave: 3
+│       │                                # ──────────────────────────────────────
+│       ├── velero.yaml                  # Backup: Cluster state + PVCs → MinIO
+│       │                                #         Scheduled backups, disaster recovery
+│       ├── reloader.yaml                # GitOps: Watch ConfigMaps/Secrets, rolling restart
+│       │                                #         Annotations trigger pod recreation
+│       ├── descheduler.yaml             # Balance: Evict pods for better distribution
+│       │                                #         LowNodeUtilization, RemoveDuplicates
+│       └── portainer.yaml               # UI: Visual container management
+│                                        #     Web dashboard, HTTPRoute
+│
+└── tests/                               # ══════════════════════════════════════
+    │                                    # VALIDATION SCRIPTS
+    │                                    # Run after each phase to verify success
+    │                                    # ══════════════════════════════════════
+    ├── 01_infra_test.sh                 # Phase 1: Node count, RAM, swap disabled
+    ├── 02_network_test.sh               # Phase 2: Cilium status, L2 pool, CoreDNS
+    ├── 03_storage_test.sh               # Phase 3: PVC create/delete, HDD mount
+    ├── 04_security_test.sh              # Phase 5: Kyverno policies, Falco rules
+    ├── 05_observability_test.sh         # Phase 6: Prometheus up, Loki query, Grafana
+    └── 06_cicd_test.sh                  # Phase 7: Workflow submit, Event trigger
 ```
 
 ---
 
 ## 4. Prerequisites & Initial Provisioning
 
-Before executing Ansible playbooks, the physical devices must be provisioned and network-accessible.
+Before executing Ansible playbooks, the physical devices must be provisioned and network-accessible. This section covers the one-time manual setup required before automation takes over.
+
+### Hardware Checklist
+
+Verify you have the following hardware ready:
+
+| Item | Quantity | Specification | Purpose |
+|------|----------|---------------|---------|
+| Raspberry Pi 4 | 4 | 1x 8GB, 3x 4GB | Cluster nodes |
+| MicroSD Cards | 4 | 1x 128GB, 3x 64GB (Class A2 recommended) | OS boot drives |
+| USB HDD/SSD | 1 | 1TB minimum | Persistent storage |
+| Ethernet Cables | 4 | Cat5e or better | Network connectivity |
+| USB-C Power Supplies | 4 | 5V 3A (15W) official recommended | Stable power |
+| Network Switch | 1 | Gigabit, 5+ ports | Local connectivity |
+| Heatsinks/Cooling | 4 | Passive or active | Thermal management |
+
+> ⚠️ **Power Warning:** Insufficient power causes random crashes. Use official Raspberry Pi power supplies or verified 3A USB-C adapters. Avoid USB hubs for power.
+
+### Software Prerequisites (Management Machine)
+
+Install these tools on your local machine (Windows/WSL, Mac, or Linux):
+
+```bash
+# Essential tools
+sudo apt update && sudo apt install -y \
+    ansible \           # Infrastructure automation
+    openssh-client \    # SSH connectivity
+    curl \              # HTTP requests
+    git                 # Version control
+
+# Kubernetes tools (install latest versions)
+# kubectl - Kubernetes CLI
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+# helm - Package manager
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# k9s - Terminal UI (optional but recommended)
+curl -sS https://webinstall.dev/k9s | bash
+```
+
+**Verify installations:**
+
+```bash
+ansible --version    # Should show 2.15+
+kubectl version --client
+helm version
+```
 
 ### OS & Network Setup
-1.  **Flash OS:** Use **Raspberry Pi Imager** to flash **Ubuntu Server 25.10** to SD cards.
-    *   *Why 25.10?* Selected for the latest kernel support optimized for RPi 4.
-2.  **User Configuration:**
-    *   Hostname: `rpi4-1` through `rpi4-4`.
-    *   User: `user` (or your preferred username).
-    *   SSH: Enabled with public key authentication.
-3.  **Network Configuration:**
-    *   Identify IPs via your home router.
-    *   **Address Reservation:** Configure Static DHCP leases on the router to ensure IPs remain persistent (e.g., `192.168.0.201` - `rpi4-1`).
-    *   **Port Forwarding/DDNS:** Configure DDNS and port forwarding if external access is required (optional). Unless you have Static IPv4 and then you can have public access easier.
+
+#### Step 1: Flash Ubuntu Server
+
+Use **Raspberry Pi Imager** (download from [raspberrypi.com](https://www.raspberrypi.com/software/)) to flash **Ubuntu Server 24.04 LTS** or **25.10** to each SD card.
+
+> 💡 **Why Ubuntu Server?** Lightweight, excellent ARM64 support, long-term security updates, and broad community documentation.
+
+**Imager Settings (⚙️ Advanced Options):**
+
+| Setting | Control Plane (rpi4-1) | Workers (rpi4-2/3/4) |
+|---------|------------------------|----------------------|
+| Hostname | `rpi4-1` | `rpi4-2`, `rpi4-3`, `rpi4-4` |
+| Username | `user` | `user` |
+| Password | Set a strong password | Same password |
+| SSH | ✅ Enable | ✅ Enable |
+| SSH Auth | Public-key only | Public-key only |
+| WiFi | ❌ Skip (use Ethernet) | ❌ Skip |
+| Locale | Your timezone | Same |
+
+#### Step 2: Generate SSH Keys
+
+If you don't have an SSH key pair, generate one:
+
+```bash
+# Generate a 4096-bit RSA key (no passphrase for Ansible automation)
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/rpi-cluster -N ""
+
+# View your public key (copy this to Raspberry Pi Imager)
+cat ~/.ssh/rpi-cluster.pub
+```
+
+#### Step 3: First Boot & IP Discovery
+
+1. Insert SD cards into each Pi
+2. Connect Ethernet cables to your network switch
+3. Power on all Pis
+4. Wait 2-3 minutes for first boot to complete
+
+**Find IP addresses** using one of these methods:
+
+```bash
+# Method 1: Check your router's DHCP lease table (web UI)
+# Usually at http://192.168.0.1 or http://192.168.1.1
+
+# Method 2: Network scan (requires nmap)
+nmap -sn 192.168.0.0/24 | grep -B2 "Raspberry"
+
+# Method 3: mDNS/Bonjour (if enabled)
+ping rpi4-1.local
+```
+
+#### Step 4: Configure Static DHCP Leases
+
+In your router's admin panel, reserve these IPs:
+
+| Hostname | MAC Address | Reserved IP |
+|----------|-------------|-------------|
+| rpi4-1 | (from router) | 192.168.0.201 |
+| rpi4-2 | (from router) | 192.168.0.202 |
+| rpi4-3 | (from router) | 192.168.0.203 |
+| rpi4-4 | (from router) | 192.168.0.204 |
+
+> 📝 **Note:** Write down the MAC addresses from your router's DHCP table—you'll need them for the static reservations.
+
+#### Step 5: Port Forwarding (Optional - External Access)
+
+If you want to access services from the internet:
+
+| Service | External Port | Internal IP | Internal Port |
+|---------|---------------|-------------|---------------|
+| HTTPS (Traefik) | 443 | 192.168.0.210 | 443 |
+| HTTP (Traefik) | 80 | 192.168.0.210 | 80 |
+| SSH (optional) | 2222 | 192.168.0.201 | 22 |
+
+> 🔐 **Security:** Consider using a VPN (WireGuard/Tailscale) instead of direct port forwarding for SSH access.
 
 ### Local Client Configuration
-To simplify management, map the IPs to hostnames on your local management machine.
 
-**Windows:** `C:\Windows\System32\drivers\etc\hosts`. (If using WSL, you must edit the hosts file on Windows).
-**Linux/Mac:** `/etc/hosts`
+Add hostname mappings to your local machine for easier access:
+
+**Windows:** Edit `C:\Windows\System32\drivers\etc\hosts` as Administrator
+
+**Linux/Mac:** Edit `/etc/hosts` with sudo
+
+**WSL Users:** Edit the Windows hosts file (WSL inherits it)
 
 ```text
-192.168.0.201 rpi4-1
-192.168.0.202 rpi4-2
-192.168.0.203 rpi4-3
-192.168.0.204 rpi4-4
+# Raspberry Pi Kubernetes Cluster
+192.168.0.201 rpi4-1 rpi4-1.local
+192.168.0.202 rpi4-2 rpi4-2.local
+192.168.0.203 rpi4-3 rpi4-3.local
+192.168.0.204 rpi4-4 rpi4-4.local
+
+# Cluster Services (LoadBalancer IPs)
+192.168.0.210 traefik.local argocd.local gitea.local grafana.local
+```
+
+**Verify SSH connectivity:**
+
+```bash
+# Test each node (should connect without password prompt)
+ssh -i ~/.ssh/rpi-cluster user@rpi4-1 "hostname && cat /etc/os-release | grep PRETTY"
+ssh -i ~/.ssh/rpi-cluster user@rpi4-2 "hostname"
+ssh -i ~/.ssh/rpi-cluster user@rpi4-3 "hostname"
+ssh -i ~/.ssh/rpi-cluster user@rpi4-4 "hostname"
 ```
 
 ### Ansible Configuration
-We use Ansible to drive the infrastructure state.
+
+Ansible automates all node preparation and cluster bootstrapping.
+
+#### Inventory File
 
 **File:** `ansible/hosts`
+
 ```ini
+# ============================================================================
+# KUBERNETES CLUSTER INVENTORY
+# ============================================================================
+
 [big]
-# Control Plane (8GB RAM) - The Storage Node
+# Control Plane Node - 8GB RAM, 1TB HDD
+# Runs: API Server, etcd, Scheduler, Controller Manager, Longhorn, MinIO
 rpi4-1
 
 [small]
-# Worker Nodes (4GB RAM) - Compute Only
+# Worker Nodes - 4GB RAM each
+# Runs: Application workloads (stateless only, no PVCs)
 rpi4-2
 rpi4-3
 rpi4-4
 
+[cluster:children]
+big
+small
+
+# ============================================================================
+# CONNECTION SETTINGS
+# ============================================================================
 [all:vars]
-# Connection Settings
 ansible_connection=ssh
 ansible_user=user
-ansible_ssh_private_key_file=/home/user/.ssh/rsa-4096/key-nopassphrase.pem
-ansible_python_interpreter=/usr/bin/python3.13
+ansible_ssh_private_key_file=~/.ssh/rpi-cluster
+ansible_python_interpreter=/usr/bin/python3
 
-# Environment Variables
+# Reduce SSH connection time
+ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+# ============================================================================
+# KUBERNETES CONFIGURATION
+# ============================================================================
 k8s_version=1.31
-# Ensure this IP is within your router's subnet (192.168.0.x)
-loadbalancer_ip=192.168.0.210 
+pod_network_cidr=10.244.0.0/16
+service_cidr=10.96.0.0/12
+
+# ============================================================================
+# NETWORK CONFIGURATION
+# ============================================================================
+# LoadBalancer IP pool for Cilium L2 announcements
+# Must be in your home network subnet and NOT used by DHCP
+loadbalancer_ip_start=192.168.0.210
+loadbalancer_ip_end=192.168.0.220
+
+# Primary LoadBalancer IP (Traefik Gateway)
+loadbalancer_ip=192.168.0.210
+
+# ============================================================================
+# STORAGE CONFIGURATION
+# ============================================================================
+# HDD device on control plane (verify with 'lsblk' after connecting HDD)
+hdd_device=/dev/sda
+longhorn_data_path=/var/lib/longhorn
 ```
 
-*Verification:*
-Run the following to confirm connectivity before proceeding:
+#### Ansible Configuration File
+
+**File:** `ansible/ansible.cfg`
+
+```ini
+[defaults]
+inventory = hosts
+host_key_checking = False
+retry_files_enabled = False
+gathering = smart
+fact_caching = jsonfile
+fact_caching_connection = /tmp/ansible_facts
+fact_caching_timeout = 3600
+
+# Performance tuning
+forks = 10
+pipelining = True
+
+# Output formatting
+stdout_callback = yaml
+callback_whitelist = profile_tasks
+
+[ssh_connection]
+ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
+pipelining = True
+```
+
+#### Verification Commands
+
 ```bash
-ansible -i ansible/hosts all -m ping
+# Navigate to ansible directory
+cd ansible/
+
+# Test connectivity to all nodes
+ansible -i hosts all -m ping
+
+# Expected output:
+# rpi4-1 | SUCCESS => { "ping": "pong" }
+# rpi4-2 | SUCCESS => { "ping": "pong" }
+# rpi4-3 | SUCCESS => { "ping": "pong" }
+# rpi4-4 | SUCCESS => { "ping": "pong" }
+
+# Gather facts (verify hardware)
+ansible -i hosts all -m setup -a "filter=ansible_memtotal_mb"
+
+# Expected: rpi4-1 ~8000MB, others ~4000MB
+
+# Check disk on control plane
+ansible -i hosts big -m shell -a "lsblk"
+
+# Should show /dev/sda (your HDD)
 ```
 
 ---
