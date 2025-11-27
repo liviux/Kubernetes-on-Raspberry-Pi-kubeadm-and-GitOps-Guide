@@ -608,9 +608,8 @@ With constrained hardware, careful resource allocation is critical. Below is the
 |------|---------|---------|----------------|
 | **Cilium** | 1.18.x | CNI + Load Balancing | eBPF performance, replaces kube-proxy, L2 announcements |
 | **Hubble** | (embedded) | Network observability | Service maps, flow visualization |
+| **Tetragon** | (embedded) | eBPF runtime security | Kernel-level process & network monitoring |
 | **Traefik** | 3.x | Gateway API implementation | Native Gateway API support, lightweight |
-
-> **Note:** Tetragon (Cilium's eBPF runtime security) is available but not enabled by default to conserve resources. Enable via Cilium Helm values if needed.
 
 **Gateway API vs Ingress:**
 ```text
@@ -690,6 +689,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 | **OpenBao** | Secrets management (Vault fork) | Application runtime |
 | **Trivy Operator** | Vulnerability scanning | CI/CD + continuous |
 | **OWASP ZAP** ⁴ | Dynamic security testing | CI/CD pipelines |
+| **Tetragon** | eBPF runtime security | Kernel syscalls (process, network, file) |
 | **Falco** | Runtime threat detection | Kernel syscalls |
 | **Kyverno** | Policy enforcement | API admission |
 
@@ -713,8 +713,9 @@ With constrained hardware, careful resource allocation is critical. Below is the
 │                              │                                      │
 │  Layer 3: RUN TIME           ▼                                      │
 │  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  Falco (Syscall Monitor) ──► Alert on shell in container    │   │
-│  │  Cilium Network Policies ──► Block unauthorized traffic     │   │
+│  │  Tetragon (eBPF Security) ──► Process/file/network tracing  │   │
+│  │  Falco (Syscall Monitor)  ──► Alert on shell in container   │   │
+│  │  Cilium Network Policies  ──► Block unauthorized traffic    │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -1669,6 +1670,7 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
 | `kubectl` | All nodes | CLI for cluster interaction |
 | `helm` | Control plane only | Package manager for K8s apps |
 | `cilium-cli` | Control plane only | CNI management tool |
+| `tetra` | Control plane only | Tetragon CLI for eBPF runtime security |
 | `etcd-client` | Control plane only | Direct etcd access for debugging |
 | `k9s` | Control plane only | Terminal UI for cluster management |
 
@@ -1890,6 +1892,30 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
               - k9s
           when: k9s_check.rc != 0
 
+        # Tetragon CLI - eBPF runtime security management
+        - name: Check if Tetragon CLI is installed
+          ansible.builtin.command: tetra version
+          register: tetra_check
+          changed_when: false
+          failed_when: false
+
+        - name: Get latest Tetragon CLI version
+          ansible.builtin.uri:
+            url: https://api.github.com/repos/cilium/tetragon/releases/latest
+            return_content: true
+          register: tetragon_release
+          when: tetra_check.rc != 0
+
+        - name: Download and install Tetragon CLI
+          ansible.builtin.unarchive:
+            src: "https://github.com/cilium/tetragon/releases/download/{{ tetragon_release.json.tag_name }}/tetra-linux-arm64.tar.gz"
+            dest: /usr/local/bin
+            remote_src: true
+            mode: '0755'
+            include:
+              - tetra
+          when: tetra_check.rc != 0
+
     # -----------------------------------------------------------------------
     # BASH COMPLETION (ALL NODES)
     # -----------------------------------------------------------------------
@@ -1942,6 +1968,13 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
       when: "'big' in group_names"
       tags: [validate]
 
+    - name: Verify Tetragon CLI installation (control plane)
+      ansible.builtin.command: tetra version
+      register: tetra_version_check
+      changed_when: false
+      when: "'big' in group_names"
+      tags: [validate]
+
     - name: Display installation summary
       ansible.builtin.debug:
         msg: |
@@ -1954,6 +1987,7 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
           {% if 'big' in group_names %}
           helm:    {{ helm_version_check.stdout | default('installed') }}
           cilium:  {{ cilium_version_check.stdout_lines[0] | default('installed') }}
+          tetra:   {{ tetra_version_check.stdout | default('installed') }}
           {% endif %}
           
           ⚡ Ready for cluster initialization (Phase 2)
@@ -2367,7 +2401,7 @@ This playbook orchestrates the complete cluster bootstrap in three phases:
         dest: /root/.kube/config
         remote_src: yes
 
-    - name: Install Cilium (Network & L2 Announcements)
+    - name: Install Cilium (Network, L2 Announcements & Tetragon)
       shell: |
         helm repo add cilium https://helm.cilium.io/
         helm repo update
@@ -2386,6 +2420,8 @@ This playbook orchestrates the complete cluster bootstrap in three phases:
            --set hubble.ui.enabled=true \
            --set hubble.ui.service.type=NodePort \
            --set l2announcements.enabled=true \
+           --set tetragon.enabled=true \
+           --set tetragon.serviceAccount.create=true \
            --set k8sClientRateLimit.qps=50 \
            --set k8sClientRateLimit.burst=100
       environment:

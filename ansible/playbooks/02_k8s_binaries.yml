@@ -210,6 +210,30 @@
               - k9s
           when: k9s_check.rc != 0
 
+        # Tetragon CLI - eBPF runtime security management
+        - name: Check if Tetragon CLI is installed
+          ansible.builtin.command: tetra version
+          register: tetra_check
+          changed_when: false
+          failed_when: false
+
+        - name: Get latest Tetragon CLI version
+          ansible.builtin.uri:
+            url: https://api.github.com/repos/cilium/tetragon/releases/latest
+            return_content: true
+          register: tetragon_release
+          when: tetra_check.rc != 0
+
+        - name: Download and install Tetragon CLI
+          ansible.builtin.unarchive:
+            src: "https://github.com/cilium/tetragon/releases/download/{{ tetragon_release.json.tag_name }}/tetra-linux-arm64.tar.gz"
+            dest: /usr/local/bin
+            remote_src: true
+            mode: '0755'
+            include:
+              - tetra
+          when: tetra_check.rc != 0
+
     # -----------------------------------------------------------------------
     # BASH COMPLETION (ALL NODES)
     # -----------------------------------------------------------------------
@@ -262,6 +286,13 @@
       when: "'big' in group_names"
       tags: [validate]
 
+    - name: Verify Tetragon CLI installation (control plane)
+      ansible.builtin.command: tetra version
+      register: tetra_version_check
+      changed_when: false
+      when: "'big' in group_names"
+      tags: [validate]
+
     - name: Display installation summary
       ansible.builtin.debug:
         msg: |
@@ -274,6 +305,7 @@
           {% if 'big' in group_names %}
           helm:    {{ helm_version_check.stdout | default('installed') }}
           cilium:  {{ cilium_version_check.stdout_lines[0] | default('installed') }}
+          tetra:   {{ tetra_version_check.stdout | default('installed') }}
           {% endif %}
           
           ⚡ Ready for cluster initialization (Phase 2)

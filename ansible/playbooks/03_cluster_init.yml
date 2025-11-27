@@ -74,7 +74,7 @@
         dest: /root/.kube/config
         remote_src: yes
 
-    - name: Install Cilium (Network & L2 Announcements)
+    - name: Install Cilium (Network, L2 Announcements & Tetragon)
       shell: |
         helm repo add cilium https://helm.cilium.io/
         helm repo update
@@ -93,6 +93,8 @@
            --set hubble.ui.enabled=true \
            --set hubble.ui.service.type=NodePort \
            --set l2announcements.enabled=true \
+           --set tetragon.enabled=true \
+           --set tetragon.serviceAccount.create=true \
            --set k8sClientRateLimit.qps=50 \
            --set k8sClientRateLimit.burst=100
       environment:
