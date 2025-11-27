@@ -1,5 +1,5 @@
 # =============================================================================
-# Jaeger - Distributed Tracing Backend
+# Jaeger - Distributed Tracing Backend (ON-DEMAND)
 # =============================================================================
 # Provides trace storage, query engine, and web UI for visualizing
 # request flows across microservices.
@@ -9,13 +9,23 @@
 #   - In-memory storage (no external DB required)
 #   - Max 1000 traces to prevent OOM
 #
+# ⚠️ ON-DEMAND DEPLOYMENT:
+#   This tool is deployed with replicas=0 by default to save memory on
+#   resource-constrained Raspberry Pi nodes. Scale up only when debugging.
+#
+# Enable Jaeger:
+#   kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=1
+#
+# Disable Jaeger (after debugging):
+#   kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=0
+#
 # Features:
 #   - Service dependency graph
 #   - Trace comparison
 #   - Latency histograms
 #   - Error tracking
 #
-# Access: http://jaeger.192.168.0.210.nip.io
+# Access (when enabled): http://jaeger.192.168.0.210.nip.io
 #
 # Dependencies: OpenTelemetry Operator (for auto-instrumentation)
 # =============================================================================
@@ -38,18 +48,17 @@ spec:
     helm:
       values: |
         # -------------------------------------------------------------------
-        # Disable External Data Stores (use in-memory)
+        # ON-DEMAND: Scale to Zero by Default
         # -------------------------------------------------------------------
-        provisionDataStore:
-          cassandra: false
-          elasticsearch: false
-          kafka: false
-        
-        # -------------------------------------------------------------------
-        # All-in-One Deployment
+        # Jaeger uses ~512MB memory. Deploy with 0 replicas and scale up
+        # only when actively debugging distributed traces.
+        #
+        # Enable:  kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=1
+        # Disable: kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=0
         # -------------------------------------------------------------------
         allInOne:
           enabled: true
+          replicas: 0
           # Limit in-memory traces to prevent OOM
           args:
             - "--memory.max-traces=1000"
@@ -60,6 +69,14 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+        
+        # -------------------------------------------------------------------
+        # Disable External Data Stores (use in-memory)
+        # -------------------------------------------------------------------
+        provisionDataStore:
+          cassandra: false
+          elasticsearch: false
+          kafka: false
         
         # -------------------------------------------------------------------
         # Storage Configuration

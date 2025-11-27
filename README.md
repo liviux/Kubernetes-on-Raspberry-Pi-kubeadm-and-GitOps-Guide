@@ -28,8 +28,9 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
 7.  [Phase 3: Storage Foundation](#7-phase-3-storage-foundation)
     *   [7.1 Storage Mounting Playbook](#71-storage-mounting-playbook)
     *   [7.2 Longhorn Bootstrap Script](#72-longhorn-bootstrap-script)
-    *   [7.3 Storage Verification Script](#73-storage-verification-script)
-    *   [7.4 Phase 3 Execution Steps](#74-phase-3-execution-steps)
+    *   [7.3 Local Path Provisioner (Optional)](#73-local-path-provisioner-optional)
+    *   [7.4 Storage Verification Script](#74-storage-verification-script)
+    *   [7.5 Phase 3 Execution Steps](#75-phase-3-execution-steps)
 8.  [Phase 4: GitOps & Observability](#8-phase-4-gitops--observability)
     *   [8.1 Gateway API Bootstrap (Traefik)](#81-gateway-api-bootstrap-traefik)
     *   [8.2 GitOps Bootstrap (ArgoCD)](#82-gitops-bootstrap-argocd)
@@ -51,15 +52,16 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [9.12 Security Verification Script](#912-security-verification-script)
     *   [9.13 Phase 5 Execution Steps](#913-phase-5-execution-steps)
 10. [Phase 6: Advanced Observability](#10-phase-6-advanced-observability)
-    *   [10.1 Log Aggregation (Loki Stack)](#101-log-aggregation-loki-stack)
-    *   [10.2 Log Collection (Fluent Bit)](#102-log-collection-fluent-bit)
-    *   [10.3 Distributed Tracing (OpenTelemetry)](#103-distributed-tracing-opentelemetry)
-    *   [10.4 Tracing Backend (Jaeger)](#104-tracing-backend-jaeger)
-    *   [10.5 Traffic Analysis (Kubeshark)](#105-traffic-analysis-kubeshark)
-    *   [10.6 Cost Management (OpenCost)](#106-cost-management-opencost)
-    *   [10.7 AI Diagnostics (K8sGPT)](#107-ai-diagnostics-k8sgpt)
-    *   [10.8 Observability Verification Script](#108-observability-verification-script)
-    *   [10.9 Phase 6 Execution Steps](#109-phase-6-execution-steps)
+    *   [10.1 On-Demand Observability Tools](#101-on-demand-observability-tools)
+    *   [10.2 Log Aggregation (Loki Stack)](#102-log-aggregation-loki-stack)
+    *   [10.3 Log Collection (Fluent Bit)](#103-log-collection-fluent-bit)
+    *   [10.4 Distributed Tracing (OpenTelemetry)](#104-distributed-tracing-opentelemetry)
+    *   [10.5 Tracing Backend (Jaeger)](#105-tracing-backend-jaeger)
+    *   [10.6 Traffic Analysis (Kubeshark)](#106-traffic-analysis-kubeshark)
+    *   [10.7 Cost Management (OpenCost)](#107-cost-management-opencost)
+    *   [10.8 AI Diagnostics (K8sGPT)](#108-ai-diagnostics-k8sgpt)
+    *   [10.9 Observability Verification Script](#109-observability-verification-script)
+    *   [10.10 Phase 6 Execution Steps](#1010-phase-6-execution-steps)
 11. [Phase 7: CI/CD & Developer Experience](#11-phase-7-cicd--developer-experience)
     *   [11.1 Image Automation (Argo Image Updater)](#111-image-automation-argo-image-updater)
     *   [11.2 CI Engine (Argo Workflows)](#112-ci-engine-argo-workflows)
@@ -70,13 +72,14 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [11.7 Phase 7 Execution Steps](#117-phase-7-execution-steps)
 12. [Phase 8: Day 2 Operations & Maintenance](#12-phase-8-day-2-operations--maintenance)
     *   [12.1 Upgrading Kubernetes](#121-upgrading-kubernetes)
-    *   [12.2 OS Patching](#122-os-patching)
-    *   [12.3 Cluster Reset (The Nuclear Option)](#123-cluster-reset-the-nuclear-option)
-    *   [12.4 Backup & Disaster Recovery](#124-backup--disaster-recovery)
-    *   [12.5 Troubleshooting Cheatsheet](#125-troubleshooting-cheatsheet)
-    *   [12.6 Operational Runbooks](#126-operational-runbooks)
-    *   [12.7 Health Check Script](#127-health-check-script)
-    *   [12.8 Component Cleanup Commands](#128-component-cleanup-commands)
+    *   [12.2 Rolling OS Upgrade Playbook](#122-rolling-os-upgrade-playbook)
+    *   [12.3 Manual OS Patching](#123-manual-os-patching)
+    *   [12.4 Cluster Reset (The Nuclear Option)](#124-cluster-reset-the-nuclear-option)
+    *   [12.5 Backup & Disaster Recovery](#125-backup--disaster-recovery)
+    *   [12.6 Troubleshooting Cheatsheet](#126-troubleshooting-cheatsheet)
+    *   [12.7 Operational Runbooks](#127-operational-runbooks)
+    *   [12.8 Health Check Script](#128-health-check-script)
+    *   [12.9 Component Cleanup Commands](#129-component-cleanup-commands)
 
 ---
 
@@ -825,7 +828,8 @@ This structure follows the **separation of concerns** principle:
 │       ├── 02_k8s_binaries.yml          # Install: kubeadm, kubelet, kubectl, helm, cilium-cli
 │       ├── 03_cluster_init.yml          # Bootstrap: kubeadm init/join, Cilium CNI, labels
 │       ├── 04_storage_mount.yml         # HDD: format ext4, mount /var/lib/longhorn, fstab
-│       └── 05_reset_cluster.yml         # Nuclear option: kubeadm reset, cleanup everything
+│       ├── 05_reset_cluster.yml         # Nuclear option: kubeadm reset, cleanup everything
+│       └── 06_rolling_upgrade.yml       # Day 2: Rolling OS upgrades with drain/uncordon
 │
 ├── bootstrap/                           # ══════════════════════════════════════
 │   │                                    # PRE-GITOPS DEPENDENCIES (Manual Helm)
@@ -858,8 +862,10 @@ This structure follows the **separation of concerns** principle:
 │   │   │                                # LAYER 2: Persistent storage layer
 │   │   │                                # sync-wave: -4 (before apps need PVCs)
 │   │   │                                # ──────────────────────────────────────
-│   │   └── minio.yaml                   # S3: Object storage for Thanos/Loki/Velero
-│   │                                    #     PVC on Longhorn, credentials in Secret
+│   │   ├── minio.yaml                   # S3: Object storage for Thanos/Loki/Velero
+│   │   │                                #     PVC on Longhorn, credentials in Secret
+│   │   └── local-path-provisioner.yaml  # Local: Optional direct-to-disk storage
+│   │                                    #     For caches, ephemeral data (SD card)
 │   │
 │   ├── services/                        # ──────────────────────────────────────
 │   │   │                                # LAYER 3: Platform services
@@ -3016,7 +3022,177 @@ echo "Verify with: bash tests/03_storage_test.sh"
 
 </details>
 
-### 7.3 Storage Verification Script
+### 7.3 Local Path Provisioner (Optional)
+
+**File:** `gitops/storage/local-path-provisioner.yaml`
+
+The Local Path Provisioner creates PersistentVolumes directly on node-local storage (SD cards). This is useful for workloads that:
+
+- Handle their own data replication (Redis Cluster, distributed caches)
+- Need maximum I/O performance (local disk bypasses network)
+- Store ephemeral/temporary data that can be regenerated
+
+> ⚠️ **Critical Warnings:**
+> - **No Replication:** Data lives on a single node. If that node fails, data is **LOST**.
+> - **Node Affinity:** Pods using local-path PVCs are bound to the node where the PV was created.
+> - **Not Backed Up:** Velero does not back up local-path volumes (use Longhorn for critical data).
+> - **SD Card Wear:** Only use for low-write workloads to protect SD card lifespan.
+
+**Storage Classes Comparison:**
+
+| StorageClass | Data Location | Replication | Network Latency | Use Case |
+|--------------|---------------|-------------|-----------------|----------|
+| `longhorn` (default) | HDD on rpi4-1 | Optional | Yes (iSCSI) | Databases, persistent apps |
+| `local-path` | SD card on pod's node | None | None | Caches, temp data, self-replicating apps |
+
+**When to Use Local Path:**
+
+| ✅ Good Use Cases | ❌ Bad Use Cases |
+|-------------------|------------------|
+| Redis/Valkey cache | Databases without replication |
+| Build caches (npm, pip, maven) | Application state |
+| Temporary processing directories | User uploads |
+| Applications with built-in replication | Anything you can't afford to lose |
+
+**Usage Example:**
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-cache-pvc
+spec:
+  storageClassName: local-path    # Use local storage instead of Longhorn
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+<details>
+<summary>📄 Click to expand full gitops/storage/local-path-provisioner.yaml</summary>
+
+```yaml
+# =============================================================================
+# Local Path Provisioner - Direct Node Storage (OPTIONAL)
+# =============================================================================
+# Provides a lightweight StorageClass for applications that:
+#   - Handle their own data replication (Redis Cluster, etc.)
+#   - Need maximum I/O performance (local disk vs network)
+#   - Store ephemeral/cacheable data that can be regenerated
+#
+# ⚠️ IMPORTANT WARNINGS:
+#   - Data is NOT replicated - if the node dies, data is LOST
+#   - Pods using local-path PVCs are bound to a specific node
+#   - NOT backed up by Velero (use Longhorn for critical data)
+#   - SD card wear: Only use for low-write workloads on workers
+#
+# Use Cases:
+#   ✅ Redis/Valkey cache (data can be regenerated)
+#   ✅ Build caches (npm, pip, maven)
+#   ✅ Temporary processing directories
+#   ✅ Applications with built-in replication
+#   ❌ Databases without replication
+#   ❌ Critical application data
+#   ❌ Anything you can't afford to lose
+#
+# Storage Location:
+#   - Worker nodes: /opt/local-path-provisioner (on SD card)
+#   - Control plane: /opt/local-path-provisioner (on SD card, NOT HDD)
+#
+# Usage Example:
+#   apiVersion: v1
+#   kind: PersistentVolumeClaim
+#   metadata:
+#     name: my-cache-pvc
+#   spec:
+#     storageClassName: local-path    # <-- Use this StorageClass
+#     accessModes: [ReadWriteOnce]
+#     resources:
+#       requests:
+#         storage: 1Gi
+#
+# Dependencies: None (self-contained)
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: local-path-provisioner
+  namespace: argocd
+  annotations:
+    # Deploy early - storage classes should be available before apps
+    argocd.argoproj.io/sync-wave: "-4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rancher/local-path-provisioner.git
+    path: deploy/chart/local-path-provisioner
+    targetRevision: v0.0.30
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Storage Configuration
+        # -------------------------------------------------------------------
+        storageClass:
+          # Not the default - Longhorn remains default for safety
+          defaultClass: false
+          name: local-path
+          reclaimPolicy: Delete
+        
+        # Path where PVs will be created on each node
+        # Using /opt to avoid filling up /var (systemd journals, etc.)
+        nodePathMap:
+          - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+            paths:
+              - /opt/local-path-provisioner
+        
+        # -------------------------------------------------------------------
+        # Resource Limits (lightweight provisioner)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        
+        # -------------------------------------------------------------------
+        # Helper Pod Configuration
+        # -------------------------------------------------------------------
+        # The helper pod creates/deletes directories on nodes
+        helperImage:
+          repository: busybox
+          tag: stable
+        
+        # -------------------------------------------------------------------
+        # Security Context
+        # -------------------------------------------------------------------
+        # Helper pods need root to create directories
+        helperPod:
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+</details>
+
+### 7.4 Storage Verification Script
 
 **File:** `tests/03_storage_test.sh`
 
@@ -3190,7 +3366,7 @@ echo "Next command: bash bootstrap/traefik/install.sh"
 
 </details>
 
-### 7.4 Phase 3 Execution Steps
+### 7.5 Phase 3 Execution Steps
 
 Execute the following commands from your **management machine**:
 
@@ -6167,7 +6343,84 @@ In this phase, we complete the observability pillar. Metrics (Prometheus) tell y
 | OpenCost | 1.29.0 | Cost estimation | 64MB | Prometheus |
 | K8sGPT | 0.1.4 | AI-powered diagnostics | 64MB | - |
 
-### 10.1 Log Aggregation (Loki Stack)
+### 10.1 On-Demand Observability Tools
+
+Some observability tools are resource-intensive and only needed during active debugging. To optimize memory usage on resource-constrained Raspberry Pi nodes, **Jaeger** and **Kubeshark** are deployed with **0 replicas by default**.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ON-DEMAND OBSERVABILITY PATTERN                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ALWAYS-ON (Essential for operations)                                       │
+│  ─────────────────────────────────────                                      │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
+│  │ Prometheus  │  │    Loki     │  │  Grafana    │  │ Fluent Bit  │        │
+│  │  (metrics)  │  │   (logs)    │  │  (viz)      │  │  (collect)  │        │
+│  │   ~512MB    │  │   ~256MB    │  │   ~128MB    │  │   ~64MB     │        │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
+│                                                                             │
+│  ON-DEMAND (Scale up only when debugging)                                   │
+│  ─────────────────────────────────────────                                  │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────┐          │
+│  │         Jaeger              │  │        Kubeshark            │          │
+│  │   (distributed tracing)     │  │    (API traffic capture)    │          │
+│  │      replicas: 0            │  │       replicas: 0           │          │
+│  │      ~512MB when active     │  │       ~512MB when active    │          │
+│  └─────────────────────────────┘  └─────────────────────────────┘          │
+│                                                                             │
+│  Memory Savings: ~1GB freed when not actively debugging                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Enable/Disable Commands:**
+
+```bash
+# ============================================================================
+# JAEGER - Distributed Tracing UI
+# ============================================================================
+# Enable (when debugging trace issues):
+kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=1
+
+# Wait for it to be ready:
+kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=jaeger -n monitoring --timeout=120s
+
+# Access Jaeger UI:
+# http://jaeger.192.168.0.210.nip.io
+
+# Disable (when done debugging):
+kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=0
+
+# ============================================================================
+# KUBESHARK - API Traffic Analyzer
+# ============================================================================
+# Enable (when debugging API traffic):
+kubectl scale deployment kubeshark-hub -n observability --replicas=1
+
+# Access Kubeshark UI:
+kubectl port-forward -n observability svc/kubeshark-hub 8899:80
+# Open: http://localhost:8899
+
+# Disable (when done debugging):
+kubectl scale deployment kubeshark-hub -n observability --replicas=0
+```
+
+**Workflow Integration:**
+
+You can create shell aliases or a Makefile for convenience:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+alias jaeger-on='kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=1'
+alias jaeger-off='kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=0'
+alias kubeshark-on='kubectl scale deployment kubeshark-hub -n observability --replicas=1'
+alias kubeshark-off='kubectl scale deployment kubeshark-hub -n observability --replicas=0'
+```
+
+> 💡 **Tip:** When OpenTelemetry is sending traces but Jaeger is scaled to 0, traces are simply dropped. No data is lost because traces are inherently ephemeral—they're only useful during active debugging sessions.
+
+### 10.2 Log Aggregation (Loki Stack)
 
 **File:** `gitops/observability/loki-stack.yaml`
 
@@ -6357,7 +6610,7 @@ spec:
 
 </details>
 
-### 10.2 Log Collection (Fluent Bit)
+### 10.3 Log Collection (Fluent Bit)
 
 **File:** `gitops/observability/fluent-bit.yaml`
 
@@ -6497,7 +6750,7 @@ spec:
 
 </details>
 
-### 10.3 Distributed Tracing (OpenTelemetry)
+### 10.4 Distributed Tracing (OpenTelemetry)
 
 **File:** `gitops/observability/opentelemetry.yaml`
 
@@ -6619,7 +6872,7 @@ spec:
 
 </details>
 
-### 10.4 Tracing Backend (Jaeger)
+### 10.5 Tracing Backend (Jaeger)
 
 **File:** `gitops/observability/jaeger.yaml`
 
@@ -6760,7 +7013,7 @@ spec:
 
 </details>
 
-### 10.5 Traffic Analysis (Kubeshark)
+### 10.6 Traffic Analysis (Kubeshark)
 
 **File:** `gitops/observability/kubeshark.yaml`
 
@@ -6877,7 +7130,7 @@ spec:
 
 </details>
 
-### 10.6 Cost Management (OpenCost)
+### 10.7 Cost Management (OpenCost)
 
 **File:** `gitops/observability/opencost.yaml`
 
@@ -7019,7 +7272,7 @@ spec:
 
 </details>
 
-### 10.7 AI Diagnostics (K8sGPT)
+### 10.8 AI Diagnostics (K8sGPT)
 
 **File:** `gitops/observability/k8sgpt.yaml`
 
@@ -7119,7 +7372,7 @@ spec:
 
 </details>
 
-### 10.8 Observability Verification Script
+### 10.9 Observability Verification Script
 
 **File:** `tests/05_observability_test.sh`
 
@@ -7378,7 +7631,7 @@ fi
 
 </details>
 
-### 10.9 Phase 6 Execution Steps
+### 10.10 Phase 6 Execution Steps
 
 Execute these steps after Phase 5 (Security & Management) is complete.
 
@@ -9664,96 +9917,237 @@ cilium connectivity test
 kubectl get pods -A | grep -v Running | grep -v Completed
 ```
 
-### 12.2 OS Patching
+### 12.2 Rolling OS Upgrade Playbook
 
-To apply Linux security patches without downtime, drain nodes one by one using a rolling update strategy.
+**File:** `ansible/playbooks/06_rolling_upgrade.yml`
 
-```
+This Ansible playbook provides **automated, zero-downtime OS patching** across the entire cluster. It handles drain/uncordon, package upgrades, and conditional reboots.
+
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      ROLLING OS PATCH WORKFLOW                              │
+│                    ROLLING UPGRADE PLAYBOOK WORKFLOW                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│   ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐                │
-│   │ rpi4-1  │    │ rpi4-2  │    │ rpi4-3  │    │ rpi4-4  │                │
-│   │ Control │    │ Worker  │    │ Worker  │    │ Worker  │                │
-│   │  Plane  │    │         │    │         │    │         │                │
-│   └────┬────┘    └────┬────┘    └────┬────┘    └────┬────┘                │
-│        │              │              │              │                      │
-│   ─────┼──────────────┼──────────────┼──────────────┼─────────────────     │
-│        │              │              │              │                      │
-│   T=0  │◄── DRAIN ────┤              │              │  Workloads move      │
-│        │              │              │              │  to other nodes      │
-│        │         ┌────┴────┐         │              │                      │
-│   T=1  │         │ PATCHING│         │              │  apt upgrade +       │
-│        │         │ REBOOT  │         │              │  reboot              │
-│        │         └────┬────┘         │              │                      │
-│   T=2  │◄─ UNCORDON ──┤              │              │  Node rejoins        │
-│        │              │              │              │                      │
-│   T=3  │              │◄── DRAIN ────┤              │  Repeat for          │
-│        │              │         ┌────┴────┐        │  next node           │
-│   T=4  │              │         │ PATCHING│        │                      │
-│        │              │         │ REBOOT  │        │                      │
-│        │              │         └────┬────┘        │                      │
-│   T=5  │              │◄─ UNCORDON ──┤              │                      │
-│        │              │              │              │                      │
-│        ▼              ▼              ▼              ▼                      │
-│   [CONTINUES UNTIL ALL NODES PATCHED]                                      │
+│  PHASE 1: Worker Nodes (serial: 1 - one at a time)                         │
+│  ─────────────────────────────────────────────────                         │
+│                                                                             │
+│  ┌─────────┐    ┌─────────┐    ┌─────────┐                                 │
+│  │ rpi4-2  │───►│ rpi4-3  │───►│ rpi4-4  │                                 │
+│  │ Worker  │    │ Worker  │    │ Worker  │                                 │
+│  └────┬────┘    └────┬────┘    └────┬────┘                                 │
+│       │              │              │                                       │
+│       ▼              ▼              ▼                                       │
+│  For each node:                                                             │
+│    1. kubectl drain (evict pods gracefully)                                 │
+│    2. apt update && apt upgrade                                             │
+│    3. Reboot if /var/run/reboot-required exists                            │
+│    4. Wait for node Ready                                                   │
+│    5. kubectl uncordon (allow scheduling)                                   │
+│    6. Proceed to next node                                                  │
+│                                                                             │
+│  PHASE 2: Control Plane (last, with extra safety checks)                   │
+│  ──────────────────────────────────────────────────────                    │
+│                                                                             │
+│  ┌─────────┐                                                               │
+│  │ rpi4-1  │                                                               │
+│  │ Control │  ← Verify all workers Ready before starting                   │
+│  │  Plane  │  ← API server briefly unavailable during reboot               │
+│  └─────────┘                                                               │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Automated Rolling Patch Script
+**Usage:**
 
 ```bash
-#!/bin/bash
-# rolling-patch.sh - Safe rolling OS updates
+# Upgrade all nodes (workers first, control plane last)
+ansible-playbook -i ansible/hosts ansible/playbooks/06_rolling_upgrade.yml
 
-NODES="rpi4-2 rpi4-3 rpi4-4"  # Workers first
-CONTROL_PLANE="rpi4-1"
+# Upgrade specific node only
+ansible-playbook -i ansible/hosts ansible/playbooks/06_rolling_upgrade.yml --limit rpi4-2
 
-for NODE in $NODES; do
-    echo "═══════════════════════════════════════════"
-    echo "Patching $NODE"
-    echo "═══════════════════════════════════════════"
-    
-    # Step 1: Drain the node
-    echo "[1/4] Draining $NODE..."
-    kubectl drain $NODE --ignore-daemonsets --delete-emptydir-data --timeout=120s
-    
-    # Step 2: Run updates via Ansible
-    echo "[2/4] Running OS updates on $NODE..."
-    ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml \
-        --limit $NODE \
-        --tags "update"
-    
-    # Step 3: Reboot if kernel updated
-    echo "[3/4] Rebooting $NODE if needed..."
-    ssh $NODE 'if [ -f /var/run/reboot-required ]; then sudo reboot; fi'
-    
-    # Wait for node to come back
-    sleep 60
-    kubectl wait --for=condition=Ready node/$NODE --timeout=300s
-    
-    # Step 4: Uncordon
-    echo "[4/4] Uncordoning $NODE..."
-    kubectl uncordon $NODE
-    
-    echo "✓ $NODE patched successfully"
-    echo ""
-done
+# Dry-run (check what would be upgraded without making changes)
+ansible-playbook -i ansible/hosts ansible/playbooks/06_rolling_upgrade.yml --check
 
-# Patch control plane last
-echo "═══════════════════════════════════════════"
-echo "Patching Control Plane: $CONTROL_PLANE"
-echo "═══════════════════════════════════════════"
-ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml \
-    --limit $CONTROL_PLANE \
-    --tags "update"
-
-echo "✓ All nodes patched!"
+# Skip reboot even if kernel updated (not recommended for security patches)
+ansible-playbook -i ansible/hosts ansible/playbooks/06_rolling_upgrade.yml -e "allow_reboot=false"
 ```
 
-#### Manual Patching Steps
+**Playbook Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `allow_reboot` | `true` | Reboot node if `/var/run/reboot-required` exists |
+| `drain_timeout` | `300` | Seconds to wait for drain to complete |
+| `ready_timeout` | `300` | Seconds to wait for node to become Ready after reboot |
+| `eviction_grace_period` | `30` | Grace period for pod eviction |
+
+<details>
+<summary>📄 Click to expand full ansible/playbooks/06_rolling_upgrade.yml</summary>
+
+```yaml
+---
+# ============================================================================
+# ROLLING OS UPGRADE PLAYBOOK
+# ============================================================================
+# Description: Safe rolling OS updates across the cluster with zero downtime
+# Use Case:    Security patches, kernel updates, package upgrades
+#
+# How It Works:
+#   1. Drains workloads from the target node
+#   2. Runs apt update && apt upgrade
+#   3. Reboots if a kernel update requires it
+#   4. Waits for the node to rejoin the cluster
+#   5. Uncordons the node to accept workloads again
+#   6. Proceeds to the next node (serial execution)
+#
+# Safety Features:
+#   - Serial execution (one node at a time)
+#   - Automatic drain with timeout
+#   - Graceful pod eviction
+#   - Health checks before proceeding
+#   - Control plane upgraded last (default)
+#
+# Usage:
+#   # Upgrade all nodes (workers first, control plane last)
+#   ansible-playbook -i hosts playbooks/06_rolling_upgrade.yml
+#
+#   # Upgrade specific node only
+#   ansible-playbook -i hosts playbooks/06_rolling_upgrade.yml --limit rpi4-2
+#
+#   # Dry-run (check what would be upgraded)
+#   ansible-playbook -i hosts playbooks/06_rolling_upgrade.yml --check
+#
+#   # Skip reboot even if kernel updated
+#   ansible-playbook -i hosts playbooks/06_rolling_upgrade.yml -e "allow_reboot=false"
+#
+# Pre-requisites:
+#   - kubectl configured on control node (or local machine)
+#   - Cluster healthy (all nodes Ready)
+#   - Sufficient capacity to handle drained workloads
+#
+# Author: Kubernetes on Raspberry Pi Guide
+# ============================================================================
+
+# Worker nodes upgraded first (one at a time)
+- name: Rolling OS Upgrade - Worker Nodes
+  hosts: small
+  become: true
+  serial: 1
+  
+  vars:
+    allow_reboot: true
+    drain_timeout: 300
+    ready_timeout: 300
+    eviction_grace_period: 30
+
+  tasks:
+    - name: Drain node
+      ansible.builtin.command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets --delete-emptydir-data
+        --grace-period={{ eviction_grace_period }}
+        --timeout={{ drain_timeout }}s --force
+      delegate_to: "{{ groups['big'][0] }}"
+    
+    - name: Update packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: safe
+        autoremove: yes
+    
+    - name: Check if reboot required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+    
+    - name: Reboot if required
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 30
+      when: reboot_required.stat.exists and allow_reboot
+    
+    - name: Wait for node Ready
+      ansible.builtin.command: >
+        kubectl wait --for=condition=Ready
+        node/{{ inventory_hostname }} --timeout={{ ready_timeout }}s
+      delegate_to: "{{ groups['big'][0] }}"
+    
+    - name: Uncordon node
+      ansible.builtin.command: kubectl uncordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['big'][0] }}"
+
+# Control plane upgraded last
+- name: Rolling OS Upgrade - Control Plane
+  hosts: big
+  become: true
+  serial: 1
+  
+  vars:
+    allow_reboot: true
+    drain_timeout: 300
+    ready_timeout: 300
+    eviction_grace_period: 30
+
+  tasks:
+    - name: Verify all workers Ready
+      ansible.builtin.shell: |
+        kubectl get nodes --no-headers | grep -v {{ inventory_hostname }} | grep -v Ready && exit 1 || exit 0
+      changed_when: false
+    
+    - name: Drain control plane
+      ansible.builtin.command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets --delete-emptydir-data
+        --grace-period={{ eviction_grace_period }}
+        --timeout={{ drain_timeout }}s --force
+    
+    - name: Update packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: safe
+        autoremove: yes
+    
+    - name: Check if reboot required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+    
+    - name: Reboot if required
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 60
+      when: reboot_required.stat.exists and allow_reboot
+    
+    - name: Wait for API server
+      ansible.builtin.command: kubectl cluster-info
+      retries: 30
+      delay: 10
+      until: cluster_info.rc == 0
+      register: cluster_info
+    
+    - name: Wait for node Ready
+      ansible.builtin.command: >
+        kubectl wait --for=condition=Ready
+        node/{{ inventory_hostname }} --timeout={{ ready_timeout }}s
+    
+    - name: Uncordon node
+      ansible.builtin.command: kubectl uncordon {{ inventory_hostname }}
+    
+    - name: Display final status
+      ansible.builtin.command: kubectl get nodes
+      register: final_status
+    
+    - name: Show completion
+      ansible.builtin.debug:
+        msg: "Rolling upgrade complete!\n{{ final_status.stdout }}"
+```
+
+</details>
+
+### 12.3 Manual OS Patching
+
+For manual patching or patching a single node without the Ansible playbook:
 
 ```bash
 # 1. Drain Node (Move workloads elsewhere)
@@ -9776,7 +10170,10 @@ kubectl uncordon rpi4-2
 # 5. Verify health before moving to next node
 kubectl get pods -A -o wide | grep rpi4-2
 ```
-### 12.3 Cluster Reset (The Nuclear Option)
+
+> 💡 **Tip:** Use the Ansible playbook (`06_rolling_upgrade.yml`) for regular patching—it handles all nodes automatically with proper safety checks.
+
+### 12.4 Cluster Reset (The Nuclear Option)
 
 **File:** `ansible/playbooks/05_reset_cluster.yml`
 
@@ -10085,7 +10482,7 @@ watch argocd app list
 velero restore create --from-backup <backup-name>
 ```
 
-### 12.4 Backup & Disaster Recovery
+### 12.5 Backup & Disaster Recovery
 
 We utilize **Velero** (installed in Phase 5) for comprehensive backup and disaster recovery capabilities.
 
@@ -10295,7 +10692,7 @@ fi
 echo -e "\n═══════════════════════════════════════════"
 ```
 
-### 12.5 Troubleshooting Cheatsheet
+### 12.6 Troubleshooting Cheatsheet
 
 A comprehensive guide to diagnosing and resolving common issues in your Raspberry Pi Kubernetes cluster.
 
@@ -10488,7 +10885,7 @@ kubectl logs -n cert-manager deployment/cert-manager
 kubectl get secret <secret-name> -n <namespace> -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -text -noout
 ```
 
-### 12.6 Operational Runbooks
+### 12.7 Operational Runbooks
 
 Standardized procedures for common operational tasks.
 
@@ -10555,7 +10952,7 @@ kubectl edit deployment <deployment> -n <namespace>
 # 5. Consider adding more workers or reducing replicas
 ```
 
-### 12.7 Health Check Script
+### 12.8 Health Check Script
 
 A comprehensive cluster health verification script.
 
@@ -10711,7 +11108,7 @@ chmod +x tests/07_operations_test.sh
 ./tests/07_operations_test.sh
 ```
 
-### 12.8 Component Cleanup Commands
+### 12.9 Component Cleanup Commands
 
 Unlike the nuclear `05_reset_cluster.yml`, these commands allow **clean removal of individual components** without destroying the entire cluster.
 

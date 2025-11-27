@@ -1,0 +1,114 @@
+# =============================================================================
+# Local Path Provisioner - Direct Node Storage (OPTIONAL)
+# =============================================================================
+# Provides a lightweight StorageClass for applications that:
+#   - Handle their own data replication (Redis Cluster, etc.)
+#   - Need maximum I/O performance (local disk vs network)
+#   - Store ephemeral/cacheable data that can be regenerated
+#
+# ⚠️ IMPORTANT WARNINGS:
+#   - Data is NOT replicated - if the node dies, data is LOST
+#   - Pods using local-path PVCs are bound to a specific node
+#   - NOT backed up by Velero (use Longhorn for critical data)
+#   - SD card wear: Only use for low-write workloads on workers
+#
+# Use Cases:
+#   ✅ Redis/Valkey cache (data can be regenerated)
+#   ✅ Build caches (npm, pip, maven)
+#   ✅ Temporary processing directories
+#   ✅ Applications with built-in replication
+#   ❌ Databases without replication
+#   ❌ Critical application data
+#   ❌ Anything you can't afford to lose
+#
+# Storage Location:
+#   - Worker nodes: /opt/local-path-provisioner (on SD card)
+#   - Control plane: /opt/local-path-provisioner (on SD card, NOT HDD)
+#
+# Usage Example:
+#   apiVersion: v1
+#   kind: PersistentVolumeClaim
+#   metadata:
+#     name: my-cache-pvc
+#   spec:
+#     storageClassName: local-path    # <-- Use this StorageClass
+#     accessModes: [ReadWriteOnce]
+#     resources:
+#       requests:
+#         storage: 1Gi
+#
+# Dependencies: None (self-contained)
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: local-path-provisioner
+  namespace: argocd
+  annotations:
+    # Deploy early - storage classes should be available before apps
+    argocd.argoproj.io/sync-wave: "-4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rancher/local-path-provisioner.git
+    path: deploy/chart/local-path-provisioner
+    targetRevision: v0.0.30
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Storage Configuration
+        # -------------------------------------------------------------------
+        storageClass:
+          # Not the default - Longhorn remains default for safety
+          defaultClass: false
+          name: local-path
+          reclaimPolicy: Delete
+        
+        # Path where PVs will be created on each node
+        # Using /opt to avoid filling up /var (systemd journals, etc.)
+        nodePathMap:
+          - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+            paths:
+              - /opt/local-path-provisioner
+        
+        # -------------------------------------------------------------------
+        # Resource Limits (lightweight provisioner)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        
+        # -------------------------------------------------------------------
+        # Helper Pod Configuration
+        # -------------------------------------------------------------------
+        # The helper pod creates/deletes directories on nodes
+        helperImage:
+          repository: busybox
+          tag: stable
+        
+        # -------------------------------------------------------------------
+        # Security Context
+        # -------------------------------------------------------------------
+        # Helper pods need root to create directories
+        helperPod:
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

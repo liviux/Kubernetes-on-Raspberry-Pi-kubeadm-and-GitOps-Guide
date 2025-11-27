@@ -1,5 +1,5 @@
 # =============================================================================
-# Kubeshark - API Traffic Analyzer
+# Kubeshark - API Traffic Analyzer (ON-DEMAND)
 # =============================================================================
 # Real-time visibility into Kubernetes API traffic.
 # Like Wireshark, but for microservices communication.
@@ -10,11 +10,23 @@
 #   - Service dependency visualization
 #   - Traffic replay for debugging
 #
-# Access: Port-forward to Kubeshark UI
+# ⚠️ ON-DEMAND DEPLOYMENT:
+#   This tool is deployed with replicas=0 by default to save memory on
+#   resource-constrained Raspberry Pi nodes. Scale up only when debugging.
+#
+# Enable Kubeshark:
+#   kubectl scale deployment kubeshark-hub -n observability --replicas=1
+#   kubectl scale daemonset kubeshark-worker -n observability --replicas=1
+#
+# Disable Kubeshark (after debugging):
+#   kubectl scale deployment kubeshark-hub -n observability --replicas=0
+#   kubectl delete daemonset kubeshark-worker -n observability
+#
+# Access (when enabled): Port-forward to Kubeshark UI
 #   kubectl port-forward -n observability svc/kubeshark-hub 8899:80
 #   Open: http://localhost:8899
 #
-# WARNING: High memory usage during capture. Disable when not debugging.
+# WARNING: High memory usage during capture (~512MB+). Disable when not debugging.
 #
 # Dependencies: Longhorn (for persistent storage)
 # =============================================================================
@@ -36,6 +48,18 @@ spec:
     targetRevision: 52.3.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # ON-DEMAND: Scale to Zero by Default
+        # -------------------------------------------------------------------
+        # Kubeshark uses significant memory. Deploy with 0 replicas and
+        # scale up only when actively debugging API traffic.
+        #
+        # Enable:  kubectl scale deployment kubeshark-hub -n observability --replicas=1
+        # Disable: kubectl scale deployment kubeshark-hub -n observability --replicas=0
+        # -------------------------------------------------------------------
+        hub:
+          replicas: 0
+        
         # -------------------------------------------------------------------
         # Traffic Capture Settings
         # -------------------------------------------------------------------
