@@ -1007,6 +1007,13 @@ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 curl -sS https://webinstall.dev/k9s | bash
 ```
 
+> Note: **Helm v3 is a client-only tool (no server/Tiller).** Installing Helm on
+your management machine is sufficient to manage charts remotely. If you
+prefer running `helm` from the cluster, the Ansible playbook
+`ansible/playbooks/02_k8s_binaries.yml` installs Helm on the control-plane
+node (the host in the `big` group, e.g. `rpi4-1`) for convenience when
+executing bootstrap or maintenance commands directly from the control plane.
+
 **Verify installations:**
 
 ```bash
