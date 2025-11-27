@@ -946,14 +946,14 @@ This structure follows the **separation of concerns** principle:
 
 | Phase | Section | Test Script | What It Validates |
 |-------|---------|-------------|-------------------|
-| **Phase 1** | §5 Infrastructure | `tests/01_infra_test.sh` | Node count, RAM, swap off, kernel modules |
-| **Phase 2** | §6 Cluster Bootstrap | `tests/02_network_test.sh` | Cilium, L2 announcements, CoreDNS, Hubble |
-| **Phase 3** | §7 Storage | `tests/03_storage_test.sh` | Longhorn, PVC lifecycle, HDD mount |
-| **Phase 4** | §8 GitOps | - | Manual: Verify ArgoCD UI, app sync |
-| **Phase 5** | §9 Security | `tests/04_security_test.sh` | Kyverno policies, Falco, Trivy, Harbor |
-| **Phase 6** | §10 Observability | `tests/05_observability_test.sh` | Prometheus, Loki, Grafana, OpenTelemetry |
-| **Phase 7** | §11 CI/CD | `tests/06_cicd_test.sh` | Argo Workflows, Events, Image Updater |
-| **Phase 8** | §12 Day 2 Ops | `tests/07_operations_test.sh` | Health checks, Velero, Descheduler |
+| **Phase 1** | [§5 Infrastructure](#5-phase-1-infrastructure-provisioning) | `tests/01_infra_test.sh` | Node count, RAM, swap off, kernel modules |
+| **Phase 2** | [§6 Cluster Bootstrap](#6-phase-2-cluster-bootstrap) | `tests/02_network_test.sh` | Cilium, L2 announcements, CoreDNS, Hubble |
+| **Phase 3** | [§7 Storage](#7-phase-3-storage-foundation) | `tests/03_storage_test.sh` | Longhorn, PVC lifecycle, HDD mount |
+| **Phase 4** | [§8 GitOps](#8-phase-4-gitops--observability) | - | Manual: Verify ArgoCD UI, app sync |
+| **Phase 5** | [§9 Security](#9-phase-5-security--management-stack) | `tests/04_security_test.sh` | Kyverno policies, Falco, Trivy, Harbor |
+| **Phase 6** | [§10 Observability](#10-phase-6-advanced-observability) | `tests/05_observability_test.sh` | Prometheus, Loki, Grafana, OpenTelemetry |
+| **Phase 7** | [§11 CI/CD](#11-phase-7-cicd--developer-experience) | `tests/06_cicd_test.sh` | Argo Workflows, Events, Image Updater |
+| **Phase 8** | [§12 Day 2 Ops](#12-phase-8-day-2-operations--maintenance) | `tests/07_operations_test.sh` | Health checks, Velero, Descheduler |
 
 > **💡 Usage:** Run the corresponding test script after completing each phase:
 > ```bash
