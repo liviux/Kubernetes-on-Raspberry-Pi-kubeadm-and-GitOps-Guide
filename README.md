@@ -1022,7 +1022,7 @@ helm version         # Should show 4.x
 
 #### Step 1: Flash Ubuntu Server
 
-Use **Raspberry Pi Imager** (download from [raspberrypi.com](https://www.raspberrypi.com/software/)) to flash **Ubuntu Server 24.04 LTS** or **25.10** to each SD card.
+Use **Raspberry Pi Imager** (download from [raspberrypi.com](https://www.raspberrypi.com/software/)) to flash **Ubuntu Server 24.04 LTS** or **25.10** (my pick) to each SD card.
 
 > 💡 **Why Ubuntu Server?** Lightweight, excellent ARM64 support, long-term security updates, and broad community documentation.
 
