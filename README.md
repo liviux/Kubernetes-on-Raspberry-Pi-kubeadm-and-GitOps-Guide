@@ -989,11 +989,7 @@ Install these tools on your local machine (Windows/WSL, Mac, or Linux):
 
 ```bash
 # Essential tools
-sudo apt update && sudo apt install -y \
-    ansible \           # Infrastructure automation
-    openssh-client \    # SSH connectivity
-    curl \              # HTTP requests
-    git                 # Version control
+sudo apt update && sudo apt install -y ansible openssh-client curl git               
 
 # Kubernetes tools (install latest versions)
 # kubectl - Kubernetes CLI
@@ -1001,7 +997,7 @@ curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stabl
 chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 
 # helm - Package manager
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash
 
 # k9s - Terminal UI (optional but recommended)
 curl -sS https://webinstall.dev/k9s | bash
@@ -1017,9 +1013,9 @@ executing bootstrap or maintenance commands directly from the control plane.
 **Verify installations:**
 
 ```bash
-ansible --version    # Should show 2.15+
-kubectl version --client
-helm version
+ansible --version    # Should show 2.19+
+kubectl version --client # Should show 1.34+
+helm version         # Should show 4.x
 ```
 
 ### OS & Network Setup
