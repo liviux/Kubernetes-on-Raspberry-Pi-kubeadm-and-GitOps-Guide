@@ -1121,9 +1121,9 @@ Add hostname mappings to your local machine for easier access:
 ```bash
 # Test each node (should connect without password prompt)
 ssh -i ~/.ssh/rpi-cluster user@rpi4-1 "hostname && cat /etc/os-release | grep PRETTY"
-ssh -i ~/.ssh/rpi-cluster user@rpi4-2 "hostname"
-ssh -i ~/.ssh/rpi-cluster user@rpi4-3 "hostname"
-ssh -i ~/.ssh/rpi-cluster user@rpi4-4 "hostname"
+ssh -i ~/.ssh/rpi-cluster user@rpi4-2 "hostname && cat /etc/os-release | grep PRETTY"
+ssh -i ~/.ssh/rpi-cluster user@rpi4-3 "hostname && cat /etc/os-release | grep PRETTY"
+ssh -i ~/.ssh/rpi-cluster user@rpi4-4 "hostname && cat /etc/os-release | grep PRETTY"
 ```
 
 ### Ansible Configuration
