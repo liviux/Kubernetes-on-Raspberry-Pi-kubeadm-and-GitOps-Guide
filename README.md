@@ -595,7 +595,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 
 | Tool | Version | Purpose | Why This Tool? |
 |------|---------|---------|----------------|
-| **Kubernetes** | 1.31 | Container orchestration | Industry standard, upstream experience via kubeadm |
+| **Kubernetes** | 1.33 | Container orchestration | Industry standard, upstream experience via kubeadm |
 | **Helm** | 3.x | Package management | Required by ArgoCD for chart deployments |
 | **ArgoCD** | 2.x | GitOps controller | Best-in-class GitOps, declarative, self-healing |
 | **Argo Image Updater** | 0.x | Image automation | Automatic version bumps from registry tags |
@@ -1169,7 +1169,7 @@ ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/
 # ============================================================================
 # KUBERNETES CONFIGURATION
 # ============================================================================
-k8s_version=1.31
+k8s_version=1.33
 pod_network_cidr=10.244.0.0/16
 service_cidr=10.96.0.0/12
 
@@ -1270,7 +1270,7 @@ This phase transforms raw Ubuntu Server installations into "Kubernetes Ready" no
 │  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘  │
 │        │                  │                                                 │
 │        ▼                  ▼                                                 │
-│   • System updates    • K8s repo (1.31)                                    │
+│   • System updates    • K8s repo (1.33)                                    │
 │   • Dependencies      • kubelet/kubeadm                                    │
 │   • Swap disabled     • kubectl + hold                                     │
 │   • Kernel modules    • helm (CP only)                                     │
@@ -1660,7 +1660,7 @@ This playbook prepares the base OS for Kubernetes. It runs on **all nodes** and 
 
 **File:** `ansible/playbooks/02_k8s_binaries.yml`
 
-This playbook installs the Kubernetes toolchain on all nodes. We deliberately install version **1.31** (not latest) so we can demonstrate an upgrade procedure later in the guide.
+This playbook installs the Kubernetes toolchain on all nodes. We deliberately install version **1.33** (not latest) so we can demonstrate an upgrade procedure later in the guide.
 
 | Package | Installed On | Purpose |
 |---------|--------------|---------|
@@ -1672,7 +1672,7 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
 | `etcd-client` | Control plane only | Direct etcd access for debugging |
 | `k9s` | Control plane only | Terminal UI for cluster management |
 
-> 💡 **Version Locking:** The playbook uses `dpkg --set-selections` to "hold" packages at 1.31.x. This prevents `apt upgrade` from accidentally updating Kubernetes and breaking your cluster.
+> 💡 **Version Locking:** The playbook uses `dpkg --set-selections` to "hold" packages at 1.33.x. This prevents `apt upgrade` from accidentally updating Kubernetes and breaking your cluster.
 
 <details>
 <summary>📄 Click to expand full playbook</summary>
@@ -1687,7 +1687,7 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
 #   - Installs kubelet, kubeadm, kubectl (version-locked)
 #   - Installs management tools on control plane only
 #
-# Note: We install 1.31 (not latest) to demonstrate upgrades later.
+# Note: We install 1.33 (not latest) to demonstrate upgrades later.
 #
 # Usage: ansible-playbook -i hosts playbooks/02_k8s_binaries.yml
 # Tags:  repo, packages, tools, validate
@@ -1700,8 +1700,8 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
 
   vars:
     # Kubernetes version - deliberately not latest for upgrade demo
-    k8s_version_major: "1.31"
-    k8s_pkg_version: "1.31.*"
+    k8s_version_major: "1.33"
+    k8s_pkg_version: "1.33.*"
     
     # Tool versions (latest stable)
     helm_version: "latest"
@@ -1973,7 +1973,7 @@ This script validates that Phase 1 successfully prepared all nodes. Run it befor
 | Category | Checks | Pass Criteria |
 |----------|--------|---------------|
 | **Connectivity** | Ansible ping, SSH to all nodes | All 4 nodes respond |
-| **K8s Binaries** | kubeadm, kubelet, kubectl, helm, cilium-cli | Version 1.31.x installed |
+| **K8s Binaries** | kubeadm, kubelet, kubectl, helm, cilium-cli | Version 1.33.x installed |
 | **OS Config** | Swap, cgroups, IP forwarding, bridge netfilter | Swap off, cgroups enabled |
 | **Kernel Modules** | overlay, br_netfilter, iscsi_tcp, ip_vs, nf_conntrack | All modules loaded |
 | **Container Runtime** | containerd status, SystemdCgroup, pause image, iscsid | All services active |
@@ -2051,7 +2051,7 @@ echo "└───────────────────────�
 check "kubeadm installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short'"
 check "kubelet installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubelet --version'"
 check "kubectl installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubectl version --client -o yaml'"
-check "Kubernetes version 1.31" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short | grep -q v1.31'"
+check "Kubernetes version 1.33" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short | grep -q v1.33'"
 check "Helm installed (CP)" "ansible -i ansible/hosts big -m shell -a 'helm version --short'"
 check "Cilium CLI installed (CP)" "ansible -i ansible/hosts big -m shell -a 'cilium version --client'"
 check "etcdctl installed (CP)" "ansible -i ansible/hosts big -m shell -a 'which etcdctl'"
@@ -2192,7 +2192,7 @@ bash tests/01_infra_test.sh
 ✅ kubeadm installed (all): PASS
 ✅ kubelet installed (all): PASS
 ✅ kubectl installed (all): PASS
-✅ Kubernetes version 1.31: PASS
+✅ Kubernetes version 1.33: PASS
 ✅ Helm installed (CP): PASS
 ✅ Cilium CLI installed (CP): PASS
 ...
@@ -2249,7 +2249,7 @@ In this phase, we initialize the Control Plane, install the networking layer (Ci
 
 | Component | Version | Purpose | Raspberry Pi Optimization |
 |-----------|---------|---------|---------------------------|
-| **kubeadm** | 1.31.0 | Cluster bootstrapper | Custom config skips kube-proxy |
+| **kubeadm** | 1.33.0 | Cluster bootstrapper | Custom config skips kube-proxy |
 | **Cilium** | 1.18.4 | CNI + Service Mesh | eBPF-based, replaces kube-proxy |
 | **Hubble** | (bundled) | Network Observability | NodePort UI for debugging |
 | **Metrics Server** | 3.12.2 | Resource metrics | `--kubelet-insecure-tls` for self-signed certs |
@@ -2336,7 +2336,7 @@ This playbook orchestrates the complete cluster bootstrap in three phases:
           ---
           apiVersion: kubeadm.k8s.io/v1beta4
           kind: ClusterConfiguration
-          kubernetesVersion: v1.31.0
+          kubernetesVersion: v1.33.0
           networking:
             serviceSubnet: {{ service_cidr }}
             podSubnet: {{ pod_network_cidr }}
@@ -9829,9 +9829,9 @@ Since we pinned versions in Ansible, upgrades must be deliberate. Kubernetes fol
 
 | Component | Current | Target | Skew Allowed |
 |-----------|---------|--------|--------------|
-| **kubeadm** | 1.31.x | 1.32.x | Same as kubelet |
-| **kubelet** | 1.31.x | 1.32.x | n-2 from API server |
-| **kubectl** | 1.31.x | 1.32.x | ±1 from API server |
+| **kubeadm** | 1.33.x | 1.34.x | Same as kubelet |
+| **kubelet** | 1.33.x | 1.34.x | n-2 from API server |
+| **kubectl** | 1.33.x | 1.34.x | ±1 from API server |
 | **Cilium** | 1.16.x | Check matrix | Per Cilium docs |
 | **containerd** | 1.7.x | 1.7.x | Usually stable |
 

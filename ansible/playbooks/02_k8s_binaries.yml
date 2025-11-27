@@ -7,7 +7,7 @@
 #   - Installs kubelet, kubeadm, kubectl (version-locked)
 #   - Installs management tools on control plane only
 #
-# Note: We install 1.31 (not latest) to demonstrate upgrades later.
+# Note: We install 1.33 (not latest) to demonstrate upgrades later.
 #
 # Usage: ansible-playbook -i hosts playbooks/02_k8s_binaries.yml
 # Tags:  repo, packages, tools, validate
@@ -20,8 +20,8 @@
 
   vars:
     # Kubernetes version - deliberately not latest for upgrade demo
-    k8s_version_major: "1.31"
-    k8s_pkg_version: "1.31.*"
+    k8s_version_major: "1.33"
+    k8s_pkg_version: "1.33.*"
     
     # Tool versions (latest stable)
     helm_version: "latest"

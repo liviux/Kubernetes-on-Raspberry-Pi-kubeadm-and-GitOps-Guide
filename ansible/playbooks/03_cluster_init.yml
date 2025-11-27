@@ -43,7 +43,7 @@
           ---
           apiVersion: kubeadm.k8s.io/v1beta4
           kind: ClusterConfiguration
-          kubernetesVersion: v1.31.0
+          kubernetesVersion: v1.33.0
           networking:
             serviceSubnet: {{ service_cidr }}
             podSubnet: {{ pod_network_cidr }}

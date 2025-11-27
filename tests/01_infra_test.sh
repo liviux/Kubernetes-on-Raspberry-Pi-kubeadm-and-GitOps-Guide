@@ -65,7 +65,7 @@ echo "└───────────────────────�
 check "kubeadm installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short'"
 check "kubelet installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubelet --version'"
 check "kubectl installed (all)" "ansible -i ansible/hosts all -m shell -a 'kubectl version --client -o yaml'"
-check "Kubernetes version 1.31" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short | grep -q v1.31'"
+check "Kubernetes version 1.33" "ansible -i ansible/hosts all -m shell -a 'kubeadm version -o short | grep -q v1.33'"
 check "Helm installed (CP)" "ansible -i ansible/hosts big -m shell -a 'helm version --short'"
 check "Cilium CLI installed (CP)" "ansible -i ansible/hosts big -m shell -a 'cilium version --client'"
 check "etcdctl installed (CP)" "ansible -i ansible/hosts big -m shell -a 'which etcdctl'"
