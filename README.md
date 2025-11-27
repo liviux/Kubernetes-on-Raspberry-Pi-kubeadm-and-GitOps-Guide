@@ -79,7 +79,8 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [12.6 Troubleshooting Cheatsheet](#126-troubleshooting-cheatsheet)
     *   [12.7 Operational Runbooks](#127-operational-runbooks)
     *   [12.8 Health Check Script](#128-health-check-script)
-    *   [12.9 Component Cleanup Commands](#129-component-cleanup-commands)
+    *   [12.9 Secrets Migration to OpenBao](#129-secrets-migration-to-openbao)
+    *   [12.10 Component Cleanup Commands](#1210-component-cleanup-commands)
 
 ---
 
@@ -11108,7 +11109,274 @@ chmod +x tests/07_operations_test.sh
 ./tests/07_operations_test.sh
 ```
 
-### 12.9 Component Cleanup Commands
+### 12.9 Secrets Migration to OpenBao
+
+This guide initially deploys services with **default credentials** (e.g., `password123` for MinIO, `Harbor12345` for Harbor) to simplify the bootstrap process. For production use, these credentials should be rotated and stored in OpenBao (a community-maintained fork of HashiCorp Vault).
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    SECRETS MIGRATION WORKFLOW                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  CURRENT STATE (Bootstrap)                                                  │
+│  ─────────────────────────                                                  │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                     │
+│  │   MinIO     │    │   Harbor    │    │    Loki     │                     │
+│  │ password123 │    │ Harbor12345 │    │ password123 │                     │
+│  │  (inline)   │    │  (inline)   │    │  (inline)   │                     │
+│  └─────────────┘    └─────────────┘    └─────────────┘                     │
+│                                                                             │
+│  TARGET STATE (Production)                                                  │
+│  ─────────────────────────                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                          OpenBao                                    │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  secret/minio     → rootUser, rootPassword                  │   │   │
+│  │  │  secret/harbor    → adminPassword, secretKey                │   │   │
+│  │  │  secret/loki      → s3AccessKey, s3SecretKey               │   │   │
+│  │  │  secret/velero    → awsAccessKey, awsSecretKey             │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  └───────────────────────────────┬─────────────────────────────────────┘   │
+│                                  │                                         │
+│                                  ▼                                         │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                     │
+│  │   MinIO     │    │   Harbor    │    │    Loki     │                     │
+│  │ K8s Secret  │◄───│ K8s Secret  │◄───│ K8s Secret  │                     │
+│  │(from Bao)   │    │(from Bao)   │    │(from Bao)   │                     │
+│  └─────────────┘    └─────────────┘    └─────────────┘                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Prerequisites
+
+1. **OpenBao deployed and initialized** (Phase 5)
+2. **External Secrets Operator** (optional, for automatic sync)
+3. **kubectl access** to the cluster
+
+#### Step 1: Initialize OpenBao
+
+```bash
+# Port-forward to OpenBao
+kubectl port-forward svc/openbao -n openbao 8200:8200 &
+export VAULT_ADDR='http://127.0.0.1:8200'
+
+# Initialize OpenBao (first time only - SAVE THESE KEYS!)
+bao operator init -key-shares=1 -key-threshold=1
+
+# Example output (SAVE THIS!):
+# Unseal Key 1: <your-unseal-key>
+# Initial Root Token: <your-root-token>
+
+# Unseal OpenBao
+bao operator unseal <your-unseal-key>
+
+# Login with root token
+export VAULT_TOKEN='<your-root-token>'
+bao login $VAULT_TOKEN
+```
+
+#### Step 2: Enable KV Secrets Engine
+
+```bash
+# Enable KV v2 secrets engine
+bao secrets enable -path=secret kv-v2
+```
+
+#### Step 3: Store New Credentials in OpenBao
+
+```bash
+# Generate strong passwords (or use your own)
+MINIO_PASSWORD=$(openssl rand -base64 24)
+HARBOR_PASSWORD=$(openssl rand -base64 24)
+HARBOR_SECRET=$(openssl rand -base64 24)
+
+# Store MinIO credentials
+bao kv put secret/minio \
+  rootUser="admin" \
+  rootPassword="$MINIO_PASSWORD"
+
+# Store Harbor credentials  
+bao kv put secret/harbor \
+  adminPassword="$HARBOR_PASSWORD" \
+  secretKey="$HARBOR_SECRET"
+
+# Store Velero/Loki S3 credentials (same as MinIO)
+bao kv put secret/s3 \
+  accessKey="admin" \
+  secretKey="$MINIO_PASSWORD"
+
+# Verify secrets stored
+bao kv get secret/minio
+bao kv get secret/harbor
+bao kv get secret/s3
+
+# IMPORTANT: Save these passwords somewhere secure!
+echo "MinIO Password: $MINIO_PASSWORD"
+echo "Harbor Password: $HARBOR_PASSWORD"
+```
+
+#### Step 4: Update MinIO Password
+
+```bash
+# Get current MinIO password from OpenBao
+NEW_MINIO_PASS=$(bao kv get -field=rootPassword secret/minio)
+
+# Update MinIO secret in Kubernetes
+kubectl create secret generic minio-credentials \
+  --from-literal=rootUser=admin \
+  --from-literal=rootPassword="$NEW_MINIO_PASS" \
+  -n storage --dry-run=client -o yaml | kubectl apply -f -
+
+# Restart MinIO to pick up new credentials
+kubectl rollout restart deployment/minio -n storage
+
+# Wait for MinIO to be ready
+kubectl rollout status deployment/minio -n storage
+```
+
+#### Step 5: Update Harbor Password
+
+```bash
+# Get new Harbor password from OpenBao
+NEW_HARBOR_PASS=$(bao kv get -field=adminPassword secret/harbor)
+NEW_HARBOR_SECRET=$(bao kv get -field=secretKey secret/harbor)
+
+# Update Harbor core secret
+kubectl create secret generic harbor-core \
+  --from-literal=HARBOR_ADMIN_PASSWORD="$NEW_HARBOR_PASS" \
+  --from-literal=secretKey="$NEW_HARBOR_SECRET" \
+  -n harbor --dry-run=client -o yaml | kubectl apply -f -
+
+# Restart Harbor components
+kubectl rollout restart deployment -n harbor
+```
+
+#### Step 6: Update Dependent Services
+
+Services that connect to MinIO need the new credentials:
+
+```bash
+# Get S3 credentials
+S3_ACCESS=$(bao kv get -field=accessKey secret/s3)
+S3_SECRET=$(bao kv get -field=secretKey secret/s3)
+
+# Update Loki S3 credentials
+kubectl create secret generic loki-s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID="$S3_ACCESS" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="$S3_SECRET" \
+  -n observability --dry-run=client -o yaml | kubectl apply -f -
+
+# Update Velero S3 credentials
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: velero-s3-credentials
+  namespace: velero
+type: Opaque
+stringData:
+  cloud: |
+    [default]
+    aws_access_key_id = $S3_ACCESS
+    aws_secret_access_key = $S3_SECRET
+EOF
+
+# Restart affected services (Reloader will handle this if annotated)
+kubectl rollout restart deployment/loki -n observability
+kubectl rollout restart deployment/velero -n velero
+```
+
+#### Step 7: Verify Services
+
+```bash
+# Test MinIO access with new credentials
+kubectl exec -n storage deploy/minio -- mc alias set myminio http://localhost:9000 admin "$NEW_MINIO_PASS"
+kubectl exec -n storage deploy/minio -- mc ls myminio/
+
+# Test Harbor login
+echo "$NEW_HARBOR_PASS" | docker login harbor.192.168.0.210.nip.io -u admin --password-stdin
+
+# Check all pods are running
+kubectl get pods -n storage
+kubectl get pods -n harbor
+kubectl get pods -n observability
+kubectl get pods -n velero
+```
+
+#### (Optional) Step 8: Set Up External Secrets Operator
+
+For automatic secret synchronization from OpenBao to Kubernetes:
+
+```bash
+# Install External Secrets Operator via Helm
+helm repo add external-secrets https://charts.external-secrets.io
+helm install external-secrets external-secrets/external-secrets \
+  -n external-secrets --create-namespace
+
+# Create ClusterSecretStore pointing to OpenBao
+cat <<EOF | kubectl apply -f -
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: openbao
+spec:
+  provider:
+    vault:
+      server: "http://openbao.openbao.svc:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        tokenSecretRef:
+          name: openbao-token
+          namespace: external-secrets
+          key: token
+EOF
+
+# Create ExternalSecret for MinIO (example)
+cat <<EOF | kubectl apply -f -
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: minio-credentials
+  namespace: storage
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao
+  target:
+    name: minio-credentials
+  data:
+    - secretKey: rootUser
+      remoteRef:
+        key: secret/data/minio
+        property: rootUser
+    - secretKey: rootPassword
+      remoteRef:
+        key: secret/data/minio
+        property: rootPassword
+EOF
+```
+
+#### Security Checklist
+
+| Task | Status |
+|------|--------|
+| OpenBao initialized and unsealed | ☐ |
+| Root token stored securely (not in cluster!) | ☐ |
+| MinIO password rotated | ☐ |
+| Harbor password rotated | ☐ |
+| Loki S3 credentials updated | ☐ |
+| Velero S3 credentials updated | ☐ |
+| Default passwords removed from GitOps manifests | ☐ |
+| Services verified working | ☐ |
+
+> ⚠️ **Important:** After migrating secrets, update your GitOps manifests to reference Kubernetes Secrets instead of inline values. This prevents ArgoCD from overwriting your rotated credentials on the next sync.
+
+---
+
+### 12.10 Component Cleanup Commands
 
 Unlike the nuclear `05_reset_cluster.yml`, these commands allow **clean removal of individual components** without destroying the entire cluster.
 
