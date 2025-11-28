@@ -1451,6 +1451,10 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
     gpu_mem: 16
     # Containerd pause image for Kubernetes
     sandbox_image: "registry.k8s.io/pause:3.10"
+    # Suppress needrestart interactive prompts
+    env_vars:
+      DEBIAN_FRONTEND: noninteractive
+      NEEDRESTART_MODE: automatic
 
   # =========================================================================
   # HANDLERS - Triggered by notify, run once at end
@@ -1479,23 +1483,19 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
   # =========================================================================
   tasks:
     # -----------------------------------------------------------------------
-    # PRE-FLIGHT CHECKS
+    # PRE-FLIGHT CHECKS & CLEANUP
     # -----------------------------------------------------------------------
     - name: Verify we're running on ARM64
       ansible.builtin.assert:
         that:
           - ansible_architecture == "aarch64"
         fail_msg: "This playbook is designed for ARM64 (Raspberry Pi). Detected: {{ ansible_architecture }}"
-        success_msg: "Architecture verified: {{ ansible_architecture }}"
       tags: [preflight]
 
-    - name: Display target node info
-      ansible.builtin.debug:
-        msg: |
-          Node: {{ inventory_hostname }}
-          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
-          RAM: {{ ansible_memtotal_mb }} MB
-          CPUs: {{ ansible_processor_vcpus }}
+    - name: Wait for automatic system updates to complete (Release APT Lock)
+      ansible.builtin.shell: |
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done;
+      changed_when: false
       tags: [preflight]
 
     # -----------------------------------------------------------------------
@@ -1506,10 +1506,8 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
         update_cache: true
         upgrade: dist
         cache_valid_time: 3600
-      register: apt_action
-      retries: 5
-      delay: 10
-      until: apt_action is succeeded
+        lock_timeout: 300
+      environment: "{{ env_vars }}"
       tags: [packages]
 
     - name: Install Kubernetes dependencies
@@ -1538,6 +1536,8 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
           - htop
           - iotop
         state: present
+        lock_timeout: 300
+      environment: "{{ env_vars }}"
       tags: [packages]
 
     - name: Enable iscsid service for Longhorn
@@ -1552,7 +1552,8 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
     # -----------------------------------------------------------------------
     - name: Disable swap immediately
       ansible.builtin.command: swapoff -a
-      changed_when: true
+      changed_when: false
+      when: ansible_swaptotal_mb > 0
       tags: [swap]
 
     - name: Remove swap entry from fstab
@@ -1562,16 +1563,12 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
         replace: '# \1 # Disabled for Kubernetes'
       tags: [swap]
 
-    - name: Disable swap service (if exists)
+    - name: Disable swap target
       ansible.builtin.systemd:
-        name: "{{ item }}"
+        name: swap.target
         state: stopped
         enabled: false
         masked: true
-      loop:
-        - dphys-swapfile
-        - swap.target
-      failed_when: false
       tags: [swap]
 
     # -----------------------------------------------------------------------
@@ -1593,7 +1590,6 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
           ip_vs_sh
           nf_conntrack
         mode: '0644'
-      notify: Reboot required
       tags: [kernel]
 
     - name: Load kernel modules immediately
@@ -1635,17 +1631,8 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
 
           # File descriptor limits
           fs.file-max                         = 2097152
-
-          # Disable IPv6 if not needed (saves memory)
-          # net.ipv6.conf.all.disable_ipv6    = 1
-          # net.ipv6.conf.default.disable_ipv6 = 1
         mode: '0644'
       notify: Apply sysctl
-      tags: [kernel]
-
-    - name: Apply sysctl parameters now
-      ansible.builtin.command: sysctl --system
-      changed_when: true
       tags: [kernel]
 
     # -----------------------------------------------------------------------
@@ -1698,6 +1685,8 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
       ansible.builtin.apt:
         name: containerd
         state: present
+        lock_timeout: 300
+      environment: "{{ env_vars }}"
       tags: [containerd]
 
     - name: Create containerd config directory
@@ -1707,23 +1696,32 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
         mode: '0755'
       tags: [containerd]
 
+    - name: Check if containerd config exists
+      ansible.builtin.stat:
+        path: /etc/containerd/config.toml
+      register: containerd_config
+      tags: [containerd]
+
     - name: Generate containerd default config
       ansible.builtin.shell: |
         containerd config default > /etc/containerd/config.toml
-      args:
-        creates: /etc/containerd/config.toml
+      when: not containerd_config.stat.exists
+      notify: Restart containerd
       tags: [containerd]
 
-    - name: Configure containerd for Kubernetes
+    - name: Configure containerd (SystemdCgroup)
       ansible.builtin.replace:
         path: /etc/containerd/config.toml
-        regexp: "{{ item.regexp }}"
-        replace: "{{ item.replace }}"
-      loop:
-        - regexp: 'SystemdCgroup = false'
-          replace: 'SystemdCgroup = true'
-        - regexp: 'sandbox_image = ".*"'
-          replace: 'sandbox_image = "{{ sandbox_image }}"'
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: Restart containerd
+      tags: [containerd]
+
+    - name: Configure containerd (Sandbox Image)
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'sandbox_image = ".*"'
+        replace: 'sandbox_image = "{{ sandbox_image }}"'
       notify: Restart containerd
       tags: [containerd]
 
@@ -1759,6 +1757,20 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
       failed_when: containerd_check.stdout != "active"
       tags: [validate]
 
+    - name: Verify cgroups enabled (CMDLINE)
+      ansible.builtin.command: cat /boot/firmware/cmdline.txt
+      register: cmdline_check
+      changed_when: false
+      failed_when: "'cgroup_enable=cpuset' not in cmdline_check.stdout"
+      tags: [validate]
+
+    - name: Check if reboot needed for cgroups
+      ansible.builtin.shell: |
+        grep -q "cgroup_enable=cpuset" /proc/cmdline && echo "active" || echo "pending"
+      register: cgroup_runtime
+      changed_when: false
+      tags: [validate]
+
     - name: Display completion message
       ansible.builtin.debug:
         msg: |
@@ -1770,8 +1782,8 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
           • Kernel modules loaded
           • Sysctl tuned for Kubernetes
           • Containerd configured with SystemdCgroup
-          {% if cgroup_status.stdout == "disabled" %}
-          ⚠️  REBOOT REQUIRED for cgroup changes!
+          {% if cgroup_runtime.stdout == "pending" %}
+          ⚠️  REBOOT REQUIRED - cgroups changes pending!
           {% endif %}
       tags: [validate]
 ```
