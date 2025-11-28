@@ -1411,6 +1411,13 @@ This playbook prepares the base OS for Kubernetes. It runs on **all nodes** and 
 | Container Runtime | Install containerd with SystemdCgroup + correct pause image | Required runtime for Kubernetes 1.24+ |
 | Validation | Verify swap, modules, containerd | Catch issues before proceeding |
 
+**Run this playbook:**
+
+```bash
+cd ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide
+ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
+```
+
 > ⚠️ **Important:** This playbook will reboot nodes if cgroup or kernel parameters change. Plan for ~5 minutes downtime per node.
 
 <details>
@@ -1787,6 +1794,12 @@ This playbook installs the Kubernetes toolchain on all nodes. We deliberately in
 | `tetra` | Control plane only | Tetragon CLI for eBPF runtime security |
 | `etcd-client` | Control plane only | Direct etcd access for debugging |
 | `k9s` | Control plane only | Terminal UI for cluster management |
+
+**Run this playbook:**
+
+```bash
+ansible-playbook -i ansible/hosts ansible/playbooks/02_k8s_binaries.yml
+```
 
 > 💡 **Version Locking:** The playbook uses `dpkg --set-selections` to "hold" packages at 1.33.x. This prevents `apt upgrade` from accidentally updating Kubernetes and breaking your cluster.
 
@@ -2435,6 +2448,14 @@ This playbook orchestrates the complete cluster bootstrap in three phases:
 | `l2announcements.enabled: true` | Enabled | Native LoadBalancer without MetalLB |
 | `hubble.ui.service.type: NodePort` | NodePort | Access Hubble UI via any node IP |
 
+**Run this playbook:**
+
+```bash
+ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
+```
+
+> ⚠️ **Note:** This will overwrite `~/.kube/config` on your local machine with the new cluster credentials.
+
 <details>
 <summary>📄 Click to expand full ansible/playbooks/03_cluster_init.yml</summary>
 
@@ -2978,7 +2999,15 @@ This playbook runs only on the `big` (Control Plane) node. It formats the USB HD
 | **Mount Options** | `defaults,noatime` | `noatime` reduces write operations |
 | **Target Node** | `rpi4-1` only | Only the HDD-equipped node |
 
+**Run this playbook:**
+
+```bash
+ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
+```
+
 > ⚠️ **Important:** Before running, verify your HDD device with `lsblk` on `rpi4-1`. The default is `/dev/sda1` but USB enumeration can vary. For stability, use `/dev/disk/by-id/...`.
+
+> ⚠️ **Data Loss Warning:** This playbook will format the HDD if it's not already ext4. Ensure no important data exists on the drive.
 
 <details>
 <summary>📄 Click to expand full ansible/playbooks/04_storage_mount.yml</summary>
@@ -3065,6 +3094,12 @@ This script installs Longhorn via Helm and applies critical configurations to pr
 | **1. Helm Install** | Deploy Longhorn v1.10.1 | Core storage system |
 | **2. Label CP** | `node.longhorn.io/create-default-disk=true` | Mark rpi4-1 as storage node |
 | **3. Lock Workers** | `allowScheduling: false` on rpi4-2,3,4 | Protect SD cards from writes |
+
+**Run this script:**
+
+```bash
+bash bootstrap/longhorn/install.sh
+```
 
 **Longhorn Settings:**
 
@@ -3757,6 +3792,12 @@ This script installs **Traefik v3** as the cluster's ingress controller and Gate
 | `logs.access.format` | `json` | Structured logs for Loki |
 | `metrics.prometheus.enabled` | `true` | Expose metrics for Prometheus |
 
+**Run this script:**
+
+```bash
+bash bootstrap/traefik/install.sh
+```
+
 <details>
 <summary>📄 Click to expand full bootstrap/traefik/install.sh</summary>
 
@@ -3890,6 +3931,12 @@ This script installs **ArgoCD**, the GitOps controller that continuously monitor
 | `server.extraArgs` | `--insecure` | TLS offload to Traefik (avoids double encryption) |
 | `global.logging.format` | `json` | Structured logs for Loki |
 | `configs.params.server.insecure` | `true` | Allows HTTP backend |
+
+**Run this script:**
+
+```bash
+bash bootstrap/argocd/install.sh
+```
 
 **Expected Output:**
 
@@ -10389,6 +10436,19 @@ This playbook is a safety net for your learning process. If you misconfigure the
 | **Container Images** | ❌ No | containerd cache | Speeds up rebuild |
 | **Longhorn Data** | ❌ No | `/mnt/usb-data` | PVs preserved |
 | **OS Configuration** | ❌ No | `/etc/` | Ansible configs remain |
+
+**Run this playbook:**
+
+```bash
+# ⚠️ DESTRUCTIVE - This will destroy your entire cluster!
+ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml
+
+# To also wipe Longhorn storage data:
+ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml -e "wipe_storage_data=true"
+
+# To reset a single node only:
+ansible-playbook -i ansible/hosts ansible/playbooks/05_reset_cluster.yml --limit rpi4-2
+```
 
 <details>
 <summary>📄 Click to expand full ansible/playbooks/05_reset_cluster.yml</summary>
