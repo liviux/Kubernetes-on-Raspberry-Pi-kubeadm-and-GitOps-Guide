@@ -1,21 +1,56 @@
+# ============================================================================
+# KUBERNETES CLUSTER INVENTORY
+# ============================================================================
+
 [big]
-# Control Plane (8GB RAM) - The Storage Node
+# Control Plane Node - 8GB RAM, 1TB HDD
+# Runs: API Server, etcd, Scheduler, Controller Manager, Longhorn, MinIO
 rpi4-1
 
 [small]
-# Worker Nodes (4GB RAM) - Compute Only
+# Worker Nodes - 4GB RAM each
+# Runs: Application workloads (stateless only, no PVCs)
 rpi4-2
 rpi4-3
 rpi4-4
 
+[cluster:children]
+big
+small
+
+# ============================================================================
+# CONNECTION SETTINGS
+# ============================================================================
 [all:vars]
-# Connection Settings
 ansible_connection=ssh
 ansible_user=user
-ansible_ssh_private_key_file=/home/user/.ssh/rsa-4096/key-nopassphrase.pem
-ansible_python_interpreter=/usr/bin/python3.13
+ansible_ssh_private_key_file=~/.ssh/rpi-cluster
+ansible_python_interpreter=/usr/bin/python3
 
-# Environment Variables
+# Reduce SSH connection time
+ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+# ============================================================================
+# KUBERNETES CONFIGURATION
+# ============================================================================
 k8s_version=1.33
-# Ensure this IP is within your router's subnet (192.168.0.x)
+pod_network_cidr=10.244.0.0/16
+service_cidr=10.96.0.0/12
+
+# ============================================================================
+# NETWORK CONFIGURATION
+# ============================================================================
+# LoadBalancer IP pool for Cilium L2 announcements
+# Must be in your home network subnet and NOT used by DHCP
+loadbalancer_ip_start=192.168.0.210
+loadbalancer_ip_end=192.168.0.220
+
+# Primary LoadBalancer IP (Traefik Gateway)
 loadbalancer_ip=192.168.0.210
+
+# ============================================================================
+# STORAGE CONFIGURATION
+# ============================================================================
+# HDD device on control plane (verify with 'lsblk' after connecting HDD)
+hdd_device=/dev/sda
+longhorn_data_path=/var/lib/longhorn

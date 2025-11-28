@@ -1061,13 +1061,13 @@ cat ~/.ssh/rpi-cluster.pub
 
 ```bash
 # Method 1: Check your router's DHCP lease table (web UI)
-# Usually at http://192.168.0.1 or http://192.168.1.1
+# Usually at http://192.168.0.1 or http://192.168.1.1 or http://192.168.68.1
 
 # Method 2: Network scan (requires nmap)
-nmap -sn 192.168.0.0/24 | grep -B2 "Raspberry"
+nmap -sn 192.168.68.0/24 | grep -B2 "rpi"
 
 # Method 3: mDNS/Bonjour (if enabled)
-ping rpi4-1.local
+ping rpi4-1
 ```
 
 #### Step 4: Configure Static DHCP Leases
@@ -1206,27 +1206,131 @@ longhorn_data_path=/var/lib/longhorn
 <summary>📄 Click to expand full ansible/ansible.cfg</summary>
 
 ```ini
-[defaults]
-inventory = hosts
-host_key_checking = False
-retry_files_enabled = False
-gathering = smart
-fact_caching = jsonfile
-fact_caching_connection = /tmp/ansible_facts
-fact_caching_timeout = 3600
+# =============================================================================
+# Ansible Configuration for Raspberry Pi Kubernetes Cluster
+# =============================================================================
+# Place this file in the ansible/ directory alongside the hosts inventory.
+# Ansible automatically discovers ansible.cfg in the current working directory.
+#
+# Usage: Run playbooks from the ansible/ directory:
+#   cd ansible/
+#   ansible-playbook playbooks/01_node_prep.yml
+# =============================================================================
 
-# Performance tuning
-forks = 10
+[defaults]
+# -----------------------------------------------------------------------------
+# INVENTORY SETTINGS
+# -----------------------------------------------------------------------------
+# Path to the inventory file containing host definitions
+inventory = ./hosts
+
+# Default remote user (matches the user created during Pi Imager setup)
+remote_user = user
+
+# Disable host key checking for initial setup
+# Enable this in production for security
+host_key_checking = False
+
+# Path to store temporary files on managed nodes
+remote_tmp = /tmp/ansible-${USER}
+
+# Path for local temporary files
+local_tmp = /tmp/ansible-local-${USER}
+
+# Number of parallel processes (4 = all Pi nodes simultaneously)
+forks = 4
+
+# Default timeout for SSH connections (seconds)
+timeout = 30
+
+# Suppress deprecation warnings (optional, disable in CI)
+deprecation_warnings = False
+
+# Display task path on failure for debugging
+display_failed_stderr = True
+
+# Retry failed hosts automatically
+retry_files_enabled = True
+retry_files_save_path = ./playbooks/.retry
+
+# Colorized output
+force_color = True
+
+# -----------------------------------------------------------------------------
+# LOGGING
+# -----------------------------------------------------------------------------
+# Uncomment to enable logging (useful for debugging)
+# log_path = ./ansible.log
+
+# -----------------------------------------------------------------------------
+# PERFORMANCE OPTIMIZATIONS
+# -----------------------------------------------------------------------------
+# Use pipelining to reduce SSH operations (requires requiretty disabled)
 pipelining = True
 
-# Output formatting
+# Gather only necessary facts (speeds up playbook execution)
+gathering = smart
+fact_caching = jsonfile
+fact_caching_connection = /tmp/ansible-facts-cache
+fact_caching_timeout = 3600
+
+# -----------------------------------------------------------------------------
+# STDOUT CALLBACK
+# -----------------------------------------------------------------------------
+# Use YAML callback for better readability
 stdout_callback = yaml
 callback_whitelist = profile_tasks
 
+[privilege_escalation]
+# -----------------------------------------------------------------------------
+# PRIVILEGE ESCALATION (sudo)
+# -----------------------------------------------------------------------------
+# Enable sudo for all tasks by default
+become = True
+
+# Method for privilege escalation
+become_method = sudo
+
+# Target user after escalation
+become_user = root
+
+# Ask for sudo password (disable if using NOPASSWD in sudoers)
+become_ask_pass = False
+
 [ssh_connection]
-ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
-pipelining = True
-```
+# -----------------------------------------------------------------------------
+# SSH CONNECTION SETTINGS
+# -----------------------------------------------------------------------------
+# SSH arguments for multiplexing (reuse connections)
+ssh_args = -C -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+
+# Use SCP for file transfers (more compatible than SFTP)
+scp_if_ssh = smart
+
+# Transfer method (prefer sftp, fallback to scp)
+transfer_method = smart
+
+# Private key file for SSH authentication
+# Uncomment and update path if not using default key location
+# private_key_file = ~/.ssh/rpi-cluster
+
+[colors]
+# -----------------------------------------------------------------------------
+# OUTPUT COLORS
+# -----------------------------------------------------------------------------
+changed = yellow
+debug = dark gray
+deprecate = purple
+diff_add = green
+diff_lines = cyan
+diff_remove = red
+error = red
+highlight = white
+ok = green
+skip = cyan
+unreachable = bright red
+verbose = blue
+warn = bright purple```
 
 </details>
 
