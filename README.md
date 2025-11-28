@@ -1418,6 +1418,7 @@ This playbook prepares the base OS for Kubernetes. It runs on **all nodes** and 
 
 ```yaml
 ---
+---
 # =============================================================================
 # Phase 1 - OS Preparation & Tuning
 # =============================================================================
@@ -1627,6 +1628,10 @@ This playbook prepares the base OS for Kubernetes. It runs on **all nodes** and 
 
           # File descriptor limits
           fs.file-max                         = 2097152
+
+          # Disable IPv6 if not needed (saves memory)
+          # net.ipv6.conf.all.disable_ipv6    = 1
+          # net.ipv6.conf.default.disable_ipv6 = 1
         mode: '0644'
       notify: Apply sysctl
       tags: [kernel]
