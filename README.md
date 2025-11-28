@@ -1359,6 +1359,8 @@ ansible -i hosts big -m shell -a "lsblk"
 
 # Should show /dev/sda (your HDD)
 ```
+</details>
+
 
 ---
 
