@@ -213,14 +213,14 @@
     # -----------------------------------------------------------------------
     - name: Check if cgroup_disable=memory exists (must remove)
       ansible.builtin.shell: |
-        grep -q "cgroup_disable=memory" /boot/firmware/cmdline.txt && echo "present" || echo "absent"
+        grep -q "cgroup_disable=memory" /boot/firmware/current/cmdline.txt && echo "present" || echo "absent"
       register: cgroup_disable_status
       changed_when: false
       tags: [cgroups]
 
     - name: Remove cgroup_disable=memory from cmdline
       ansible.builtin.replace:
-        path: /boot/firmware/cmdline.txt
+        path: /boot/firmware/current/cmdline.txt
         regexp: 'cgroup_disable=memory\s*'
         replace: ''
       when: cgroup_disable_status.stdout == "present"
@@ -229,14 +229,14 @@
 
     - name: Check if cgroups already enabled
       ansible.builtin.shell: |
-        grep -q "cgroup_enable=cpuset" /boot/firmware/cmdline.txt && echo "enabled" || echo "disabled"
+        grep -q "cgroup_enable=cpuset" /boot/firmware/current/cmdline.txt && echo "enabled" || echo "disabled"
       register: cgroup_status
       changed_when: false
       tags: [cgroups]
 
     - name: Enable cgroups in boot cmdline
       ansible.builtin.replace:
-        path: /boot/firmware/cmdline.txt
+        path: /boot/firmware/current/cmdline.txt
         regexp: '(^.+rootwait)(.*)$'
         replace: '\1 cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1\2'
       when: cgroup_status.stdout == "disabled"
@@ -349,7 +349,7 @@
       tags: [validate]
 
     - name: Verify cgroups enabled (CMDLINE)
-      ansible.builtin.command: cat /boot/firmware/cmdline.txt
+      ansible.builtin.command: cat /boot/firmware/current/cmdline.txt
       register: cmdline_check
       changed_when: false
       failed_when: "'cgroup_enable=cpuset' not in cmdline_check.stdout or 'cgroup_disable=memory' in cmdline_check.stdout"
