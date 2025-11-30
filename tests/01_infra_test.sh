@@ -88,7 +88,9 @@ fi
 
 check "Cgroups v2 memory controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q memory'"
 check "Cgroups v2 cpuset controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q cpuset'"
-check "No cgroup_disable=memory in cmdline" "ansible -i ansible/hosts all -m shell -a '! grep -q cgroup_disable=memory /proc/cmdline'"
+check "No cgroup_disable=memory in /proc/cmdline" "ansible -i ansible/hosts all -m shell -a '! grep -q cgroup_disable=memory /proc/cmdline'"
+check "No cgroup_disable=memory in cmdline files" "ansible -i ansible/hosts all -m shell -a '! grep -r cgroup_disable=memory /boot/firmware/cmdline.txt /boot/firmware/*/cmdline.txt 2>/dev/null'"
+check "cgroup_enable=memory in /proc/cmdline" "ansible -i ansible/hosts all -m shell -a 'grep -q cgroup_enable=memory /proc/cmdline'"
 check "IP forwarding enabled" "ansible -i ansible/hosts all -m shell -a 'sysctl net.ipv4.ip_forward | grep -q \"= 1\"'"
 check "Bridge netfilter iptables" "ansible -i ansible/hosts all -m shell -a 'sysctl net.bridge.bridge-nf-call-iptables | grep -q \"= 1\"'"
 
@@ -110,7 +112,7 @@ echo "└───────────────────────�
 
 check "containerd running" "ansible -i ansible/hosts all -m shell -a 'systemctl is-active containerd | grep -q active'"
 check "containerd enabled" "ansible -i ansible/hosts all -m shell -a 'systemctl is-enabled containerd | grep -q enabled'"
-check "containerd SystemdCgroup" "ansible -i ansible/hosts all -m shell -a 'grep -q \"SystemdCgroup = true\" /etc/containerd/config.toml'"
+check "containerd SystemdCgroup" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^\\s*SystemdCgroup\\s*=\\s*true\" /etc/containerd/config.toml'"
 check "containerd pause image" "ansible -i ansible/hosts all -m shell -a 'grep -q \"sandbox_image.*pause:3\" /etc/containerd/config.toml'"
 check "iscsid service running" "ansible -i ansible/hosts all -m shell -a 'systemctl is-active iscsid | grep -q active'"
 
@@ -152,6 +154,9 @@ if [ $FAIL -gt 0 ]; then
     echo "  • Swap still active: reboot nodes after playbook"
     echo "  • Missing modules: check /etc/modules-load.d/k8s.conf"
     echo "  • containerd issues: systemctl restart containerd"
+    echo "  • cgroup_disable=memory: remove from ALL /boot/firmware/**/cmdline.txt files, then reboot"
+    echo "  • SystemdCgroup not set: regenerate config with 'containerd config default > /etc/containerd/config.toml'"
+    echo "                          then set SystemdCgroup = true and restart containerd"
     exit 1
 fi
 

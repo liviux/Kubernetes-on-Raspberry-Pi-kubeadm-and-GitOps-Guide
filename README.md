@@ -1638,36 +1638,48 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
     # -----------------------------------------------------------------------
     # RASPBERRY PI SPECIFIC - CGROUPS
     # -----------------------------------------------------------------------
-    - name: Check if cgroup_disable=memory exists (must remove)
-      ansible.builtin.shell: |
-        grep -q "cgroup_disable=memory" /boot/firmware/current/cmdline.txt && echo "present" || echo "absent"
-      register: cgroup_disable_status
-      changed_when: false
+    # Note: RPi firmware can have multiple cmdline files depending on os_prefix
+    # in config.txt. We need to check and fix ALL of them.
+    
+    - name: Find all cmdline.txt files
+      ansible.builtin.find:
+        paths:
+          - /boot/firmware
+          - /boot/firmware/current
+          - /boot/firmware/new
+        patterns: "cmdline.txt"
+        file_type: file
+      register: cmdline_files
       tags: [cgroups]
 
-    - name: Remove cgroup_disable=memory from cmdline
+    - name: Remove cgroup_disable=memory from all cmdline files
       ansible.builtin.replace:
-        path: /boot/firmware/current/cmdline.txt
+        path: "{{ item.path }}"
         regexp: 'cgroup_disable=memory\s*'
         replace: ''
-      when: cgroup_disable_status.stdout == "present"
+      loop: "{{ cmdline_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
       notify: Reboot required
       tags: [cgroups]
 
-    - name: Check if cgroups already enabled
-      ansible.builtin.shell: |
-        grep -q "cgroup_enable=cpuset" /boot/firmware/current/cmdline.txt && echo "enabled" || echo "disabled"
-      register: cgroup_status
-      changed_when: false
-      tags: [cgroups]
-
-    - name: Enable cgroups in boot cmdline
+    - name: Ensure cgroups enabled in all cmdline files
       ansible.builtin.replace:
-        path: /boot/firmware/current/cmdline.txt
-        regexp: '(^.+rootwait)(.*)$'
+        path: "{{ item.path }}"
+        regexp: '(^.+rootwait)(?!.*cgroup_enable=cpuset)(.*)$'
         replace: '\1 cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1\2'
-      when: cgroup_status.stdout == "disabled"
+      loop: "{{ cmdline_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
       notify: Reboot required
+      tags: [cgroups]
+
+    - name: Verify no cgroup_disable=memory in any cmdline file
+      ansible.builtin.shell: |
+        grep -l "cgroup_disable=memory" /boot/firmware/cmdline.txt /boot/firmware/*/cmdline.txt 2>/dev/null || echo "CLEAN"
+      register: cgroup_disable_check
+      changed_when: false
+      failed_when: cgroup_disable_check.stdout != "CLEAN"
       tags: [cgroups]
 
     # -----------------------------------------------------------------------
@@ -1727,12 +1739,30 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
       notify: Restart containerd
       tags: [containerd]
 
-    - name: Configure containerd (SystemdCgroup)
+    - name: Configure containerd (SystemdCgroup) - handle various formats
       ansible.builtin.replace:
         path: /etc/containerd/config.toml
-        regexp: 'SystemdCgroup = false'
-        replace: 'SystemdCgroup = true'
+        regexp: '(\s*SystemdCgroup\s*=\s*)false'
+        replace: '\1true'
       notify: Restart containerd
+      tags: [containerd]
+
+    - name: Ensure SystemdCgroup is present in runc options
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*SystemdCgroup\s*='
+        line: '            SystemdCgroup = true'
+        insertafter: '\[plugins\."io\.containerd\.grpc\.v1\.cri"\.containerd\.runtimes\.runc\.options\]'
+        state: present
+      notify: Restart containerd
+      tags: [containerd]
+
+    - name: Verify SystemdCgroup is set to true
+      ansible.builtin.shell: |
+        grep -E "^\s*SystemdCgroup\s*=\s*true" /etc/containerd/config.toml && echo "OK" || echo "MISSING"
+      register: systemd_cgroup_check
+      changed_when: false
+      failed_when: systemd_cgroup_check.stdout != "OK"
       tags: [containerd]
 
     - name: Configure containerd (Sandbox Image)
@@ -1775,11 +1805,25 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
       failed_when: containerd_check.stdout != "active"
       tags: [validate]
 
-    - name: Verify cgroups enabled (CMDLINE)
-      ansible.builtin.command: cat /boot/firmware/current/cmdline.txt
+    - name: Verify cgroups enabled (CMDLINE files)
+      ansible.builtin.shell: |
+        # Check all cmdline files for proper configuration
+        for f in /boot/firmware/cmdline.txt /boot/firmware/*/cmdline.txt; do
+          if [ -f "$f" ]; then
+            if grep -q "cgroup_disable=memory" "$f"; then
+              echo "FAIL: cgroup_disable=memory found in $f"
+              exit 1
+            fi
+            if ! grep -q "cgroup_enable=cpuset" "$f"; then
+              echo "FAIL: cgroup_enable=cpuset missing in $f"
+              exit 1
+            fi
+          fi
+        done
+        echo "OK"
       register: cmdline_check
       changed_when: false
-      failed_when: "'cgroup_enable=cpuset' not in cmdline_check.stdout or 'cgroup_disable=memory' in cmdline_check.stdout"
+      failed_when: cmdline_check.rc != 0
       tags: [validate]
 
     - name: Check if reboot needed for cgroups
@@ -2189,6 +2233,8 @@ This script validates that Phase 1 successfully prepared all nodes. Run it befor
 | **Hardware** | GPU mem, WiFi/BT disabled, watchdog | RPi optimizations applied |
 | **Packages** | open-iscsi, nfs-common, ipset, ipvsadm, conntrack | All dependencies installed |
 
+> **📝 Note on Cgroups v2:** Modern Ubuntu (22.04+) and Raspberry Pi OS (Bookworm+) use **cgroups v2** by default. The test script verifies cgroups v2 configuration by checking `/sys/fs/cgroup/cgroup.controllers`. If you see tutorials suggesting to test with `mkdir /sys/fs/cgroup/memory/test`, those are cgroups **v1** commands that don't work on v2 systems. See [§12.6 Troubleshooting Cheatsheet](#126-troubleshooting-cheatsheet) for proper v2 verification commands.
+
 <details>
 <summary>📄 Click to expand full test script</summary>
 
@@ -2283,7 +2329,9 @@ fi
 
 check "Cgroups v2 memory controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q memory'"
 check "Cgroups v2 cpuset controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q cpuset'"
-check "No cgroup_disable=memory in cmdline" "ansible -i ansible/hosts all -m shell -a '! grep -q cgroup_disable=memory /proc/cmdline'"
+check "No cgroup_disable=memory in /proc/cmdline" "ansible -i ansible/hosts all -m shell -a '! grep -q cgroup_disable=memory /proc/cmdline'"
+check "No cgroup_disable=memory in cmdline files" "ansible -i ansible/hosts all -m shell -a '! grep -r cgroup_disable=memory /boot/firmware/cmdline.txt /boot/firmware/*/cmdline.txt 2>/dev/null'"
+check "cgroup_enable=memory in /proc/cmdline" "ansible -i ansible/hosts all -m shell -a 'grep -q cgroup_enable=memory /proc/cmdline'"
 check "IP forwarding enabled" "ansible -i ansible/hosts all -m shell -a 'sysctl net.ipv4.ip_forward | grep -q \"= 1\"'"
 check "Bridge netfilter iptables" "ansible -i ansible/hosts all -m shell -a 'sysctl net.bridge.bridge-nf-call-iptables | grep -q \"= 1\"'"
 
@@ -2305,7 +2353,7 @@ echo "└───────────────────────�
 
 check "containerd running" "ansible -i ansible/hosts all -m shell -a 'systemctl is-active containerd | grep -q active'"
 check "containerd enabled" "ansible -i ansible/hosts all -m shell -a 'systemctl is-enabled containerd | grep -q enabled'"
-check "containerd SystemdCgroup" "ansible -i ansible/hosts all -m shell -a 'grep -q \"SystemdCgroup = true\" /etc/containerd/config.toml'"
+check "containerd SystemdCgroup" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^\\s*SystemdCgroup\\s*=\\s*true\" /etc/containerd/config.toml'"
 check "containerd pause image" "ansible -i ansible/hosts all -m shell -a 'grep -q \"sandbox_image.*pause:3\" /etc/containerd/config.toml'"
 check "iscsid service running" "ansible -i ansible/hosts all -m shell -a 'systemctl is-active iscsid | grep -q active'"
 
@@ -2347,6 +2395,9 @@ if [ $FAIL -gt 0 ]; then
     echo "  • Swap still active: reboot nodes after playbook"
     echo "  • Missing modules: check /etc/modules-load.d/k8s.conf"
     echo "  • containerd issues: systemctl restart containerd"
+    echo "  • cgroup_disable=memory: remove from ALL /boot/firmware/**/cmdline.txt files, then reboot"
+    echo "  • SystemdCgroup not set: regenerate config with 'containerd config default > /etc/containerd/config.toml'"
+    echo "                          then set SystemdCgroup = true and restart containerd"
     exit 1
 fi
 
@@ -11098,6 +11149,68 @@ kubectl cordon <node-name>
 # Drain node (evict pods)
 kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
 ```
+
+**Cgroups Troubleshooting (v1 vs v2)**
+
+> ⚠️ **Important:** Modern Linux distributions (Ubuntu 22.04+, Raspberry Pi OS Bookworm+) use **cgroups v2** (unified hierarchy) by default. Many online tutorials show cgroups v1 commands that **will not work** on v2 systems. This is NOT an error—your system is properly configured!
+
+```bash
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1: Identify your cgroup version
+# ─────────────────────────────────────────────────────────────────────────────
+mount | grep cgroup
+# cgroups v2 output: "cgroup2 on /sys/fs/cgroup type cgroup2 ..."
+# cgroups v1 output: "cgroup on /sys/fs/cgroup/memory type cgroup ..."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2: Verify memory controller is enabled (CORRECT way for v2)
+# ─────────────────────────────────────────────────────────────────────────────
+# For cgroups v2 (modern - what you likely have):
+cat /sys/fs/cgroup/cgroup.controllers
+# Should show: cpuset cpu io memory hugetlb pids rdma misc
+
+# Check memory-related files exist:
+ls /sys/fs/cgroup/memory.*
+# Should show: memory.current, memory.high, memory.max, memory.stat, etc.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WRONG way (cgroups v1 - will fail on v2 systems):
+# ─────────────────────────────────────────────────────────────────────────────
+# sudo mkdir /sys/fs/cgroup/memory/test  # ❌ FAILS - v1 path doesn't exist
+# echo 50M | sudo tee /sys/fs/cgroup/memory/test/memory.limit_in_bytes  # ❌ FAILS
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3: Verify kernel cmdline has cgroup parameters
+# ─────────────────────────────────────────────────────────────────────────────
+cat /proc/cmdline | grep -oE 'cgroup[^ ]*'
+# Should show: cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1
+# Should NOT show: cgroup_disable=memory
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4: Test cgroup v2 memory controller (CORRECT way)
+# ─────────────────────────────────────────────────────────────────────────────
+# Create a test cgroup:
+sudo mkdir /sys/fs/cgroup/test-memory
+# Set memory limit (v2 syntax - uses "memory.max" not "memory.limit_in_bytes"):
+echo 50M | sudo tee /sys/fs/cgroup/test-memory/memory.max
+# Verify:
+cat /sys/fs/cgroup/test-memory/memory.max  # Should show: 52428800
+# Cleanup:
+sudo rmdir /sys/fs/cgroup/test-memory
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 5: Verify containerd uses systemd cgroup driver
+# ─────────────────────────────────────────────────────────────────────────────
+grep SystemdCgroup /etc/containerd/config.toml
+# Should show: SystemdCgroup = true
+```
+
+| Cgroup Version | Mount Point | Memory Limit File | Test Path |
+|----------------|-------------|-------------------|-----------|
+| **v1 (legacy)** | `/sys/fs/cgroup/memory/` | `memory.limit_in_bytes` | `/sys/fs/cgroup/memory/test/` |
+| **v2 (unified)** | `/sys/fs/cgroup/` | `memory.max` | `/sys/fs/cgroup/test/` |
+
+> **Why cgroups v2?** Kubernetes 1.25+ fully supports cgroups v2, and it's the default on modern distros. Benefits include unified hierarchy, better resource accounting, and improved eBPF integration (used by Cilium). The playbook in this guide configures `SystemdCgroup = true` in containerd, which properly integrates with cgroups v2.
 
 **ArgoCD Troubleshooting**
 ```bash
