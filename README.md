@@ -1639,16 +1639,14 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
     # RASPBERRY PI SPECIFIC - CGROUPS
     # -----------------------------------------------------------------------
     # Note: RPi firmware can have multiple cmdline files depending on os_prefix
-    # in config.txt. We need to check and fix ALL of them.
+    # in config.txt. We need to check and fix ALL of them (current, new, old, etc.)
     
     - name: Find all cmdline.txt files
       ansible.builtin.find:
-        paths:
-          - /boot/firmware
-          - /boot/firmware/current
-          - /boot/firmware/new
+        paths: /boot/firmware
         patterns: "cmdline.txt"
         file_type: file
+        recurse: true
       register: cmdline_files
       tags: [cgroups]
 
@@ -1676,10 +1674,15 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
 
     - name: Verify no cgroup_disable=memory in any cmdline file
       ansible.builtin.shell: |
-        grep -l "cgroup_disable=memory" /boot/firmware/cmdline.txt /boot/firmware/*/cmdline.txt 2>/dev/null || echo "CLEAN"
+        FOUND=$(find /boot/firmware -name "cmdline.txt" -exec grep -l "cgroup_disable=memory" {} \; 2>/dev/null)
+        if [ -n "$FOUND" ]; then
+          echo "FAIL: $FOUND"
+          exit 1
+        fi
+        echo "CLEAN"
       register: cgroup_disable_check
       changed_when: false
-      failed_when: cgroup_disable_check.stdout != "CLEAN"
+      failed_when: cgroup_disable_check.rc != 0
       tags: [cgroups]
 
     # -----------------------------------------------------------------------
@@ -1759,10 +1762,10 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
 
     - name: Verify SystemdCgroup is set to true
       ansible.builtin.shell: |
-        grep -E "^\s*SystemdCgroup\s*=\s*true" /etc/containerd/config.toml && echo "OK" || echo "MISSING"
+        grep -qE "^\s*SystemdCgroup\s*=\s*true" /etc/containerd/config.toml && echo "OK" || echo "MISSING"
       register: systemd_cgroup_check
       changed_when: false
-      failed_when: systemd_cgroup_check.stdout != "OK"
+      failed_when: "'OK' not in systemd_cgroup_check.stdout"
       tags: [containerd]
 
     - name: Configure containerd (Sandbox Image)
@@ -1808,16 +1811,14 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
     - name: Verify cgroups enabled (CMDLINE files)
       ansible.builtin.shell: |
         # Check all cmdline files for proper configuration
-        for f in /boot/firmware/cmdline.txt /boot/firmware/*/cmdline.txt; do
-          if [ -f "$f" ]; then
-            if grep -q "cgroup_disable=memory" "$f"; then
-              echo "FAIL: cgroup_disable=memory found in $f"
-              exit 1
-            fi
-            if ! grep -q "cgroup_enable=cpuset" "$f"; then
-              echo "FAIL: cgroup_enable=cpuset missing in $f"
-              exit 1
-            fi
+        for f in $(find /boot/firmware -name "cmdline.txt" 2>/dev/null); do
+          if grep -q "cgroup_disable=memory" "$f"; then
+            echo "FAIL: cgroup_disable=memory found in $f"
+            exit 1
+          fi
+          if ! grep -q "cgroup_enable=cpuset" "$f"; then
+            echo "FAIL: cgroup_enable=cpuset missing in $f"
+            exit 1
           fi
         done
         echo "OK"
