@@ -30,10 +30,10 @@ check() {
     local CMD=$2
     if eval "$CMD" > /dev/null 2>&1; then
         echo -e "${GREEN}✅ $NAME: PASS${NC}"
-        ((PASS++))
+        ((PASS++)) || true
     else
         echo -e "${RED}❌ $NAME: FAIL${NC}"
-        ((FAIL++))
+        ((FAIL++)) || true
     fi
 }
 
@@ -42,10 +42,10 @@ warn_check() {
     local CMD=$2
     if eval "$CMD" > /dev/null 2>&1; then
         echo -e "${GREEN}✅ $NAME: PASS${NC}"
-        ((PASS++))
+        ((PASS++)) || true
     else
         echo -e "${YELLOW}⚠️  $NAME: WARN (optional)${NC}"
-        ((WARN++))
+        ((WARN++)) || true
     fi
 }
 
@@ -80,14 +80,15 @@ echo "└───────────────────────�
 SWAP_OUTPUT=$(ansible -i ansible/hosts all -m shell -a "swapon --show" 2>/dev/null | grep -E "^[a-zA-Z]" | grep -v SUCCESS || true)
 if [ -z "$SWAP_OUTPUT" ]; then
     echo -e "${GREEN}✅ Swap disabled (all nodes): PASS${NC}"
-    ((PASS++))
+    ((PASS++)) || true
 else
     echo -e "${RED}❌ Swap disabled (all nodes): FAIL - Swap still active${NC}"
-    ((FAIL++))
+    ((FAIL++)) || true
 fi
 
-check "Cgroups memory enabled" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^memory.*1$\" /proc/cgroups'"
-check "Cgroups cpuset enabled" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^cpuset.*1$\" /proc/cgroups'"
+check "Cgroups v2 memory controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q memory'"
+check "Cgroups v2 cpuset controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q cpuset'"
+check "No cgroup_disable=memory in cmdline" "ansible -i ansible/hosts all -m shell -a '! grep -q cgroup_disable=memory /proc/cmdline'"
 check "IP forwarding enabled" "ansible -i ansible/hosts all -m shell -a 'sysctl net.ipv4.ip_forward | grep -q \"= 1\"'"
 check "Bridge netfilter iptables" "ansible -i ansible/hosts all -m shell -a 'sysctl net.bridge.bridge-nf-call-iptables | grep -q \"= 1\"'"
 

@@ -1638,6 +1638,22 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
     # -----------------------------------------------------------------------
     # RASPBERRY PI SPECIFIC - CGROUPS
     # -----------------------------------------------------------------------
+    - name: Check if cgroup_disable=memory exists (must remove)
+      ansible.builtin.shell: |
+        grep -q "cgroup_disable=memory" /boot/firmware/cmdline.txt && echo "present" || echo "absent"
+      register: cgroup_disable_status
+      changed_when: false
+      tags: [cgroups]
+
+    - name: Remove cgroup_disable=memory from cmdline
+      ansible.builtin.replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: 'cgroup_disable=memory\s*'
+        replace: ''
+      when: cgroup_disable_status.stdout == "present"
+      notify: Reboot required
+      tags: [cgroups]
+
     - name: Check if cgroups already enabled
       ansible.builtin.shell: |
         grep -q "cgroup_enable=cpuset" /boot/firmware/cmdline.txt && echo "enabled" || echo "disabled"
@@ -1646,8 +1662,10 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
       tags: [cgroups]
 
     - name: Enable cgroups in boot cmdline
-      ansible.builtin.shell: |
-        sed -i 's/$/ cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt
+      ansible.builtin.replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: '(^.+rootwait)(.*)$'
+        replace: '\1 cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1\2'
       when: cgroup_status.stdout == "disabled"
       notify: Reboot required
       tags: [cgroups]
@@ -1761,14 +1779,27 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
       ansible.builtin.command: cat /boot/firmware/cmdline.txt
       register: cmdline_check
       changed_when: false
-      failed_when: "'cgroup_enable=cpuset' not in cmdline_check.stdout"
+      failed_when: "'cgroup_enable=cpuset' not in cmdline_check.stdout or 'cgroup_disable=memory' in cmdline_check.stdout"
       tags: [validate]
 
     - name: Check if reboot needed for cgroups
       ansible.builtin.shell: |
-        grep -q "cgroup_enable=cpuset" /proc/cmdline && echo "active" || echo "pending"
+        # Check both that cgroup_enable is active AND cgroup_disable=memory is NOT present
+        if grep -q "cgroup_enable=cpuset" /proc/cmdline && ! grep -q "cgroup_disable=memory" /proc/cmdline; then
+          echo "active"
+        else
+          echo "pending"
+        fi
       register: cgroup_runtime
       changed_when: false
+      tags: [validate]
+
+    - name: Verify cgroups v2 memory controller (runtime)
+      ansible.builtin.shell: |
+        cat /sys/fs/cgroup/cgroup.controllers | grep -q memory && echo "enabled" || echo "disabled"
+      register: cgroup_memory_check
+      changed_when: false
+      failed_when: false
       tags: [validate]
 
     - name: Display completion message
@@ -1784,6 +1815,11 @@ ansible-playbook -i ansible/hosts ansible/playbooks/01_node_prep.yml
           • Containerd configured with SystemdCgroup
           {% if cgroup_runtime.stdout == "pending" %}
           ⚠️  REBOOT REQUIRED - cgroups changes pending!
+          {% endif %}
+          {% if cgroup_memory_check.stdout == "disabled" %}
+          ⚠️  Memory cgroup not active - reboot required!
+          {% else %}
+          • Cgroups v2 memory controller: ACTIVE
           {% endif %}
       tags: [validate]
 ```
@@ -2147,7 +2183,7 @@ This script validates that Phase 1 successfully prepared all nodes. Run it befor
 |----------|--------|---------------|
 | **Connectivity** | Ansible ping, SSH to all nodes | All 4 nodes respond |
 | **K8s Binaries** | kubeadm, kubelet, kubectl, helm, cilium-cli | Version 1.33.x installed |
-| **OS Config** | Swap, cgroups, IP forwarding, bridge netfilter | Swap off, cgroups enabled |
+| **OS Config** | Swap, cgroups v2, IP forwarding, bridge netfilter | Swap off, memory+cpuset controllers in `/sys/fs/cgroup/cgroup.controllers` |
 | **Kernel Modules** | overlay, br_netfilter, iscsi_tcp, ip_vs, nf_conntrack | All modules loaded |
 | **Container Runtime** | containerd status, SystemdCgroup, pause image, iscsid | All services active |
 | **Hardware** | GPU mem, WiFi/BT disabled, watchdog | RPi optimizations applied |
@@ -2189,10 +2225,10 @@ check() {
     local CMD=$2
     if eval "$CMD" > /dev/null 2>&1; then
         echo -e "${GREEN}✅ $NAME: PASS${NC}"
-        ((PASS++))
+        ((PASS++)) || true
     else
         echo -e "${RED}❌ $NAME: FAIL${NC}"
-        ((FAIL++))
+        ((FAIL++)) || true
     fi
 }
 
@@ -2201,10 +2237,10 @@ warn_check() {
     local CMD=$2
     if eval "$CMD" > /dev/null 2>&1; then
         echo -e "${GREEN}✅ $NAME: PASS${NC}"
-        ((PASS++))
+        ((PASS++)) || true
     else
         echo -e "${YELLOW}⚠️  $NAME: WARN (optional)${NC}"
-        ((WARN++))
+        ((WARN++)) || true
     fi
 }
 
@@ -2239,14 +2275,15 @@ echo "└───────────────────────�
 SWAP_OUTPUT=$(ansible -i ansible/hosts all -m shell -a "swapon --show" 2>/dev/null | grep -E "^[a-zA-Z]" | grep -v SUCCESS || true)
 if [ -z "$SWAP_OUTPUT" ]; then
     echo -e "${GREEN}✅ Swap disabled (all nodes): PASS${NC}"
-    ((PASS++))
+    ((PASS++)) || true
 else
     echo -e "${RED}❌ Swap disabled (all nodes): FAIL - Swap still active${NC}"
-    ((FAIL++))
+    ((FAIL++)) || true
 fi
 
-check "Cgroups memory enabled" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^memory.*1$\" /proc/cgroups'"
-check "Cgroups cpuset enabled" "ansible -i ansible/hosts all -m shell -a 'grep -E \"^cpuset.*1$\" /proc/cgroups'"
+check "Cgroups v2 memory controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q memory'"
+check "Cgroups v2 cpuset controller" "ansible -i ansible/hosts all -m shell -a 'cat /sys/fs/cgroup/cgroup.controllers | grep -q cpuset'"
+check "No cgroup_disable=memory in cmdline" "ansible -i ansible/hosts all -m shell -a '! grep -q cgroup_disable=memory /proc/cmdline'"
 check "IP forwarding enabled" "ansible -i ansible/hosts all -m shell -a 'sysctl net.ipv4.ip_forward | grep -q \"= 1\"'"
 check "Bridge netfilter iptables" "ansible -i ansible/hosts all -m shell -a 'sysctl net.bridge.bridge-nf-call-iptables | grep -q \"= 1\"'"
 
