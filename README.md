@@ -2514,7 +2514,7 @@ In this phase, we initialize the Control Plane, install the networking layer (Ci
 | **kubeadm** | 1.33.0 | Cluster bootstrapper | Custom config skips kube-proxy |
 | **Cilium** | latest | CNI + Service Mesh | eBPF-based, replaces kube-proxy |
 | **Hubble** | (bundled) | Network Observability | NodePort UI for debugging |
-| **Metrics Server** | 3.12.2 | Resource metrics | `--kubelet-insecure-tls` for self-signed certs |
+| **Metrics Server** | 3.13.0 | Resource metrics | `--kubelet-insecure-tls` for self-signed certs |
 
 ### Why Cilium?
 
@@ -2786,7 +2786,7 @@ helm repo update
 echo "Installing Metrics Server..."
 helm upgrade --install metrics-server metrics-server/metrics-server \
   --namespace kube-system \
-  --version 3.12.2 \
+  --version 3.13.0 \
   --set args[0]="--kubelet-insecure-tls" \
   --set args[1]="--kubelet-preferred-address-types=InternalIP" \
   --set resources.requests.cpu="100m" \

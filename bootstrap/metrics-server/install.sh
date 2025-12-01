@@ -32,7 +32,7 @@ helm repo update
 echo "Installing Metrics Server..."
 helm upgrade --install metrics-server metrics-server/metrics-server \
   --namespace kube-system \
-  --version 3.12.2 \
+  --version 3.13.0 \
   --set args[0]="--kubelet-insecure-tls" \
   --set args[1]="--kubelet-preferred-address-types=InternalIP" \
   --set resources.requests.cpu="100m" \
