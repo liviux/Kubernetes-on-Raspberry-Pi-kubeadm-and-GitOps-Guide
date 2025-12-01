@@ -606,7 +606,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 
 | Tool | Version | Purpose | Why This Tool? |
 |------|---------|---------|----------------|
-| **Cilium** | 1.18.x | CNI + Load Balancing | eBPF performance, replaces kube-proxy, L2 announcements |
+| **Cilium** | latest | CNI + Load Balancing | eBPF performance, replaces kube-proxy, L2 announcements |
 | **Hubble** | (embedded) | Network observability | Service maps, flow visualization |
 | **Tetragon** | (embedded) | eBPF runtime security | Kernel-level process & network monitoring |
 | **Traefik** | 3.x | Gateway API implementation | Native Gateway API support, lightweight |
@@ -2512,7 +2512,7 @@ In this phase, we initialize the Control Plane, install the networking layer (Ci
 | Component | Version | Purpose | Raspberry Pi Optimization |
 |-----------|---------|---------|---------------------------|
 | **kubeadm** | 1.33.0 | Cluster bootstrapper | Custom config skips kube-proxy |
-| **Cilium** | 1.18.4 | CNI + Service Mesh | eBPF-based, replaces kube-proxy |
+| **Cilium** | latest | CNI + Service Mesh | eBPF-based, replaces kube-proxy |
 | **Hubble** | (bundled) | Network Observability | NodePort UI for debugging |
 | **Metrics Server** | 3.12.2 | Resource metrics | `--kubelet-insecure-tls` for self-signed certs |
 
@@ -2588,7 +2588,7 @@ ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
     pod_network_cidr: "10.244.0.0/16"
     service_cidr: "10.96.0.0/12"
     # Cilium version - check https://github.com/cilium/cilium/releases
-    cilium_version: "1.18.4"
+    cilium_version: "latest"
   tasks:
     - name: Create kubeadm config
       copy:
