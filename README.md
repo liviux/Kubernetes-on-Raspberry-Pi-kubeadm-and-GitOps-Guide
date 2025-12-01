@@ -606,7 +606,7 @@ With constrained hardware, careful resource allocation is critical. Below is the
 
 | Tool | Version | Purpose | Why This Tool? |
 |------|---------|---------|----------------|
-| **Cilium** | 1.18.x | CNI + Load Balancing | eBPF performance, replaces kube-proxy, L2 announcements |
+| **Cilium** | latest | CNI + Load Balancing | eBPF performance, replaces kube-proxy, L2 announcements |
 | **Hubble** | (embedded) | Network observability | Service maps, flow visualization |
 | **Tetragon** | (embedded) | eBPF runtime security | Kernel-level process & network monitoring |
 | **Traefik** | 3.x | Gateway API implementation | Native Gateway API support, lightweight |
@@ -2512,7 +2512,7 @@ In this phase, we initialize the Control Plane, install the networking layer (Ci
 | Component | Version | Purpose | Raspberry Pi Optimization |
 |-----------|---------|---------|---------------------------|
 | **kubeadm** | 1.33.0 | Cluster bootstrapper | Custom config skips kube-proxy |
-| **Cilium** | 1.18.4 | CNI + Service Mesh | eBPF-based, replaces kube-proxy |
+| **Cilium** | latest | CNI + Service Mesh | eBPF-based, replaces kube-proxy |
 | **Hubble** | (bundled) | Network Observability | NodePort UI for debugging |
 | **Metrics Server** | 3.12.2 | Resource metrics | `--kubelet-insecure-tls` for self-signed certs |
 
@@ -2597,12 +2597,15 @@ ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
           apiVersion: kubeadm.k8s.io/v1beta4
           kind: InitConfiguration
           localAPIEndpoint:
-            advertiseAddress: {{ ansible_host }}
+            advertiseAddress: {{ ansible_default_ipv4.address }}
             bindPort: 6443
           nodeRegistration:
             criSocket: unix:///run/containerd/containerd.sock
             name: {{ inventory_hostname }}
             taints: [] # Remove taints to allow workloads on CP
+          # Skip kube-proxy for Cilium (eBPF-based replacement)
+          skipPhases:
+            - addon/kube-proxy
           ---
           apiVersion: kubeadm.k8s.io/v1beta4
           kind: ClusterConfiguration
@@ -2611,9 +2614,6 @@ ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
             serviceSubnet: {{ service_cidr }}
             podSubnet: {{ pod_network_cidr }}
             dnsDomain: cluster.local
-          # Skip kube-proxy for Cilium (eBPF-based replacement)
-          skipPhases:
-            - addon/kube-proxy
 
     - name: Check if cluster is already initialized
       stat:
@@ -2645,7 +2645,7 @@ ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
            --version {{ cilium_version }} \
            --namespace kube-system \
            --set kubeProxyReplacement=true \
-           --set k8sServiceHost={{ ansible_host }} \
+           --set k8sServiceHost={{ ansible_default_ipv4.address }} \
            --set k8sServicePort=6443 \
            --set ipam.mode=kubernetes \
            --set operator.replicas=1 \
