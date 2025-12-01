@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # Configuration
-CLUSTER_IP="${CLUSTER_IP:-192.168.0.210}"
+CLUSTER_IP="${CLUSTER_IP:-192.168.68.210}"
 WORKFLOWS_URL="http://workflows.${CLUSTER_IP}.nip.io"
 
 # Colors for output

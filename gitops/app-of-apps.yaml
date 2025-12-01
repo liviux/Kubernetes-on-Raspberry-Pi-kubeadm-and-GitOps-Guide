@@ -12,7 +12,7 @@
 #   - kube-state-metrics: Kubernetes object metrics
 #
 # Access:
-#   - Grafana: http://grafana.192.168.0.210.nip.io
+#   - Grafana: http://grafana.192.168.68.210.nip.io
 #   - Default Login: admin / prom-operator
 #
 # Storage: All components use Longhorn for persistence
@@ -94,7 +94,7 @@ spec:
             enabled: true
             ingressClassName: traefik
             hosts:
-              - grafana.192.168.0.210.nip.io
+              - grafana.192.168.68.210.nip.io
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
           

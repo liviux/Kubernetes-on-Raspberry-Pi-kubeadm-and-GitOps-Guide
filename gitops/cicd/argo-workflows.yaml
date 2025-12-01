@@ -11,7 +11,7 @@
 #
 # COMPONENTS:
 #   - Controller: Orchestrates workflow execution
-#   - Server: Web UI and API (workflows.192.168.0.210.nip.io)
+#   - Server: Web UI and API (workflows.192.168.68.210.nip.io)
 #   - Executor: Runs workflow steps (pns mode for ARM64)
 #
 # EXECUTOR MODES:
@@ -155,7 +155,7 @@ spec:
 # GATEWAY API HTTPROUTE - Argo Workflows UI Access
 # ============================================================================
 # Provides external access to Argo Workflows UI via Traefik Gateway
-# URL: http://workflows.192.168.0.210.nip.io
+# URL: http://workflows.192.168.68.210.nip.io
 # ============================================================================
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -170,7 +170,7 @@ spec:
     - name: traefik-gateway
       namespace: traefik
   hostnames:
-    - "workflows.192.168.0.210.nip.io"
+    - "workflows.192.168.68.210.nip.io"
   rules:
     - matches:
         - path:

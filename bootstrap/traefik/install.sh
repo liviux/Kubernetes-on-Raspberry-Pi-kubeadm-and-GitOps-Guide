@@ -6,7 +6,7 @@
 # implementation. All external traffic flows through this single entry point.
 #
 # Features:
-#   - LoadBalancer IP from Cilium L2 pool (192.168.0.210)
+#   - LoadBalancer IP from Cilium L2 pool (192.168.68.210)
 #   - Cross-namespace routing support
 #   - Prometheus metrics enabled
 #   - JSON access logs for Loki
@@ -48,7 +48,7 @@ helm upgrade --install traefik traefik/traefik \
   --create-namespace \
   --version 37.3.0 \
   --set service.type=LoadBalancer \
-  --set service.spec.loadBalancerIP=192.168.0.210 \
+  --set service.spec.loadBalancerIP=192.168.68.210 \
   --set ports.web.nodePort=null \
   --set ports.websecure.nodePort=null \
   --set providers.kubernetesCRD.enabled=true \

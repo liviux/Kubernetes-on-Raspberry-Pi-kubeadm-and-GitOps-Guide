@@ -10,7 +10,7 @@
 #   - Efficiency metrics (idle vs used)
 #   - Prometheus integration
 #
-# Access: http://opencost.192.168.0.210.nip.io
+# Access: http://opencost.192.168.68.210.nip.io
 #
 # Cost Model (customizable):
 #   - CPU: $0.031/hour
@@ -97,7 +97,7 @@ spec:
     - name: main-gateway
       namespace: traefik-system
   hostnames:
-    - "opencost.192.168.0.210.nip.io"
+    - "opencost.192.168.68.210.nip.io"
   rules:
     - matches:
         - path:

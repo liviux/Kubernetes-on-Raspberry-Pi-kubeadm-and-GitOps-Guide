@@ -175,7 +175,7 @@ flowchart TB
         USER[("👤 User")]
     end
 
-    subgraph HomeNetwork["🏠 Home Network (192.168.0.0/24)"]
+    subgraph HomeNetwork["🏠 Home Network (192.168.68.0/24)"]
         ROUTER["🌐 Router/Gateway<br/>DHCP + Port Forward"]
         
         subgraph K8sCluster["⎈ Kubernetes Cluster"]
@@ -246,7 +246,7 @@ flowchart TB
     %% Traffic Flow
     USER -->|"HTTPS :443"| ROUTER
     ROUTER -->|"Port Forward"| CILIUM
-    CILIUM -->|"L2 ARP<br/>192.168.0.210"| TRAEFIK
+    CILIUM -->|"L2 ARP<br/>192.168.68.210"| TRAEFIK
     TRAEFIK --> GWAPI
     GWAPI -->|"Route to Services"| Workers
     
@@ -450,7 +450,7 @@ For environments that don't render Mermaid, here's the ASCII representation:
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              HOME NETWORK (192.168.0.0/24)                      │
+│                              HOME NETWORK (192.168.68.0/24)                      │
 │                                                                                 │
 │    ┌─────────────┐                                                              │
 │    │   Router    │◄──── DHCP Reservations: .201-.204                            │
@@ -460,7 +460,7 @@ For environments that don't render Mermaid, here's the ASCII representation:
 │           ▼                                                                     │
 │    ┌──────────────────────────────────────────────────────────────────────┐    │
 │    │                    CILIUM L2 ANNOUNCEMENT POOL                        │    │
-│    │                        192.168.0.210 - .220                           │    │
+│    │                        192.168.68.210 - .220                           │    │
 │    └──────────────────────────────────────────────────────────────────────┘    │
 │           │                                                                     │
 │    ═══════╪═════════════════════════════════════════════════════════════════   │
@@ -497,10 +497,10 @@ The cluster consists of four Raspberry Pi 4 nodes with intentionally asymmetric 
 
 | Node | Hostname | IP Address | RAM | Storage | Role | Labels |
 |------|----------|------------|-----|---------|------|--------|
-| Control Plane | `rpi4-1` | 192.168.0.201 | 8GB | 128GB SD + **1TB HDD** | API Server, etcd, Storage | `storage=hdd`, `unique-hdd=true`, `ram=8gb` |
-| Worker 1 | `rpi4-2` | 192.168.0.202 | 4GB | 64GB SD | Compute | `ram=4gb` |
-| Worker 2 | `rpi4-3` | 192.168.0.203 | 4GB | 64GB SD | Compute | `ram=4gb` |
-| Worker 3 | `rpi4-4` | 192.168.0.204 | 4GB | 64GB SD | Compute | `ram=4gb` |
+| Control Plane | `rpi4-1` | 192.168.68.201 | 8GB | 128GB SD + **1TB HDD** | API Server, etcd, Storage | `storage=hdd`, `unique-hdd=true`, `ram=8gb` |
+| Worker 1 | `rpi4-2` | 192.168.68.202 | 4GB | 64GB SD | Compute | `ram=4gb` |
+| Worker 2 | `rpi4-3` | 192.168.68.203 | 4GB | 64GB SD | Compute | `ram=4gb` |
+| Worker 3 | `rpi4-4` | 192.168.68.204 | 4GB | 64GB SD | Compute | `ram=4gb` |
 
 **Design Rationale:**
 
@@ -520,15 +520,15 @@ The cluster consists of four Raspberry Pi 4 nodes with intentionally asymmetric 
 │                                                                         │
 │  EXTERNAL ACCESS                                                        │
 │  ───────────────                                                        │
-│  Internet ──► Router ──► Port Forward ──► 192.168.0.210 (Traefik LB)   │
+│  Internet ──► Router ──► Port Forward ──► 192.168.68.210 (Traefik LB)   │
 │                                                                         │
 │  CLUSTER NETWORKS                                                       │
 │  ────────────────                                                       │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ Node Network:     192.168.0.201-204  (Physical IPs)             │   │
+│  │ Node Network:     192.168.68.201-204  (Physical IPs)             │   │
 │  │ Pod Network:      10.244.0.0/16      (Cilium CNI)               │   │
 │  │ Service Network:  10.96.0.0/12       (ClusterIP range)          │   │
-│  │ LoadBalancer IPs: 192.168.0.210-220  (Cilium L2 Pool)           │   │
+│  │ LoadBalancer IPs: 192.168.68.210-220  (Cilium L2 Pool)           │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  TRAFFIC FLOW                                                           │
@@ -1061,7 +1061,7 @@ cat ~/.ssh/rpi-cluster.pub
 
 ```bash
 # Method 1: Check your router's DHCP lease table (web UI)
-# Usually at http://192.168.0.1 or http://192.168.1.1 or http://192.168.68.1
+# Usually at http://192.168.68.1 or http://192.168.1.1 or http://192.168.68.1
 
 # Method 2: Network scan (requires nmap)
 nmap -sn 192.168.68.0/24 | grep -B2 "rpi"
@@ -1076,10 +1076,10 @@ In your router's admin panel, reserve these IPs:
 
 | Hostname | MAC Address | Reserved IP |
 |----------|-------------|-------------|
-| rpi4-1 | (from router) | 192.168.0.201 |
-| rpi4-2 | (from router) | 192.168.0.202 |
-| rpi4-3 | (from router) | 192.168.0.203 |
-| rpi4-4 | (from router) | 192.168.0.204 |
+| rpi4-1 | (from router) | 192.168.68.201 |
+| rpi4-2 | (from router) | 192.168.68.202 |
+| rpi4-3 | (from router) | 192.168.68.203 |
+| rpi4-4 | (from router) | 192.168.68.204 |
 
 > 📝 **Note:** Write down the MAC addresses from your router's DHCP table—you'll need them for the static reservations.
 
@@ -1089,9 +1089,9 @@ If you want to access services from the internet:
 
 | Service | External Port | Internal IP | Internal Port |
 |---------|---------------|-------------|---------------|
-| HTTPS (Traefik) | 443 | 192.168.0.210 | 443 |
-| HTTP (Traefik) | 80 | 192.168.0.210 | 80 |
-| SSH (optional) | 2222 | 192.168.0.201 | 22 |
+| HTTPS (Traefik) | 443 | 192.168.68.210 | 443 |
+| HTTP (Traefik) | 80 | 192.168.68.210 | 80 |
+| SSH (optional) | 2222 | 192.168.68.201 | 22 |
 
 > 🔐 **Security:** Consider using a VPN (WireGuard/Tailscale) instead of direct port forwarding for SSH access.
 
@@ -1107,13 +1107,13 @@ Add hostname mappings to your local machine for easier access:
 
 ```text
 # Raspberry Pi Kubernetes Cluster
-192.168.0.201 rpi4-1 rpi4-1.local
-192.168.0.202 rpi4-2 rpi4-2.local
-192.168.0.203 rpi4-3 rpi4-3.local
-192.168.0.204 rpi4-4 rpi4-4.local
+192.168.68.201 rpi4-1 rpi4-1.local
+192.168.68.202 rpi4-2 rpi4-2.local
+192.168.68.203 rpi4-3 rpi4-3.local
+192.168.68.204 rpi4-4 rpi4-4.local
 
 # Cluster Services (LoadBalancer IPs)
-192.168.0.210 traefik.local argocd.local gitea.local grafana.local
+192.168.68.210 traefik.local argocd.local gitea.local grafana.local
 ```
 
 **Verify SSH connectivity:**
@@ -1182,11 +1182,11 @@ service_cidr=10.96.0.0/12
 # ============================================================================
 # LoadBalancer IP pool for Cilium L2 announcements
 # Must be in your home network subnet and NOT used by DHCP
-loadbalancer_ip_start=192.168.0.210
-loadbalancer_ip_end=192.168.0.220
+loadbalancer_ip_start=192.168.68.210
+loadbalancer_ip_end=192.168.68.220
 
 # Primary LoadBalancer IP (Traefik Gateway)
-loadbalancer_ip=192.168.0.210
+loadbalancer_ip=192.168.68.210
 
 # ============================================================================
 # STORAGE CONFIGURATION
@@ -3161,7 +3161,7 @@ kubectl get svc hubble-ui -n kube-system
 
 # The output will show the NodePort (e.g., 80:31234/TCP)
 # Access via any node IP: http://<NODE_IP>:<NodePort>
-# Example: http://192.168.0.201:31234
+# Example: http://192.168.68.201:31234
 
 # Alternative: Port-forward for local access
 kubectl port-forward -n kube-system svc/hubble-ui 12000:80
@@ -3865,7 +3865,7 @@ We now move up the stack to the application layer. Instead of managing tools ind
 
 ### Understanding nip.io (Wildcard DNS)
 
-Throughout this guide, you'll see URLs like `argocd.192.168.0.210.nip.io`. This uses **nip.io**, a free wildcard DNS service that eliminates the need for custom DNS configuration.
+Throughout this guide, you'll see URLs like `argocd.192.168.68.210.nip.io`. This uses **nip.io**, a free wildcard DNS service that eliminates the need for custom DNS configuration.
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -3875,17 +3875,17 @@ Throughout this guide, you'll see URLs like `argocd.192.168.0.210.nip.io`. This 
 │  Your Browser               nip.io DNS                 Your Cluster        │
 │  ───────────────            ──────────                 ─────────────       │
 │                                                                            │
-│  argocd.192.168.0.210.nip.io                                               │
+│  argocd.192.168.68.210.nip.io                                               │
 │       │                                                                    │
-│       └──► DNS Query ──► nip.io extracts IP ──► Returns 192.168.0.210     │
+│       └──► DNS Query ──► nip.io extracts IP ──► Returns 192.168.68.210     │
 │                          from hostname                                     │
-│       ◄── Connect to 192.168.0.210 ──────────────────────────────────────► │
+│       ◄── Connect to 192.168.68.210 ──────────────────────────────────────► │
 │                                                                            │
 │  The pattern: <anything>.<IP-with-dots>.nip.io → resolves to <IP>          │
 │                                                                            │
 │  Examples:                                                                 │
-│  ├── argocd.192.168.0.210.nip.io     → 192.168.0.210                      │
-│  ├── grafana.192.168.0.210.nip.io    → 192.168.0.210                      │
+│  ├── argocd.192.168.68.210.nip.io     → 192.168.68.210                      │
+│  ├── grafana.192.168.68.210.nip.io    → 192.168.68.210                      │
 │  └── my-app.10.0.0.5.nip.io          → 10.0.0.5                           │
 │                                                                            │
 └────────────────────────────────────────────────────────────────────────────┘
@@ -3900,7 +3900,7 @@ Throughout this guide, you'll see URLs like `argocd.192.168.0.210.nip.io`. This 
 | **TLS certificates** | Cert-manager can request certs for these hostnames |
 | **Works anywhere** | Any machine on the network can access services by hostname |
 
-> **💡 Alternative:** If you have a real domain, replace `192.168.0.210.nip.io` with your domain and configure DNS A records pointing to `192.168.0.210`.
+> **💡 Alternative:** If you have a real domain, replace `192.168.68.210.nip.io` with your domain and configure DNS A records pointing to `192.168.68.210`.
 
 ### Phase 4 Architecture
 
@@ -3912,7 +3912,7 @@ Throughout this guide, you'll see URLs like `argocd.192.168.0.210.nip.io`. This 
 │   ┌─────────────────────────────────────────────────────────────────────────┐  │
 │   │                         EXTERNAL ACCESS FLOW                             │  │
 │   │                                                                          │  │
-│   │    Internet ──► Router ──► 192.168.0.210 ──► Traefik Gateway            │  │
+│   │    Internet ──► Router ──► 192.168.68.210 ──► Traefik Gateway            │  │
 │   │                              (Cilium L2)       │                         │  │
 │   │                                                ▼                         │  │
 │   │    ┌──────────────────────────────────────────────────────────────┐     │  │
@@ -3956,10 +3956,10 @@ Throughout this guide, you'll see URLs like `argocd.192.168.0.210.nip.io`. This 
 
 | Component | Version | Purpose | Access URL |
 |-----------|---------|---------|------------|
-| **Traefik** | 37.3.0 | Gateway API / Ingress Controller | LoadBalancer: 192.168.0.210 |
-| **ArgoCD** | 7.7.0 | GitOps Controller | argocd.192.168.0.210.nip.io |
-| **Gitea** | 10.6.0 | Self-hosted Git Server | gitea.192.168.0.210.nip.io |
-| **Prometheus Stack** | 66.3.0 | Metrics & Alerting | grafana.192.168.0.210.nip.io |
+| **Traefik** | 37.3.0 | Gateway API / Ingress Controller | LoadBalancer: 192.168.68.210 |
+| **ArgoCD** | 7.7.0 | GitOps Controller | argocd.192.168.68.210.nip.io |
+| **Gitea** | 10.6.0 | Self-hosted Git Server | gitea.192.168.68.210.nip.io |
+| **Prometheus Stack** | 66.3.0 | Metrics & Alerting | grafana.192.168.68.210.nip.io |
 
 ### The Bootstrap Order
 
@@ -4027,7 +4027,7 @@ This script installs **Traefik v3** as the cluster's ingress controller and Gate
 
 | Setting | Value | Purpose |
 |---------|-------|---------|
-| `loadBalancerIP` | `192.168.0.210` | Static IP from Cilium L2 pool |
+| `loadBalancerIP` | `192.168.68.210` | Static IP from Cilium L2 pool |
 | `providers.kubernetesCRD.allowCrossNamespace` | `true` | Services in any namespace can use Traefik |
 | `logs.access.format` | `json` | Structured logs for Loki |
 | `metrics.prometheus.enabled` | `true` | Expose metrics for Prometheus |
@@ -4050,7 +4050,7 @@ bash bootstrap/traefik/install.sh
 # implementation. All external traffic flows through this single entry point.
 #
 # Features:
-#   - LoadBalancer IP from Cilium L2 pool (192.168.0.210)
+#   - LoadBalancer IP from Cilium L2 pool (192.168.68.210)
 #   - Cross-namespace routing support
 #   - Prometheus metrics enabled
 #   - JSON access logs for Loki
@@ -4092,7 +4092,7 @@ helm upgrade --install traefik traefik/traefik \
   --create-namespace \
   --version 37.3.0 \
   --set service.type=LoadBalancer \
-  --set service.spec.loadBalancerIP=192.168.0.210 \
+  --set service.spec.loadBalancerIP=192.168.68.210 \
   --set ports.web.nodePort=null \
   --set ports.websecure.nodePort=null \
   --set providers.kubernetesCRD.enabled=true \
@@ -4186,7 +4186,7 @@ bash bootstrap/argocd/install.sh
 ╚═══════════════════════════════════════════════════════════════════════╝
 
 Access Information:
-  • URL: http://argocd.192.168.0.210.nip.io
+  • URL: http://argocd.192.168.68.210.nip.io
   • Username: admin
   • Password: <see command below>
 
@@ -4283,7 +4283,7 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-    - host: argocd.192.168.0.210.nip.io
+    - host: argocd.192.168.68.210.nip.io
       http:
         paths:
           - path: /
@@ -4313,7 +4313,7 @@ echo "║              ARGOCD GITOPS CONTROLLER INSTALLED                       
 echo "╚═══════════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Access Information:"
-echo "  • URL: http://argocd.192.168.0.210.nip.io"
+echo "  • URL: http://argocd.192.168.68.210.nip.io"
 echo "  • Username: admin"
 echo "  • Password: $ARGOCD_PASSWORD"
 echo ""
@@ -4361,9 +4361,9 @@ This is our first **Declarative Application**. Instead of a shell script, this i
 
 | Service | URL / Address |
 |---------|---------------|
-| Web UI | http://gitea.192.168.0.210.nip.io |
-| SSH Clone | ssh://git@192.168.0.210:2222/user/repo.git |
-| HTTP Clone | http://gitea.192.168.0.210.nip.io/user/repo.git |
+| Web UI | http://gitea.192.168.68.210.nip.io |
+| SSH Clone | ssh://git@192.168.68.210:2222/user/repo.git |
+| HTTP Clone | http://gitea.192.168.68.210.nip.io/user/repo.git |
 
 <details>
 <summary>📄 Click to expand full gitops/services/gitea.yaml</summary>
@@ -4382,8 +4382,8 @@ This is our first **Declarative Application**. Instead of a shell script, this i
 #   - Modern UI with auto theme detection
 #
 # Access:
-#   - Web: http://gitea.192.168.0.210.nip.io
-#   - SSH: ssh://git@192.168.0.210:2222/user/repo.git
+#   - Web: http://gitea.192.168.68.210.nip.io
+#   - SSH: ssh://git@192.168.68.210:2222/user/repo.git
 #
 # First-time Setup:
 #   1. Access web UI
@@ -4426,9 +4426,9 @@ spec:
             APP_NAME: "PiCluster Git"
             
             server:
-              DOMAIN: "gitea.192.168.0.210.nip.io"
-              ROOT_URL: "http://gitea.192.168.0.210.nip.io/"
-              SSH_DOMAIN: "192.168.0.210"
+              DOMAIN: "gitea.192.168.68.210.nip.io"
+              ROOT_URL: "http://gitea.192.168.68.210.nip.io/"
+              SSH_DOMAIN: "192.168.68.210"
               SSH_PORT: "2222"
             
             ui:
@@ -4490,7 +4490,7 @@ spec:
             type: LoadBalancer
             port: 2222
             annotations:
-              io.cilium/lb-ipam-ips: "192.168.0.210"
+              io.cilium/lb-ipam-ips: "192.168.68.210"
   
   destination:
     server: https://kubernetes.default.svc
@@ -4517,7 +4517,7 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-    - host: gitea.192.168.0.210.nip.io
+    - host: gitea.192.168.68.210.nip.io
       http:
         paths:
           - path: /
@@ -4605,7 +4605,7 @@ For the initial deployment, we start with the **kube-prometheus-stack** which pr
 #   - kube-state-metrics: Kubernetes object metrics
 #
 # Access:
-#   - Grafana: http://grafana.192.168.0.210.nip.io
+#   - Grafana: http://grafana.192.168.68.210.nip.io
 #   - Default Login: admin / prom-operator
 #
 # Storage: All components use Longhorn for persistence
@@ -4769,7 +4769,7 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-    - host: grafana.192.168.0.210.nip.io
+    - host: grafana.192.168.68.210.nip.io
       http:
         paths:
           - path: /
@@ -4815,7 +4815,7 @@ kubectl get svc -n traefik-system
 
 # Expected output:
 # NAME      TYPE           CLUSTER-IP     EXTERNAL-IP     PORT(S)
-# traefik   LoadBalancer   10.96.x.x      192.168.0.210   80:xxxxx/TCP,443:xxxxx/TCP
+# traefik   LoadBalancer   10.96.x.x      192.168.68.210   80:xxxxx/TCP,443:xxxxx/TCP
 ```
 
 **Step 2: Install ArgoCD**
@@ -4830,7 +4830,7 @@ bash bootstrap/argocd/install.sh
 kubectl get pods -n argocd
 
 # Access ArgoCD UI
-# Open: http://argocd.192.168.0.210.nip.io
+# Open: http://argocd.192.168.68.210.nip.io
 # Username: admin
 # Password: (shown in install script output)
 ```
@@ -4856,7 +4856,7 @@ kubectl get application -n argocd gitea
 
 This is the critical step where we close the GitOps loop:
 
-1. Open Gitea UI: `http://gitea.192.168.0.210.nip.io`
+1. Open Gitea UI: `http://gitea.192.168.68.210.nip.io`
 2. Create your admin account on first visit
 3. Create a new repository named `home-cluster`
 4. Push your local configuration:
@@ -4865,7 +4865,7 @@ This is the critical step where we close the GitOps loop:
 # Initialize and push to Gitea
 cd /path/to/your/gitops/folder
 git init
-git remote add origin http://gitea.192.168.0.210.nip.io/admin/home-cluster.git
+git remote add origin http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
 git add .
 git commit -m "Initial cluster configuration"
 git push -u origin main
@@ -4904,9 +4904,9 @@ kubectl get applications -n argocd
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| ArgoCD | http://argocd.192.168.0.210.nip.io | admin / (secret) |
-| Gitea | http://gitea.192.168.0.210.nip.io | (created on first visit) |
-| Grafana | http://grafana.192.168.0.210.nip.io | admin / prom-operator |
+| ArgoCD | http://argocd.192.168.68.210.nip.io | admin / (secret) |
+| Gitea | http://gitea.192.168.68.210.nip.io | (created on first visit) |
+| Grafana | http://grafana.192.168.68.210.nip.io | admin / prom-operator |
 
 ## 9. Phase 5: Security & Management Stack
 
@@ -5037,7 +5037,7 @@ Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. 
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| Console | http://minio.192.168.0.210.nip.io | admin / password123 |
+| Console | http://minio.192.168.68.210.nip.io | admin / password123 |
 | API | http://minio.storage.svc:9000 | (internal) |
 
 > ⚠️ **Security Warning:** Change the default credentials (`admin`/`password123`) in production!
@@ -5059,7 +5059,7 @@ Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. 
 #   - thanos-data: Long-term metrics
 #
 # Access:
-#   - Console: http://minio.192.168.0.210.nip.io
+#   - Console: http://minio.192.168.68.210.nip.io
 #   - API: http://minio.storage.svc.cluster.local:9000
 #   - Credentials: admin / password123 (CHANGE IN PRODUCTION!)
 #
@@ -5134,7 +5134,7 @@ spec:
           enabled: true
           ingressClassName: traefik
           hosts:
-            - minio.192.168.0.210.nip.io
+            - minio.192.168.68.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
         
@@ -5142,7 +5142,7 @@ spec:
           enabled: true
           ingressClassName: traefik
           hosts:
-            - minio-console.192.168.0.210.nip.io
+            - minio-console.192.168.68.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
         
@@ -5299,8 +5299,8 @@ Harbor serves as the local "Docker Hub" - a private container registry with buil
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| Web UI | http://harbor.192.168.0.210.nip.io | admin / Harbor12345 |
-| Docker | docker login harbor.192.168.0.210.nip.io | (same) |
+| Web UI | http://harbor.192.168.68.210.nip.io | admin / Harbor12345 |
+| Docker | docker login harbor.192.168.68.210.nip.io | (same) |
 
 <details>
 <summary>📄 Click to expand full gitops/security/harbor.yaml</summary>
@@ -5318,8 +5318,8 @@ Harbor serves as the local "Docker Hub" - a private container registry with buil
 #   - Project-based access control
 #
 # Access:
-#   - Web: http://harbor.192.168.0.210.nip.io
-#   - Docker: docker login harbor.192.168.0.210.nip.io
+#   - Web: http://harbor.192.168.68.210.nip.io
+#   - Docker: docker login harbor.192.168.68.210.nip.io
 #   - Default: admin / Harbor12345
 #
 # Dependencies: MinIO (storage), Longhorn (database)
@@ -5349,13 +5349,13 @@ spec:
           type: ingress
           ingress:
             hosts:
-              core: harbor.192.168.0.210.nip.io
+              core: harbor.192.168.68.210.nip.io
             className: traefik
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
         
         # External URL for Docker client
-        externalURL: http://harbor.192.168.0.210.nip.io
+        externalURL: http://harbor.192.168.68.210.nip.io
         
         # -------------------------------------------------------------------
         # S3 Storage Backend (MinIO)
@@ -6196,7 +6196,7 @@ Headlamp is a **modern, lightweight Kubernetes dashboard** that provides a graph
 
 | Setting | Value |
 |---------|-------|
-| **URL** | `http://headlamp.192.168.0.210.nip.io` |
+| **URL** | `http://headlamp.192.168.68.210.nip.io` |
 | **Authentication** | Service Account Token |
 | **Namespace** | `headlamp` |
 | **Memory Limit** | 192Mi |
@@ -6301,7 +6301,7 @@ spec:
     - name: traefik-gateway
       namespace: traefik
   hostnames:
-    - "headlamp.192.168.0.210.nip.io"
+    - "headlamp.192.168.68.210.nip.io"
   rules:
     - backendRefs:
         - name: headlamp
@@ -6399,7 +6399,7 @@ spec:
   project: default
   source:
     # Update this to your Gitea repository URL
-    repoURL: http://gitea.192.168.0.210.nip.io/liviu/home-cluster.git
+    repoURL: http://gitea.192.168.68.210.nip.io/liviu/home-cluster.git
     targetRevision: main
     path: gitops
     directory:
@@ -6483,7 +6483,7 @@ if [ "$MINIO_PODS" -ge 1 ]; then
     ((TESTS_PASSED++))
     
     # Check API endpoint
-    MINIO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://minio.192.168.0.210.nip.io/minio/health/live 2>/dev/null || echo "000")
+    MINIO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://minio.192.168.68.210.nip.io/minio/health/live 2>/dev/null || echo "000")
     if [ "$MINIO_STATUS" == "200" ]; then
         echo "  ✅ MinIO API accessible"
     fi
@@ -6542,7 +6542,7 @@ echo "┌───────────────────────�
 echo "│ Test 4: Harbor Container Registry                                   │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
-HARBOR_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.0.210.nip.io/api/v2.0/ping 2>/dev/null || echo "000")
+HARBOR_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://harbor.192.168.68.210.nip.io/api/v2.0/ping 2>/dev/null || echo "000")
 if [ "$HARBOR_STATUS" == "200" ]; then
     echo "✅ Harbor API accessible (HTTP 200)"
     ((TESTS_PASSED++))
@@ -6621,8 +6621,8 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo "  ✅ All Phase 5 security tests passed!"
     echo ""
     echo "Access URLs:"
-    echo "  • MinIO:  http://minio.192.168.0.210.nip.io (admin/password123)"
-    echo "  • Harbor: http://harbor.192.168.0.210.nip.io (admin/Harbor12345)"
+    echo "  • MinIO:  http://minio.192.168.68.210.nip.io (admin/password123)"
+    echo "  • Harbor: http://harbor.192.168.68.210.nip.io (admin/Harbor12345)"
     exit 0
 else
     echo "  ❌ Some tests failed. Check component status above."
@@ -6696,9 +6696,9 @@ bash tests/04_security_test.sh
 
 | Service | URL | Username | Password |
 |---------|-----|----------|----------|
-| MinIO Console | http://minio.192.168.0.210.nip.io | admin | password123 |
-| Harbor Registry | http://harbor.192.168.0.210.nip.io | admin | Harbor12345 |
-| Headlamp Dashboard | http://headlamp.192.168.0.210.nip.io | - | Service Account Token ⁵ |
+| MinIO Console | http://minio.192.168.68.210.nip.io | admin | password123 |
+| Harbor Registry | http://harbor.192.168.68.210.nip.io | admin | Harbor12345 |
+| Headlamp Dashboard | http://headlamp.192.168.68.210.nip.io | - | Service Account Token ⁵ |
 
 > **⁵ Headlamp Token:** Get the authentication token with:
 > ```bash
@@ -6825,7 +6825,7 @@ kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=1
 kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=jaeger -n monitoring --timeout=120s
 
 # Access Jaeger UI:
-# http://jaeger.192.168.0.210.nip.io
+# http://jaeger.192.168.68.210.nip.io
 
 # Disable (when done debugging):
 kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=0
@@ -7331,8 +7331,8 @@ Jaeger provides the UI to visualize distributed traces collected by OpenTelemetr
 
 | Endpoint | URL |
 |----------|-----|
-| Jaeger UI | http://jaeger.192.168.0.210.nip.io |
-| Query API | http://jaeger.192.168.0.210.nip.io/api |
+| Jaeger UI | http://jaeger.192.168.68.210.nip.io |
+| Query API | http://jaeger.192.168.68.210.nip.io/api |
 
 <details>
 <summary>📄 Click to expand full gitops/observability/jaeger.yaml</summary>
@@ -7355,7 +7355,7 @@ Jaeger provides the UI to visualize distributed traces collected by OpenTelemetr
 #   - Latency histograms
 #   - Error tracking
 #
-# Access: http://jaeger.192.168.0.210.nip.io
+# Access: http://jaeger.192.168.68.210.nip.io
 #
 # Dependencies: OpenTelemetry Operator (for auto-instrumentation)
 # =============================================================================
@@ -7438,7 +7438,7 @@ spec:
     - name: main-gateway
       namespace: traefik-system
   hostnames:
-    - "jaeger.192.168.0.210.nip.io"
+    - "jaeger.192.168.68.210.nip.io"
   rules:
     - matches:
         - path:
@@ -7592,7 +7592,7 @@ OpenCost calculates resource consumption (CPU/RAM/Storage) per namespace/pod and
 | **Pod** | Individual pod costs |
 | **Efficiency** | Idle vs utilized resources |
 
-**Access:** http://opencost.192.168.0.210.nip.io
+**Access:** http://opencost.192.168.68.210.nip.io
 
 <details>
 <summary>📄 Click to expand full gitops/observability/opencost.yaml</summary>
@@ -7610,7 +7610,7 @@ OpenCost calculates resource consumption (CPU/RAM/Storage) per namespace/pod and
 #   - Efficiency metrics (idle vs used)
 #   - Prometheus integration
 #
-# Access: http://opencost.192.168.0.210.nip.io
+# Access: http://opencost.192.168.68.210.nip.io
 #
 # Cost Model (customizable):
 #   - CPU: $0.031/hour
@@ -7697,7 +7697,7 @@ spec:
     - name: main-gateway
       namespace: traefik-system
   hostnames:
-    - "opencost.192.168.0.210.nip.io"
+    - "opencost.192.168.68.210.nip.io"
   rules:
     - matches:
         - path:
@@ -7953,7 +7953,7 @@ if [ "$JAEGER_PODS" -ge 1 ]; then
     pass "Jaeger is running"
     
     # Check UI accessibility
-    JAEGER_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://jaeger.192.168.0.210.nip.io 2>/dev/null || echo "000")
+    JAEGER_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://jaeger.192.168.68.210.nip.io 2>/dev/null || echo "000")
     if [ "$JAEGER_STATUS" == "200" ]; then
         echo "  ✅ Jaeger UI accessible"
     else
@@ -7976,7 +7976,7 @@ if [ "$OPENCOST_PODS" -ge 1 ]; then
     pass "OpenCost is running"
     
     # Check UI accessibility
-    OPENCOST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://opencost.192.168.0.210.nip.io 2>/dev/null || echo "000")
+    OPENCOST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://opencost.192.168.68.210.nip.io 2>/dev/null || echo "000")
     if [ "$OPENCOST_STATUS" == "200" ]; then
         echo "  ✅ OpenCost UI accessible"
     else
@@ -8054,9 +8054,9 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo "  ✅ Phase 6 Advanced Observability verification complete!"
     echo ""
     echo "Access URLs:"
-    echo "  • Grafana (Logs):  http://grafana.192.168.0.210.nip.io → Explore → Loki"
-    echo "  • Jaeger (Traces): http://jaeger.192.168.0.210.nip.io"
-    echo "  • OpenCost:        http://opencost.192.168.0.210.nip.io"
+    echo "  • Grafana (Logs):  http://grafana.192.168.68.210.nip.io → Explore → Loki"
+    echo "  • Jaeger (Traces): http://jaeger.192.168.68.210.nip.io"
+    echo "  • OpenCost:        http://opencost.192.168.68.210.nip.io"
     echo ""
     echo "Port-forward for Kubeshark:"
     echo "  kubectl port-forward -n observability svc/kubeshark-hub 8899:80"
@@ -8123,7 +8123,7 @@ kubectl describe application -n argocd loki-stack
 
 After Loki is running, add it as a data source in Grafana:
 
-1. Open Grafana: http://grafana.192.168.0.210.nip.io
+1. Open Grafana: http://grafana.192.168.68.210.nip.io
 2. Navigate to: **Configuration → Data Sources → Add data source**
 3. Select: **Loki**
 4. Configure:
@@ -8150,9 +8150,9 @@ kubectl create secret generic k8sgpt-secret \
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| Grafana (Logs) | http://grafana.192.168.0.210.nip.io | Log Explorer with Loki |
-| Jaeger | http://jaeger.192.168.0.210.nip.io | Distributed tracing UI |
-| OpenCost | http://opencost.192.168.0.210.nip.io | Cost estimation dashboard |
+| Grafana (Logs) | http://grafana.192.168.68.210.nip.io | Log Explorer with Loki |
+| Jaeger | http://jaeger.192.168.68.210.nip.io | Distributed tracing UI |
+| OpenCost | http://opencost.192.168.68.210.nip.io | Cost estimation dashboard |
 
 **Port-Forward Commands:**
 
@@ -8433,9 +8433,9 @@ spec:
         config:
           registries:
             # Harbor private registry
-            - name: harbor.192.168.0.210.nip.io
-              api_url: https://harbor.192.168.0.210.nip.io
-              prefix: harbor.192.168.0.210.nip.io/library
+            - name: harbor.192.168.68.210.nip.io
+              api_url: https://harbor.192.168.68.210.nip.io
+              prefix: harbor.192.168.68.210.nip.io/library
               ping: yes
               # Allow self-signed certificates (home lab)
               insecure: yes
@@ -8448,7 +8448,7 @@ spec:
           
           # Application configuration (annotations on ArgoCD Applications)
           # Example annotations for your app:
-          #   argocd-image-updater.argoproj.io/image-list: myapp=harbor.192.168.0.210.nip.io/library/myapp
+          #   argocd-image-updater.argoproj.io/image-list: myapp=harbor.192.168.68.210.nip.io/library/myapp
           #   argocd-image-updater.argoproj.io/myapp.update-strategy: semver
           #   argocd-image-updater.argoproj.io/myapp.allow-tags: regexp:^v[0-9]+\.[0-9]+\.[0-9]+$
           #   argocd-image-updater.argoproj.io/write-back-method: git
@@ -8549,7 +8549,7 @@ Argo Workflows is a Kubernetes-native workflow engine. It creates Pods to run yo
 │  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘   │  │
 │  └─────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                │
-│  UI ACCESS (workflows.192.168.0.210.nip.io)                                    │
+│  UI ACCESS (workflows.192.168.68.210.nip.io)                                    │
 │  ─────────────────────────────────────────                                     │
 │  ┌─────────────────────────────────────────────────────────────────────────┐  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │  │
@@ -8584,9 +8584,9 @@ spec:
   arguments:
     parameters:
     - name: repo
-      value: "https://gitea.192.168.0.210.nip.io/home/my-app.git"
+      value: "https://gitea.192.168.68.210.nip.io/home/my-app.git"
     - name: image
-      value: "harbor.192.168.0.210.nip.io/library/my-app"
+      value: "harbor.192.168.68.210.nip.io/library/my-app"
     - name: tag
       value: "latest"
 
@@ -8815,7 +8815,7 @@ spec:
     - name: traefik-gateway
       namespace: traefik
   hostnames:
-    - "workflows.192.168.0.210.nip.io"
+    - "workflows.192.168.68.210.nip.io"
   rules:
     - matches:
         - path:
@@ -9463,7 +9463,7 @@ To enable rapid iteration on your local machine without pushing git commits for 
 │  │                    RASPBERRY PI CLUSTER                                  │ │
 │  │  ┌─────────────────────────────────────────────────────────────────────┐ │ │
 │  │  │  Pod: my-app-dev-abc123                                             │ │ │
-│  │  │  Image: harbor.192.168.0.210.nip.io/library/my-app:dev-abc123       │ │ │
+│  │  │  Image: harbor.192.168.68.210.nip.io/library/my-app:dev-abc123       │ │ │
 │  │  │  Status: Running                                                    │ │ │
 │  │  └─────────────────────────────────────────────────────────────────────┘ │ │
 │  └──────────────────────────────────────────────────────────────────────────┘ │
@@ -9506,7 +9506,7 @@ metadata:
 build:
   # Build artifacts (container images)
   artifacts:
-    - image: harbor.192.168.0.210.nip.io/library/my-app
+    - image: harbor.192.168.68.210.nip.io/library/my-app
       docker:
         dockerfile: Dockerfile
         # Build arguments (optional)
@@ -9636,7 +9636,7 @@ Comprehensive verification script for CI/CD pipeline components.
 set -euo pipefail
 
 # Configuration
-CLUSTER_IP="${CLUSTER_IP:-192.168.0.210}"
+CLUSTER_IP="${CLUSTER_IP:-192.168.68.210}"
 WORKFLOWS_URL="http://workflows.${CLUSTER_IP}.nip.io"
 
 # Colors for output
@@ -10092,7 +10092,7 @@ kubectl get vulnerabilityreports -A | head -10
 
 **Step 5: Access Workflows UI**
 
-Open `http://workflows.192.168.0.210.nip.io` in your browser. You should see the Argo Workflows dashboard.
+Open `http://workflows.192.168.68.210.nip.io` in your browser. You should see the Argo Workflows dashboard.
 
 **Step 6: Configure First Pipeline (Optional)**
 
@@ -11807,7 +11807,7 @@ kubectl exec -n storage deploy/minio -- mc alias set myminio http://localhost:90
 kubectl exec -n storage deploy/minio -- mc ls myminio/
 
 # Test Harbor login
-echo "$NEW_HARBOR_PASS" | docker login harbor.192.168.0.210.nip.io -u admin --password-stdin
+echo "$NEW_HARBOR_PASS" | docker login harbor.192.168.68.210.nip.io -u admin --password-stdin
 
 # Check all pods are running
 kubectl get pods -n storage

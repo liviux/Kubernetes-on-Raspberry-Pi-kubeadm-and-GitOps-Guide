@@ -11,8 +11,8 @@
 #   - Modern UI with auto theme detection
 #
 # Access:
-#   - Web: http://gitea.192.168.0.210.nip.io
-#   - SSH: ssh://git@192.168.0.210:2222/user/repo.git
+#   - Web: http://gitea.192.168.68.210.nip.io
+#   - SSH: ssh://git@192.168.68.210:2222/user/repo.git
 #
 # First-time Setup:
 #   1. Access web UI
@@ -55,9 +55,9 @@ spec:
             APP_NAME: "PiCluster Git"
             
             server:
-              DOMAIN: "gitea.192.168.0.210.nip.io"
-              ROOT_URL: "http://gitea.192.168.0.210.nip.io/"
-              SSH_DOMAIN: "192.168.0.210"
+              DOMAIN: "gitea.192.168.68.210.nip.io"
+              ROOT_URL: "http://gitea.192.168.68.210.nip.io/"
+              SSH_DOMAIN: "192.168.68.210"
               SSH_PORT: "2222"
             
             ui:
@@ -111,7 +111,7 @@ spec:
           enabled: true
           className: traefik
           hosts:
-            - host: gitea.192.168.0.210.nip.io
+            - host: gitea.192.168.68.210.nip.io
               paths:
                 - path: /
                   pathType: Prefix
@@ -129,7 +129,7 @@ spec:
             type: LoadBalancer
             port: 2222
             annotations:
-              io.cilium/lb-ipam-ips: "192.168.0.210"
+              io.cilium/lb-ipam-ips: "192.168.68.210"
   
   destination:
     server: https://kubernetes.default.svc

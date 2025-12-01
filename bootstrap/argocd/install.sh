@@ -82,7 +82,7 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-    - host: argocd.192.168.0.210.nip.io
+    - host: argocd.192.168.68.210.nip.io
       http:
         paths:
           - path: /
@@ -112,7 +112,7 @@ echo "║              ARGOCD GITOPS CONTROLLER INSTALLED                       
 echo "╚═══════════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Access Information:"
-echo "  • URL: http://argocd.192.168.0.210.nip.io"
+echo "  • URL: http://argocd.192.168.68.210.nip.io"
 echo "  • Username: admin"
 echo "  • Password: $ARGOCD_PASSWORD"
 echo ""

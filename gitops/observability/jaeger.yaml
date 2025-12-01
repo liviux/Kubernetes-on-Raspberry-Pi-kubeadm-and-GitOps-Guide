@@ -25,7 +25,7 @@
 #   - Latency histograms
 #   - Error tracking
 #
-# Access (when enabled): http://jaeger.192.168.0.210.nip.io
+# Access (when enabled): http://jaeger.192.168.68.210.nip.io
 #
 # Dependencies: OpenTelemetry Operator (for auto-instrumentation)
 # =============================================================================
@@ -115,7 +115,7 @@ spec:
     - name: main-gateway
       namespace: traefik-system
   hostnames:
-    - "jaeger.192.168.0.210.nip.io"
+    - "jaeger.192.168.68.210.nip.io"
   rules:
     - matches:
         - path:

@@ -120,7 +120,7 @@ if [ "$JAEGER_PODS" -ge 1 ]; then
     pass "Jaeger is running"
     
     # Check UI accessibility
-    JAEGER_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://jaeger.192.168.0.210.nip.io 2>/dev/null || echo "000")
+    JAEGER_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://jaeger.192.168.68.210.nip.io 2>/dev/null || echo "000")
     if [ "$JAEGER_STATUS" == "200" ]; then
         echo "  ✅ Jaeger UI accessible"
     else
@@ -143,7 +143,7 @@ if [ "$OPENCOST_PODS" -ge 1 ]; then
     pass "OpenCost is running"
     
     # Check UI accessibility
-    OPENCOST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://opencost.192.168.0.210.nip.io 2>/dev/null || echo "000")
+    OPENCOST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://opencost.192.168.68.210.nip.io 2>/dev/null || echo "000")
     if [ "$OPENCOST_STATUS" == "200" ]; then
         echo "  ✅ OpenCost UI accessible"
     else
@@ -221,9 +221,9 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo "  ✅ Phase 6 Advanced Observability verification complete!"
     echo ""
     echo "Access URLs:"
-    echo "  • Grafana (Logs):  http://grafana.192.168.0.210.nip.io → Explore → Loki"
-    echo "  • Jaeger (Traces): http://jaeger.192.168.0.210.nip.io"
-    echo "  • OpenCost:        http://opencost.192.168.0.210.nip.io"
+    echo "  • Grafana (Logs):  http://grafana.192.168.68.210.nip.io → Explore → Loki"
+    echo "  • Jaeger (Traces): http://jaeger.192.168.68.210.nip.io"
+    echo "  • OpenCost:        http://opencost.192.168.68.210.nip.io"
     echo ""
     echo "Port-forward for Kubeshark:"
     echo "  kubectl port-forward -n observability svc/kubeshark-hub 8899:80"

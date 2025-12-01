@@ -14,7 +14,7 @@
 #   - Pod logs and exec terminal
 #
 # Access:
-#   - URL: http://headlamp.192.168.0.210.nip.io
+#   - URL: http://headlamp.192.168.68.210.nip.io
 #   - Authentication: Service Account token (see below)
 #
 # Memory: ~100-150MB (lightweight for RPi)
@@ -119,7 +119,7 @@ spec:
       namespace: traefik
       sectionName: web
   hostnames:
-    - "headlamp.192.168.0.210.nip.io"
+    - "headlamp.192.168.68.210.nip.io"
   rules:
     - matches:
         - path:

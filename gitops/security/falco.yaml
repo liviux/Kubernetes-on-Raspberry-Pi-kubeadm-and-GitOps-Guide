@@ -18,7 +18,7 @@
 #   - Falcosidekick-UI: Web interface for viewing alerts
 #
 # Access:
-#   - Falcosidekick UI: http://falco-ui.192.168.0.210.nip.io
+#   - Falcosidekick UI: http://falco-ui.192.168.68.210.nip.io
 #
 # Dependencies: None (runs as DaemonSet on all nodes)
 # =============================================================================
@@ -106,7 +106,7 @@ spec:
             ingress:
               enabled: true
               hosts:
-                - host: falco-ui.192.168.0.210.nip.io
+                - host: falco-ui.192.168.68.210.nip.io
                   paths:
                     - path: /
                       pathType: Prefix

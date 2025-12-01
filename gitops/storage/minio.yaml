@@ -11,7 +11,7 @@
 #   - thanos-data: Long-term metrics
 #
 # Access:
-#   - Console: http://minio.192.168.0.210.nip.io
+#   - Console: http://minio.192.168.68.210.nip.io
 #   - API: http://minio.storage.svc.cluster.local:9000
 #   - Credentials: admin / password123 (CHANGE IN PRODUCTION!)
 #
@@ -86,7 +86,7 @@ spec:
           enabled: true
           ingressClassName: traefik
           hosts:
-            - minio.192.168.0.210.nip.io
+            - minio.192.168.68.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
         
@@ -94,7 +94,7 @@ spec:
           enabled: true
           ingressClassName: traefik
           hosts:
-            - minio-console.192.168.0.210.nip.io
+            - minio-console.192.168.68.210.nip.io
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: web
         

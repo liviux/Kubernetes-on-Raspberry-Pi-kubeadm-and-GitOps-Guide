@@ -15,7 +15,7 @@ spec:
           type: ingress
           ingress:
             hosts:
-              core: harbor.192.168.0.210.nip.io
+              core: harbor.192.168.68.210.nip.io
             className: traefik
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web

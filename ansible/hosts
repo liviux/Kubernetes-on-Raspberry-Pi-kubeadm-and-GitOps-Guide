@@ -42,11 +42,11 @@ service_cidr=10.96.0.0/12
 # ============================================================================
 # LoadBalancer IP pool for Cilium L2 announcements
 # Must be in your home network subnet and NOT used by DHCP
-loadbalancer_ip_start=192.168.0.210
-loadbalancer_ip_end=192.168.0.220
+loadbalancer_ip_start=192.168.68.210
+loadbalancer_ip_end=192.168.68.220
 
 # Primary LoadBalancer IP (Traefik Gateway)
-loadbalancer_ip=192.168.0.210
+loadbalancer_ip=192.168.68.210
 
 # ============================================================================
 # STORAGE CONFIGURATION

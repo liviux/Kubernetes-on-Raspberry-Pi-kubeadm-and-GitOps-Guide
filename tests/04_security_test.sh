@@ -106,7 +106,7 @@ echo ""
 echo "🐋 Checking Harbor Container Registry..."
 
 # Check Harbor API endpoint
-HARBOR_URL="http://harbor.192.168.0.210.nip.io"
+HARBOR_URL="http://harbor.192.168.68.210.nip.io"
 HARBOR_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$HARBOR_URL/api/v2.0/ping" 2>/dev/null || echo 000)
 if [ "$HARBOR_STATUS" -eq 200 ]; then
     pass "Harbor API responding (HTTP 200)"
@@ -138,7 +138,7 @@ else
 fi
 
 # Check MinIO console endpoint
-MINIO_URL="http://minio-console.192.168.0.210.nip.io"
+MINIO_URL="http://minio-console.192.168.68.210.nip.io"
 MINIO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$MINIO_URL" 2>/dev/null || echo 000)
 if [ "$MINIO_STATUS" -eq 200 ] || [ "$MINIO_STATUS" -eq 302 ]; then
     pass "MinIO console accessible"
