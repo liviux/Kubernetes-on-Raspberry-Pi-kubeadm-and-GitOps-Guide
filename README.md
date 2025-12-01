@@ -2588,7 +2588,7 @@ ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
     pod_network_cidr: "10.244.0.0/16"
     service_cidr: "10.96.0.0/12"
     # Cilium version - check https://github.com/cilium/cilium/releases
-    cilium_version: "1.18.4"
+    cilium_version: "latest"
   tasks:
     - name: Create kubeadm config
       copy:
