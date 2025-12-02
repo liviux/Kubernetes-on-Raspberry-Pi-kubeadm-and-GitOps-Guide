@@ -54,6 +54,8 @@ helm upgrade --install traefik traefik/traefik \
   --set providers.kubernetesCRD.enabled=true \
   --set providers.kubernetesCRD.allowCrossNamespace=true \
   --set providers.kubernetesIngress.enabled=true \
+  --set providers.kubernetesGateway.enabled=true \
+  --set gateway.enabled=true \
   --set logs.general.level=INFO \
   --set logs.access.enabled=true \
   --set logs.access.format=json \
