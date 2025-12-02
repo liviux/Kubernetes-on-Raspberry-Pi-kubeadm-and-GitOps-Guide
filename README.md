@@ -3254,6 +3254,7 @@ ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
 
 ```yaml
 ---
+---
 # =============================================================================
 # Phase 3a: Storage Mounting Playbook
 # =============================================================================
@@ -3268,6 +3269,9 @@ ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
 # ⚠️  Before running, verify your HDD device:
 #     ansible -i ansible/hosts big -m shell -a 'lsblk'
 #
+#     For stability, consider using /dev/disk/by-id/... instead of /dev/sda1
+#     to avoid issues if USB enumeration order changes.
+#
 # Usage: ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
 # =============================================================================
 
@@ -3278,9 +3282,14 @@ ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
     # =========================================================================
     # CHANGE THIS to your actual HDD device identifier
     # =========================================================================
+    # Option 1: Standard device path (can change if USB enumeration changes)
     hdd_device: "/dev/sda1"
+    #
     # Option 2 (Recommended): Use by-id path for stability
+    # Find with: ls -la /dev/disk/by-id/ | grep usb
     # hdd_device: "/dev/disk/by-id/usb-YOUR_DRIVE_ID-part1"
+    #
+    # Longhorn data path (must match bootstrap/longhorn/install.sh settings)
     mount_path: "/var/lib/longhorn"
   tasks:
     - name: Ensure Mount Directory Exists
@@ -3316,7 +3325,15 @@ ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
 
     - name: Display Mount Status
       debug:
-        msg: "Storage mounted at {{ mount_path }}: {{ df_out.stdout }}"
+        msg: |
+          ════════════════════════════════════════════════════════════════════
+          Storage mounted successfully!
+          {{ df_out.stdout }}
+          ════════════════════════════════════════════════════════════════════
+          Mount Point: {{ mount_path }}
+          Device: {{ hdd_device }}
+          Ready for Longhorn installation.
+          ════════════════════════════════════════════════════════════════════
 ```
 
 </details>
@@ -3396,6 +3413,9 @@ echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
 echo "│ Step 2: Installing Longhorn v1.10.1                                 │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
+# Single replica because we only have 1 HDD
+# createDefaultDiskLabeledNodes: auto-create disk on nodes with the label
+# allowNodeDrainWithLastHealthyReplica: allow maintenance with single replica
 helm upgrade --install longhorn longhorn/longhorn \
   --namespace longhorn-system \
   --create-namespace \
@@ -3428,22 +3448,42 @@ echo "┌───────────────────────�
 echo "│ Step 4: Locking Workers (Protect SD Cards)                          │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
-sleep 10  # Wait for Longhorn Node CRDs
+# Wait for Longhorn to create node CRDs
+echo "Waiting for Longhorn Node CRDs to be created..."
+sleep 10
 
 WORKERS=("rpi4-2" "rpi4-3" "rpi4-4")
+
 for NODE in "${WORKERS[@]}"; do
     echo "Disabling storage scheduling on $NODE..."
+    # Patch the Longhorn Node CRD to prevent storage scheduling
     kubectl patch nodes.longhorn.io "$NODE" -n longhorn-system \
-        --type=merge -p '{"spec":{"allowScheduling": false}}' 2>/dev/null || \
-        echo "  ⚠️  Node CRD not yet created for $NODE"
+        --type=merge \
+        -p '{"spec":{"allowScheduling": false}}' 2>/dev/null || \
+        echo "  ⚠️  Node CRD not yet created for $NODE (this is OK if node just joined)"
 done
 
+# =============================================================================
+# Summary
+# =============================================================================
 echo ""
 echo "╔═══════════════════════════════════════════════════════════════════════╗"
 echo "║              LONGHORN INSTALLED & CONFIGURED                          ║"
 echo "╚═══════════════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Verify with: bash tests/03_storage_test.sh"
+echo "Storage Configuration:"
+echo "  • Data Path: /var/lib/longhorn"
+echo "  • Replica Count: 1 (single HDD)"
+echo "  • Storage Node: rpi4-1 only"
+echo "  • Workers: Protected (allowScheduling: false)"
+echo ""
+echo "Access Longhorn UI:"
+echo "  kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80"
+echo "  Open: http://localhost:8080"
+echo ""
+echo "Verify with:"
+echo "  bash tests/03_storage_test.sh"
+echo ""
 ```
 
 </details>
