@@ -1,6 +1,15 @@
 # =============================================================================
 # Local Path Provisioner - Direct Node Storage (OPTIONAL)
 # =============================================================================
+# IMPORTANT: This file requires ArgoCD to be installed first!
+# It uses the ArgoCD Application CRD (argoproj.io/v1alpha1).
+#
+# Deploy AFTER ArgoCD is running (Phase 4):
+#   kubectl apply -f gitops/storage/local-path-provisioner.yaml
+#
+# Do NOT deploy during Phase 3 (Storage Foundation) - ArgoCD is not yet installed.
+# Deploy during Phase 4 (GitOps) after running bootstrap/argocd/install.sh
+# =============================================================================
 # Provides a lightweight StorageClass for applications that:
 #   - Handle their own data replication (Redis Cluster, etc.)
 #   - Need maximum I/O performance (local disk vs network)
@@ -37,7 +46,7 @@
 #       requests:
 #         storage: 1Gi
 #
-# Dependencies: None (self-contained)
+# Dependencies: ArgoCD must be installed first (Phase 4)
 # =============================================================================
 
 apiVersion: argoproj.io/v1alpha1

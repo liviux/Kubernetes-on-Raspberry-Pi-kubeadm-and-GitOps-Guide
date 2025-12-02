@@ -28,15 +28,15 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
 7.  [Phase 3: Storage Foundation](#7-phase-3-storage-foundation)
     *   [7.1 Storage Mounting Playbook](#71-storage-mounting-playbook)
     *   [7.2 Longhorn Bootstrap Script](#72-longhorn-bootstrap-script)
-    *   [7.3 Local Path Provisioner (Optional)](#73-local-path-provisioner-optional)
-    *   [7.4 Storage Verification Script](#74-storage-verification-script)
-    *   [7.5 Phase 3 Execution Steps](#75-phase-3-execution-steps)
+    *   [7.3 Storage Verification Script](#73-storage-verification-script)
+    *   [7.4 Phase 3 Execution Steps](#74-phase-3-execution-steps)
 8.  [Phase 4: GitOps & Observability](#8-phase-4-gitops--observability)
     *   [8.1 Gateway API Bootstrap (Traefik)](#81-gateway-api-bootstrap-traefik)
     *   [8.2 GitOps Bootstrap (ArgoCD)](#82-gitops-bootstrap-argocd)
-    *   [8.3 Source Control Service (Gitea)](#83-source-control-service-gitea)
-    *   [8.4 The "App of Apps" Pattern](#84-the-app-of-apps-pattern)
-    *   [8.5 Phase 4 Execution Steps](#85-phase-4-execution-steps)
+    *   [8.3 Local Path Provisioner (Optional)](#83-local-path-provisioner-optional)
+    *   [8.4 Source Control Service (Gitea)](#84-source-control-service-gitea)
+    *   [8.5 The "App of Apps" Pattern](#85-the-app-of-apps-pattern)
+    *   [8.6 Phase 4 Execution Steps](#86-phase-4-execution-steps)
 9.  [Phase 5: Security & Management Stack](#9-phase-5-security--management-stack)
     *   [9.1 Object Storage (MinIO)](#91-object-storage-minio)
     *   [9.2 Certificate Automation (Cert-Manager)](#92-certificate-automation-cert-manager)
@@ -3488,177 +3488,7 @@ echo ""
 
 </details>
 
-### 7.3 Local Path Provisioner (Optional)
-
-**File:** `gitops/storage/local-path-provisioner.yaml`
-
-The Local Path Provisioner creates PersistentVolumes directly on node-local storage (SD cards). This is useful for workloads that:
-
-- Handle their own data replication (Redis Cluster, distributed caches)
-- Need maximum I/O performance (local disk bypasses network)
-- Store ephemeral/temporary data that can be regenerated
-
-> ⚠️ **Critical Warnings:**
-> - **No Replication:** Data lives on a single node. If that node fails, data is **LOST**.
-> - **Node Affinity:** Pods using local-path PVCs are bound to the node where the PV was created.
-> - **Not Backed Up:** Velero does not back up local-path volumes (use Longhorn for critical data).
-> - **SD Card Wear:** Only use for low-write workloads to protect SD card lifespan.
-
-**Storage Classes Comparison:**
-
-| StorageClass | Data Location | Replication | Network Latency | Use Case |
-|--------------|---------------|-------------|-----------------|----------|
-| `longhorn` (default) | HDD on rpi4-1 | Optional | Yes (iSCSI) | Databases, persistent apps |
-| `local-path` | SD card on pod's node | None | None | Caches, temp data, self-replicating apps |
-
-**When to Use Local Path:**
-
-| ✅ Good Use Cases | ❌ Bad Use Cases |
-|-------------------|------------------|
-| Redis/Valkey cache | Databases without replication |
-| Build caches (npm, pip, maven) | Application state |
-| Temporary processing directories | User uploads |
-| Applications with built-in replication | Anything you can't afford to lose |
-
-**Usage Example:**
-
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: my-cache-pvc
-spec:
-  storageClassName: local-path    # Use local storage instead of Longhorn
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
-```
-
-<details>
-<summary>📄 Click to expand full gitops/storage/local-path-provisioner.yaml</summary>
-
-```yaml
-# =============================================================================
-# Local Path Provisioner - Direct Node Storage (OPTIONAL)
-# =============================================================================
-# Provides a lightweight StorageClass for applications that:
-#   - Handle their own data replication (Redis Cluster, etc.)
-#   - Need maximum I/O performance (local disk vs network)
-#   - Store ephemeral/cacheable data that can be regenerated
-#
-# ⚠️ IMPORTANT WARNINGS:
-#   - Data is NOT replicated - if the node dies, data is LOST
-#   - Pods using local-path PVCs are bound to a specific node
-#   - NOT backed up by Velero (use Longhorn for critical data)
-#   - SD card wear: Only use for low-write workloads on workers
-#
-# Use Cases:
-#   ✅ Redis/Valkey cache (data can be regenerated)
-#   ✅ Build caches (npm, pip, maven)
-#   ✅ Temporary processing directories
-#   ✅ Applications with built-in replication
-#   ❌ Databases without replication
-#   ❌ Critical application data
-#   ❌ Anything you can't afford to lose
-#
-# Storage Location:
-#   - Worker nodes: /opt/local-path-provisioner (on SD card)
-#   - Control plane: /opt/local-path-provisioner (on SD card, NOT HDD)
-#
-# Usage Example:
-#   apiVersion: v1
-#   kind: PersistentVolumeClaim
-#   metadata:
-#     name: my-cache-pvc
-#   spec:
-#     storageClassName: local-path    # <-- Use this StorageClass
-#     accessModes: [ReadWriteOnce]
-#     resources:
-#       requests:
-#         storage: 1Gi
-#
-# Dependencies: None (self-contained)
-# =============================================================================
-
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: local-path-provisioner
-  namespace: argocd
-  annotations:
-    # Deploy early - storage classes should be available before apps
-    argocd.argoproj.io/sync-wave: "-4"
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/rancher/local-path-provisioner.git
-    path: deploy/chart/local-path-provisioner
-    targetRevision: v0.0.30
-    helm:
-      values: |
-        # -------------------------------------------------------------------
-        # Storage Configuration
-        # -------------------------------------------------------------------
-        storageClass:
-          # Not the default - Longhorn remains default for safety
-          defaultClass: false
-          name: local-path
-          reclaimPolicy: Delete
-        
-        # Path where PVs will be created on each node
-        # Using /opt to avoid filling up /var (systemd journals, etc.)
-        nodePathMap:
-          - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
-            paths:
-              - /opt/local-path-provisioner
-        
-        # -------------------------------------------------------------------
-        # Resource Limits (lightweight provisioner)
-        # -------------------------------------------------------------------
-        resources:
-          requests:
-            cpu: 10m
-            memory: 32Mi
-          limits:
-            cpu: 100m
-            memory: 128Mi
-        
-        # -------------------------------------------------------------------
-        # Helper Pod Configuration
-        # -------------------------------------------------------------------
-        # The helper pod creates/deletes directories on nodes
-        helperImage:
-          repository: busybox
-          tag: stable
-        
-        # -------------------------------------------------------------------
-        # Security Context
-        # -------------------------------------------------------------------
-        # Helper pods need root to create directories
-        helperPod:
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
-  
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: local-path-storage
-  
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
-```
-
-</details>
-
-### 7.4 Storage Verification Script
+### 7.3 Storage Verification Script
 
 **File:** `tests/03_storage_test.sh`
 
@@ -3832,7 +3662,7 @@ echo "Next command: bash bootstrap/traefik/install.sh"
 
 </details>
 
-### 7.5 Phase 3 Execution Steps
+### 7.4 Phase 3 Execution Steps
 
 Execute the following commands from your **management machine**:
 
@@ -4371,7 +4201,205 @@ echo "  kubectl apply -f gitops/services/gitea.yaml"
 
 </details>
 
-### 8.3 Source Control Service (Gitea)
+### 8.3 Local Path Provisioner (Optional)
+
+**File:** `gitops/storage/local-path-provisioner.yaml`
+
+> ⚠️ **Important:** This file uses `kind: Application` (ArgoCD CRD). It **must** be deployed after ArgoCD is installed and running. Do NOT attempt to install this during Phase 3.
+
+The Local Path Provisioner creates PersistentVolumes directly on node-local storage (SD cards). This is useful for workloads that:
+
+* Handle their own data replication (Redis Cluster, distributed caches)
+* Need maximum I/O performance (local disk bypasses network)
+* Store ephemeral/temporary data that can be regenerated
+
+> ⚠️ **Critical Warnings:**
+> * **No Replication:** Data lives on a single node. If that node fails, data is **LOST**.
+> * **Node Affinity:** Pods using local-path PVCs are bound to the node where the PV was created.
+> * **Not Backed Up:** Velero does not back up local-path volumes (use Longhorn for critical data).
+> * **SD Card Wear:** Only use for low-write workloads to protect SD card lifespan.
+
+**Storage Classes Comparison:**
+
+| StorageClass | Data Location | Replication | Network Latency | Use Case |
+|--------------|---------------|-------------|-----------------|----------|
+| `longhorn` (default) | HDD on rpi4-1 | Optional | Yes (iSCSI) | Databases, persistent apps |
+| `local-path` | SD card on pod's node | None | None | Caches, temp data, self-replicating apps |
+
+**When to Use Local Path:**
+
+| ✅ Good Use Cases | ❌ Bad Use Cases |
+|-------------------|------------------|
+| Redis/Valkey cache | Databases without replication |
+| Build caches (npm, pip, maven) | Application state |
+| Temporary processing directories | User uploads |
+| Applications with built-in replication | Anything you can't afford to lose |
+
+**Deploy after ArgoCD is running:**
+
+```bash
+# Verify ArgoCD is ready
+kubectl get pods -n argocd
+
+# Deploy Local Path Provisioner
+kubectl apply -f gitops/storage/local-path-provisioner.yaml
+
+# Verify the application was created
+kubectl get applications -n argocd local-path-provisioner
+
+# Wait for sync
+kubectl wait --for=jsonpath='{.status.sync.status}'=Synced \
+  application/local-path-provisioner -n argocd --timeout=120s
+```
+
+**Usage Example:**
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-cache-pvc
+spec:
+  storageClassName: local-path    # Use local storage instead of Longhorn
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+<details>
+<summary>📄 Click to expand full gitops/storage/local-path-provisioner.yaml</summary>
+
+```yaml
+# =============================================================================
+# Local Path Provisioner - Direct Node Storage (OPTIONAL)
+# =============================================================================
+# IMPORTANT: This file requires ArgoCD to be installed first!
+# It uses the ArgoCD Application CRD (argoproj.io/v1alpha1).
+#
+# Deploy AFTER ArgoCD is running:
+#   kubectl apply -f gitops/storage/local-path-provisioner.yaml
+#
+# Do NOT deploy during Phase 3 (Storage Foundation) - ArgoCD is not yet installed.
+# Deploy during Phase 4 (GitOps) after running bootstrap/argocd/install.sh
+# =============================================================================
+# Provides a lightweight StorageClass for applications that:
+#   - Handle their own data replication (Redis Cluster, etc.)
+#   - Need maximum I/O performance (local disk vs network)
+#   - Store ephemeral/cacheable data that can be regenerated
+#
+# ⚠️ IMPORTANT WARNINGS:
+#   - Data is NOT replicated - if the node dies, data is LOST
+#   - Pods using local-path PVCs are bound to a specific node
+#   - NOT backed up by Velero (use Longhorn for critical data)
+#   - SD card wear: Only use for low-write workloads on workers
+#
+# Use Cases:
+#   ✅ Redis/Valkey cache (data can be regenerated)
+#   ✅ Build caches (npm, pip, maven)
+#   ✅ Temporary processing directories
+#   ✅ Applications with built-in replication
+#   ❌ Databases without replication
+#   ❌ Critical application data
+#   ❌ Anything you can't afford to lose
+#
+# Storage Location:
+#   - Worker nodes: /opt/local-path-provisioner (on SD card)
+#   - Control plane: /opt/local-path-provisioner (on SD card, NOT HDD)
+#
+# Usage Example:
+#   apiVersion: v1
+#   kind: PersistentVolumeClaim
+#   metadata:
+#     name: my-cache-pvc
+#   spec:
+#     storageClassName: local-path    # <-- Use this StorageClass
+#     accessModes: [ReadWriteOnce]
+#     resources:
+#       requests:
+#         storage: 1Gi
+#
+# Dependencies: ArgoCD must be installed first
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: local-path-provisioner
+  namespace: argocd
+  annotations:
+    # Deploy early - storage classes should be available before apps
+    argocd.argoproj.io/sync-wave: "-4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rancher/local-path-provisioner.git
+    path: deploy/chart/local-path-provisioner
+    targetRevision: v0.0.30
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Storage Configuration
+        # -------------------------------------------------------------------
+        storageClass:
+          # Not the default - Longhorn remains default for safety
+          defaultClass: false
+          name: local-path
+          reclaimPolicy: Delete
+        
+        # Path where PVs will be created on each node
+        # Using /opt to avoid filling up /var (systemd journals, etc.)
+        nodePathMap:
+          - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+            paths:
+              - /opt/local-path-provisioner
+        
+        # -------------------------------------------------------------------
+        # Resource Limits (lightweight provisioner)
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        
+        # -------------------------------------------------------------------
+        # Helper Pod Configuration
+        # -------------------------------------------------------------------
+        # The helper pod creates/deletes directories on nodes
+        helperImage:
+          repository: busybox
+          tag: stable
+        
+        # -------------------------------------------------------------------
+        # Security Context
+        # -------------------------------------------------------------------
+        # Helper pods need root to create directories
+        helperPod:
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+</details>
+
+### 8.4 Source Control Service (Gitea)
 
 **File:** `gitops/services/gitea.yaml`
 
@@ -4571,7 +4599,7 @@ spec:
 
 </details>
 
-### 8.4 The "App of Apps" Pattern
+### 8.5 The "App of Apps" Pattern
 
 **File:** `gitops/app-of-apps.yaml`
 
@@ -4823,7 +4851,7 @@ spec:
 
 </details>
 
-### 8.5 Phase 4 Execution Steps
+### 8.6 Phase 4 Execution Steps
 
 Execute these commands in order from your control machine:
 
@@ -4834,10 +4862,11 @@ Execute these commands in order from your control machine:
 │                                                                             │
 │  □ Step 1: Install Traefik (Gateway/Ingress)                               │
 │  □ Step 2: Install ArgoCD (GitOps Controller)                              │
-│  □ Step 3: Deploy Gitea (Git Server)                                       │
-│  □ Step 4: Create Repository in Gitea                                      │
-│  □ Step 5: Deploy Observability Stack                                      │
-│  □ Step 6: Verify All Services                                             │
+│  □ Step 3: Deploy Local Path Provisioner (Optional)                        │
+│  □ Step 4: Deploy Gitea (Git Server)                                       │
+│  □ Step 5: Create Repository in Gitea                                      │
+│  □ Step 6: Deploy Observability Stack                                      │
+│  □ Step 7: Verify All Services                                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -4875,7 +4904,32 @@ kubectl get pods -n argocd
 # Password: (shown in install script output)
 ```
 
-**Step 3: Deploy Gitea via ArgoCD**
+**Step 3: Deploy Local Path Provisioner (Optional)**
+
+> **Note:** This step is optional. Only deploy if you need local node storage for caches or self-replicating applications.
+
+```bash
+# Deploy Local Path Provisioner via ArgoCD
+kubectl apply -f gitops/storage/local-path-provisioner.yaml
+
+# Verify the application was created
+kubectl get applications -n argocd local-path-provisioner
+
+# Wait for sync (ArgoCD will deploy the actual provisioner)
+kubectl wait --for=jsonpath='{.status.sync.status}'=Synced \
+  application/local-path-provisioner -n argocd --timeout=120s
+```
+
+**Verify:**
+```bash
+# Check Local Path Provisioner pods
+kubectl get pods -n local-path-storage
+
+# Check StorageClass was created
+kubectl get storageclass local-path
+```
+
+**Step 4: Deploy Gitea via ArgoCD**
 
 ```bash
 kubectl apply -f gitops/services/gitea.yaml
@@ -4892,7 +4946,7 @@ kubectl get application -n argocd gitea
 # Expected: STATUS=Synced, HEALTH=Healthy (wait ~5 minutes)
 ```
 
-**Step 4: Initialize Gitea (The Pivot Point)**
+**Step 5: Initialize Gitea (The Pivot Point)**
 
 This is the critical step where we close the GitOps loop:
 
@@ -4911,7 +4965,7 @@ git commit -m "Initial cluster configuration"
 git push -u origin main
 ```
 
-**Step 5: Deploy Observability Stack**
+**Step 6: Deploy Observability Stack**
 
 ```bash
 kubectl apply -f gitops/app-of-apps.yaml
@@ -4928,7 +4982,7 @@ kubectl get application -n argocd observability-stack
 # Expected: All pods Running (wait ~10 minutes for all components)
 ```
 
-**Step 6: Final Verification**
+**Step 7: Final Verification**
 
 ```bash
 # List all ArgoCD-managed applications
