@@ -3163,18 +3163,9 @@ metadata:
 spec:
   # The range of IPs that Cilium can assign to LoadBalancer services
   # These must be reserved in your router's DHCP settings to avoid conflicts
-  cidrs:
-  - cidr: "192.168.68.210/32"
-  - cidr: "192.168.68.211/32"
-  - cidr: "192.168.68.212/32"
-  - cidr: "192.168.68.213/32"
-  - cidr: "192.168.68.214/32"
-  - cidr: "192.168.68.215/32"
-  - cidr: "192.168.68.216/32"
-  - cidr: "192.168.68.217/32"
-  - cidr: "192.168.68.218/32"
-  - cidr: "192.168.68.219/32"
-  - cidr: "192.168.68.220/32"
+  blocks:
+  - start: "192.168.68.210"
+    stop: "192.168.68.220"
 ---
 apiVersion: "cilium.io/v2alpha1"
 kind: CiliumL2AnnouncementPolicy
