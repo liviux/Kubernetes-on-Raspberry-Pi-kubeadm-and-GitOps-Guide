@@ -3657,7 +3657,19 @@ fi
 
 echo ""
 echo "🎉 PHASE 3 COMPLETE - Storage is operational!"
-echo "Next command: bash bootstrap/traefik/install.sh"
+echo ""
+echo "Storage Architecture Verified:"
+echo "  • Longhorn running and healthy"
+echo "  • HDD on rpi4-1 used for all storage"
+echo "  • Worker SD cards protected (no writes)"
+echo "  • iSCSI network attach working"
+echo ""
+echo "ℹ️  Note: Local Path Provisioner is deployed via GitOps in Phase 4"
+echo "   (after ArgoCD is installed). It requires ArgoCD CRDs."
+echo "   Deploy with: kubectl apply -f gitops/storage/local-path-provisioner.yaml"
+echo ""
+echo "Next command:"
+echo "  bash bootstrap/traefik/install.sh"
 ```
 
 </details>
@@ -4195,6 +4207,9 @@ echo "Verify with:"
 echo "  kubectl get pods -n argocd"
 echo "  argocd app list"
 echo ""
+echo "Optional: Deploy storage applications via GitOps:"
+echo "  kubectl apply -f gitops/storage/local-path-provisioner.yaml"
+echo ""
 echo "Next command:"
 echo "  kubectl apply -f gitops/services/gitea.yaml"
 ```
@@ -4320,7 +4335,7 @@ spec:
 #       requests:
 #         storage: 1Gi
 #
-# Dependencies: ArgoCD must be installed first
+# Dependencies: ArgoCD must be installed first (Phase 4)
 # =============================================================================
 
 apiVersion: argoproj.io/v1alpha1
