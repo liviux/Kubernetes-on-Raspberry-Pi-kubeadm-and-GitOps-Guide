@@ -106,6 +106,65 @@
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
 
+    - name: Apply Cilium L2 LoadBalancer IP Pool and Announcement Policy
+      shell: |
+        cat <<'EOF' | kubectl apply -f -
+        apiVersion: "cilium.io/v2alpha1"
+        kind: CiliumLoadBalancerIPPool
+        metadata:
+          name: "default-pool"
+        spec:
+          cidrs:
+          - cidr: "192.168.68.210/32"
+          - cidr: "192.168.68.211/32"
+          - cidr: "192.168.68.212/32"
+          - cidr: "192.168.68.213/32"
+          - cidr: "192.168.68.214/32"
+          - cidr: "192.168.68.215/32"
+          - cidr: "192.168.68.216/32"
+          - cidr: "192.168.68.217/32"
+          - cidr: "192.168.68.218/32"
+          - cidr: "192.168.68.219/32"
+          - cidr: "192.168.68.220/32"
+        ---
+        apiVersion: "cilium.io/v2alpha1"
+        kind: CiliumL2AnnouncementPolicy
+        metadata:
+          name: "default-l2-policy"
+        spec:
+          nodeSelector:
+            matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                  - linux
+          interfaces:
+          - "^eth0"
+          externalIPs: true
+          loadBalancerIPs: true
+        EOF
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Verify Cilium L2 configuration
+      shell: |
+        kubectl get ciliumloadbalancerippools
+        kubectl get ciliuml2announcementpolicies
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: l2_config
+      changed_when: false
+
+    - name: Display L2 configuration status
+      debug:
+        msg: |
+          ════════════════════════════════════════════════════════════════
+          Cilium L2 LoadBalancer Configuration Applied:
+          {{ l2_config.stdout }}
+          ════════════════════════════════════════════════════════════════
+          LoadBalancer IP Pool: 192.168.68.210-220
+          Services using type: LoadBalancer will now receive external IPs.
+
     - name: Generate Join Token
       command: kubeadm token create --print-join-command
       register: join_command

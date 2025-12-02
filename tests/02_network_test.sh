@@ -8,6 +8,7 @@
 #   1. Node Readiness - All 4 nodes in Ready state
 #   2. Cilium Pods - CNI agents running on every node
 #   3. Hubble Service - Network observability available
+#   3b. Cilium L2 Config - LoadBalancer IP pool and announcement policy
 #   4. Hardware Labels - Scheduling affinity labels applied
 #   5. CoreDNS - DNS resolution services running
 #   6. Metrics Server - Resource usage metrics available
@@ -99,6 +100,36 @@ if kubectl get svc -n kube-system hubble-relay &>/dev/null; then
     ((PASS++))
 else
     echo -e "${RED}❌ Hubble Relay Service not found${NC}"
+    ((FAIL++))
+fi
+
+# -----------------------------------------------------------------------------
+# 3b. Check Cilium L2 LoadBalancer Configuration
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ 3b. CILIUM L2 LOADBALANCER CONFIGURATION                            │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+# Check CiliumLoadBalancerIPPool
+IPPOOL=$(kubectl get ciliumloadbalancerippools default-pool -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
+if [ "$IPPOOL" == "default-pool" ]; then
+    echo -e "${GREEN}✅ CiliumLoadBalancerIPPool 'default-pool' exists${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ CiliumLoadBalancerIPPool missing!${NC}"
+    echo "   Fix: kubectl apply -f bootstrap/cilium/l2-config.yaml"
+    ((FAIL++))
+fi
+
+# Check CiliumL2AnnouncementPolicy
+L2POLICY=$(kubectl get ciliuml2announcementpolicies default-l2-policy -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
+if [ "$L2POLICY" == "default-l2-policy" ]; then
+    echo -e "${GREEN}✅ CiliumL2AnnouncementPolicy 'default-l2-policy' exists${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ CiliumL2AnnouncementPolicy missing!${NC}"
+    echo "   Fix: kubectl apply -f bootstrap/cilium/l2-config.yaml"
     ((FAIL++))
 fi
 

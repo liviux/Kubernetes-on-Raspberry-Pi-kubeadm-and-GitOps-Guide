@@ -24,7 +24,8 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [6.1 Cluster Initialization Playbook](#61-cluster-initialization-playbook)
     *   [6.2 Metrics Server](#62-metrics-server)
     *   [6.3 Network Verification Script](#63-network-verification-script)
-    *   [6.4 Phase 2 Execution Steps](#64-phase-2-execution-steps)
+    *   [6.4 Cilium L2 LoadBalancer Configuration](#64-cilium-l2-loadbalancer-configuration)
+    *   [6.5 Phase 2 Execution Steps](#65-phase-2-execution-steps)
 7.  [Phase 3: Storage Foundation](#7-phase-3-storage-foundation)
     *   [7.1 Storage Mounting Playbook](#71-storage-mounting-playbook)
     *   [7.2 Longhorn Bootstrap Script](#72-longhorn-bootstrap-script)
@@ -3102,7 +3103,102 @@ echo "  ansible-playbook -i ansible/hosts ansible/playbooks/04_storage_mount.yml
 
 </details>
 
-### 6.4 Phase 2 Execution Steps
+### 6.4 Cilium L2 LoadBalancer Configuration
+
+**File:** `bootstrap/cilium/l2-config.yaml`
+
+After Cilium is installed with L2 announcements enabled, you must apply the **IP Pool** and **Announcement Policy** to enable LoadBalancer IP assignment. Without this step, LoadBalancer services will remain in `<pending>` state.
+
+> ⚠️ **Critical:** This step is frequently forgotten! If your Traefik or other LoadBalancer services show `EXTERNAL-IP: <pending>`, this configuration is missing.
+
+**What This Configuration Does:**
+
+| Resource | Purpose |
+|----------|---------|
+| `CiliumLoadBalancerIPPool` | Defines the range of IPs Cilium can assign to LoadBalancer services |
+| `CiliumL2AnnouncementPolicy` | Configures which nodes announce these IPs via ARP/NDP |
+
+**Configuration Details:**
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| IP Range | `192.168.68.210-220` | 11 IPs for LoadBalancer services |
+| Node Selector | `kubernetes.io/os: linux` | All nodes can announce |
+| Interface | `^eth0` | Announce on Ethernet interface |
+| `loadBalancerIPs` | `true` | Enable for LoadBalancer services |
+| `externalIPs` | `true` | Enable for ExternalIP services |
+
+**Apply the configuration:**
+
+```bash
+kubectl apply -f bootstrap/cilium/l2-config.yaml
+```
+
+**Verify the resources were created:**
+
+```bash
+# Check IP pool
+kubectl get ciliumloadbalancerippools
+
+# Expected output:
+# NAME           DISABLED   CONFLICTING   IPS AVAILABLE   AGE
+# default-pool   false      False         11              10s
+
+# Check announcement policy
+kubectl get ciliuml2announcementpolicies
+
+# Expected output:
+# NAME                AGE
+# default-l2-policy   10s
+```
+
+<details>
+<summary>📄 Click to expand full bootstrap/cilium/l2-config.yaml</summary>
+
+```yaml
+apiVersion: "cilium.io/v2alpha1"
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: "default-pool"
+spec:
+  # The range of IPs that Cilium can assign to LoadBalancer services
+  # These must be reserved in your router's DHCP settings to avoid conflicts
+  cidrs:
+  - cidr: "192.168.68.210/32"
+  - cidr: "192.168.68.211/32"
+  - cidr: "192.168.68.212/32"
+  - cidr: "192.168.68.213/32"
+  - cidr: "192.168.68.214/32"
+  - cidr: "192.168.68.215/32"
+  - cidr: "192.168.68.216/32"
+  - cidr: "192.168.68.217/32"
+  - cidr: "192.168.68.218/32"
+  - cidr: "192.168.68.219/32"
+  - cidr: "192.168.68.220/32"
+---
+apiVersion: "cilium.io/v2alpha1"
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: "default-l2-policy"
+spec:
+  # Which nodes should announce these IPs?
+  # We select all nodes that have the label 'kubernetes.io/os=linux' (all nodes)
+  nodeSelector:
+    matchExpressions:
+      - key: kubernetes.io/os
+        operator: In
+        values:
+          - linux
+  # Network interface to announce on (usually eth0 for RPi)
+  interfaces:
+  - "^eth0"
+  externalIPs: true
+  loadBalancerIPs: true
+```
+
+</details>
+
+### 6.5 Phase 2 Execution Steps
 
 Execute the following commands from your **management machine** (WSL/Linux/Mac):
 
@@ -3114,10 +3210,14 @@ cd ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide
 # ⚠️ This will overwrite ~/.kube/config on your local machine
 ansible-playbook -i ansible/hosts ansible/playbooks/03_cluster_init.yml
 
-# Step 2: Install Metrics Server for kubectl top and HPA support
+# Step 2: Apply Cilium L2 LoadBalancer configuration
+# ⚠️ CRITICAL: Without this, LoadBalancer services will stay in <pending>!
+kubectl apply -f bootstrap/cilium/l2-config.yaml
+
+# Step 3: Install Metrics Server for kubectl top and HPA support
 bash bootstrap/metrics-server/install.sh
 
-# Step 3: Verify cluster status
+# Step 4: Verify cluster status
 bash tests/02_network_test.sh
 ```
 
