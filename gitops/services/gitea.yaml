@@ -104,6 +104,9 @@ spec:
                 memory: 256Mi
                 cpu: 250m
         
+        postgresql-ha:
+          enabled: false
+        
         # -------------------------------------------------------------------
         # Ingress Configuration (Disabled - Using Gateway API HTTPRoute)
         # -------------------------------------------------------------------
