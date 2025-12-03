@@ -4680,7 +4680,7 @@ spec:
   source:
     repoURL: https://dl.gitea.com/charts/
     chart: gitea
-    targetRevision: 10.6.0
+    targetRevision: 12.4.0
     helm:
       values: |
         # ---------------------------------------------------------------------
