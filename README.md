@@ -4109,20 +4109,14 @@ spec:
   listeners:
     - name: web
       protocol: HTTP
-      port: 80
+      port: 8000
       allowedRoutes:
         namespaces:
           from: All
-    - name: websecure
-      protocol: HTTPS
-      port: 443
-      allowedRoutes:
-        namespaces:
-          from: All
-      tls:
-        mode: Terminate
-        certificateRefs: []
 EOF
+
+# NOTE: Traefik uses internal port 8000 for the 'web' entrypoint.
+# External traffic on port 80 is forwarded internally to 8000.
 
 # =============================================================================
 # 4. Verify Installation
@@ -4296,7 +4290,7 @@ spec:
   listeners:
     - name: web
       protocol: HTTP
-      port: 80
+      port: 8000
       allowedRoutes:
         namespaces:
           from: All

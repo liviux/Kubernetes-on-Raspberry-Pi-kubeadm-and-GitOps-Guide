@@ -80,6 +80,9 @@ echo "│ Step 3: Creating Shared Gateway for All Services                   │
 echo "└─────────────────────────────────────────────────────────────────────┘"
 echo "Creating Gateway API Gateway resource..."
 
+# NOTE: Traefik uses internal port 8000 for the 'web' entrypoint.
+# External LoadBalancer port 80 forwards to internal port 8000.
+# The Gateway listener must reference the internal entrypoint port.
 cat <<EOF | kubectl apply -f -
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -91,19 +94,10 @@ spec:
   listeners:
     - name: web
       protocol: HTTP
-      port: 80
+      port: 8000
       allowedRoutes:
         namespaces:
           from: All
-    - name: websecure
-      protocol: HTTPS
-      port: 443
-      allowedRoutes:
-        namespaces:
-          from: All
-      tls:
-        mode: Terminate
-        certificateRefs: []
 EOF
 
 # =============================================================================

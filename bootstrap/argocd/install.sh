@@ -72,6 +72,7 @@ echo "│ Step 3: Creating Gateway API Resources for ArgoCD UI               │
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
 # Create shared Gateway (idempotent - will be used by all services)
+# NOTE: port 8000 is Traefik's internal 'web' entrypoint (external 80 -> internal 8000)
 echo "Creating shared Gateway (if not exists)..."
 cat <<EOF | kubectl apply -f -
 apiVersion: gateway.networking.k8s.io/v1
@@ -84,7 +85,7 @@ spec:
   listeners:
     - name: web
       protocol: HTTP
-      port: 80
+      port: 8000
       allowedRoutes:
         namespaces:
           from: All
