@@ -2812,6 +2812,54 @@ echo ""
 
 </details>
 
+**Alternative: GitOps Deployment**
+
+For ArgoCD-managed deployments, use the GitOps manifest instead of the bootstrap script:
+
+**File:** `gitops/observability/metrics-server.yaml`
+
+<details>
+<summary>📄 Click to expand full gitops/observability/metrics-server.yaml</summary>
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"  # Deploy very early - required for HPA
+spec:
+  project: default
+  source:
+    repoURL: https://kubernetes-sigs.github.io/metrics-server/
+    chart: metrics-server
+    targetRevision: 3.13.0
+    helm:
+      values: |
+        # Required for kubeadm clusters with self-signed kubelet certs
+        args:
+          - --kubelet-insecure-tls
+          - --kubelet-preferred-address-types=InternalIP
+        
+        resources:
+          requests:
+            cpu: 100m
+            memory: 200Mi
+          limits:
+            cpu: 250m
+            memory: 300Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+</details>
+
 *Note: The `--kubelet-insecure-tls` flag is required because kubeadm generates self-signed certificates for the kubelet.*
 
 ### 6.3 Network Verification Script
@@ -4436,7 +4484,7 @@ spec:
 # IMPORTANT: This file requires ArgoCD to be installed first!
 # It uses the ArgoCD Application CRD (argoproj.io/v1alpha1).
 #
-# Deploy AFTER ArgoCD is running:
+# Deploy AFTER ArgoCD is running (Phase 4):
 #   kubectl apply -f gitops/storage/local-path-provisioner.yaml
 #
 # Do NOT deploy during Phase 3 (Storage Foundation) - ArgoCD is not yet installed.
@@ -4496,7 +4544,7 @@ spec:
   source:
     repoURL: https://github.com/rancher/local-path-provisioner.git
     path: deploy/chart/local-path-provisioner
-    targetRevision: v0.0.30
+    targetRevision: v0.0.32
     helm:
       values: |
         # -------------------------------------------------------------------
@@ -4731,12 +4779,20 @@ spec:
       - ServerSideApply=true
 ```
 
-**HTTPRoute for Gitea (separate file: `gitops/services/gitea-httproute.yaml`):**
+<details>
+<summary>📄 Click to expand full gitops/services/gitea-httproute.yaml</summary>
 
 ```yaml
 # =============================================================================
-# HTTPRoute for Gitea Web UI (Gateway API)
+# Gitea HTTPRoute - Gateway API Routing
 # =============================================================================
+# Routes HTTP traffic to Gitea via the shared Traefik Gateway.
+# Separate from the Helm chart to use Gateway API instead of Ingress.
+#
+# Apply after Gitea is deployed:
+#   kubectl apply -f gitops/services/gitea-httproute.yaml
+# =============================================================================
+
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -4757,6 +4813,8 @@ spec:
         - name: gitea-http
           port: 3000
 ```
+
+</details>
 
 </details>
 
