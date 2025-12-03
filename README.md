@@ -4687,6 +4687,9 @@ This is our first **Declarative Application**. Instead of a shell script, this i
 | `persistence.size` | `10Gi` | Repository data storage |
 | `ssh.port` | `2222` | Avoid conflict with node SSH |
 | `service.ssh.type` | `LoadBalancer` | Direct SSH access via Cilium L2 |
+| `valkey-cluster.persistence.storageClass` | `local-path` | Fast cache storage (no replication needed) |
+
+> **💡 Storage Strategy:** Gitea uses **Longhorn** for critical data (PostgreSQL, repositories) and **local-path** for Valkey cache. Caches don't need network-replicated storage since data can be regenerated.
 
 **Access Information:**
 
@@ -4734,6 +4737,13 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
+  # Ignore volumeClaimTemplates differences (apiVersion/kind fields are auto-added by K8s)
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - .spec.volumeClaimTemplates[]?.apiVersion
+        - .spec.volumeClaimTemplates[]?.kind
   source:
     repoURL: https://dl.gitea.com/charts/
     chart: gitea
@@ -4808,6 +4818,15 @@ spec:
         
         postgresql-ha:
           enabled: false
+        
+        # -------------------------------------------------------------------
+        # Valkey (Redis-compatible cache) - Use local-path for faster I/O
+        # -------------------------------------------------------------------
+        valkey-cluster:
+          enabled: true
+          persistence:
+            storageClass: local-path
+            size: 2Gi
         
         # -------------------------------------------------------------------
         # Ingress Configuration (Disabled - Using Gateway API HTTPRoute)

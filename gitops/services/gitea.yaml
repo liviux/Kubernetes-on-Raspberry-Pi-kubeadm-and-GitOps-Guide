@@ -32,6 +32,13 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
+  # Ignore volumeClaimTemplates differences (apiVersion/kind fields are auto-added by K8s)
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - .spec.volumeClaimTemplates[]?.apiVersion
+        - .spec.volumeClaimTemplates[]?.kind
   source:
     repoURL: https://dl.gitea.com/charts/
     chart: gitea
@@ -106,6 +113,15 @@ spec:
         
         postgresql-ha:
           enabled: false
+        
+        # -------------------------------------------------------------------
+        # Valkey (Redis-compatible cache) - Use local-path for faster I/O
+        # -------------------------------------------------------------------
+        valkey-cluster:
+          enabled: true
+          persistence:
+            storageClass: local-path
+            size: 2Gi
         
         # -------------------------------------------------------------------
         # Ingress Configuration (Disabled - Using Gateway API HTTPRoute)
