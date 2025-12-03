@@ -18,6 +18,12 @@
 # Storage: All components use Longhorn for persistence
 # =============================================================================
 
+# Create monitoring namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -30,7 +36,7 @@ spec:
   source:
     repoURL: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    targetRevision: 66.3.0
+    targetRevision: 79.11.0
     helm:
       values: |
         # -------------------------------------------------------------------
@@ -51,11 +57,11 @@ spec:
                   accessModes: ["ReadWriteOnce"]
                   resources:
                     requests:
-                      storage: 10Gi
+                      storage: 60Gi
             
             # Retention settings
-            retention: 15d
-            retentionSize: "8GB"
+            retention: 60d
+            retentionSize: "50GB"
             
             # Resource limits for RPi
             resources:

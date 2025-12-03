@@ -5070,7 +5070,7 @@ For the initial deployment, we start with the **kube-prometheus-stack** which pr
 
 | Setting | Value | Purpose |
 |---------|-------|---------|
-| `prometheus.storageSpec` | `10Gi` Longhorn | Persistent metrics storage |
+| `prometheus.storageSpec` | `60Gi` Longhorn | Persistent metrics storage |
 | `grafana.persistence` | `2Gi` Longhorn | Dashboard persistence |
 | `alertmanager.storage` | `2Gi` Longhorn | Alert state persistence |
 
@@ -5110,7 +5110,7 @@ spec:
   source:
     repoURL: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    targetRevision: 66.3.0
+    targetRevision: 79.11.0
     helm:
       values: |
         # -------------------------------------------------------------------
@@ -5131,11 +5131,11 @@ spec:
                   accessModes: ["ReadWriteOnce"]
                   resources:
                     requests:
-                      storage: 10Gi
+                      storage: 60Gi
             
             # Retention settings
-            retention: 15d
-            retentionSize: "8GB"
+            retention: 60d
+            retentionSize: "50GB"
             
             # Resource limits for RPi
             resources:
