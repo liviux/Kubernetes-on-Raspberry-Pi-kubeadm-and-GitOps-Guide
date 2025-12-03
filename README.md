@@ -37,7 +37,6 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [8.3 Local Path Provisioner (Optional)](#83-local-path-provisioner-optional)
     *   [8.4 Source Control Service (Gitea)](#84-source-control-service-gitea)
     *   [8.5 The "App of Apps" Pattern](#85-the-app-of-apps-pattern)
-    *   [8.6 Phase 4 Execution Steps](#86-phase-4-execution-steps)
 9.  [Phase 5: Security & Management Stack](#9-phase-5-security--management-stack)
     *   [9.1 Object Storage (MinIO)](#91-object-storage-minio)
     *   [9.2 Certificate Automation (Cert-Manager)](#92-certificate-automation-cert-manager)
@@ -4201,6 +4200,20 @@ echo "  bash bootstrap/argocd/install.sh"
 
 </details>
 
+**Verify Traefik Installation:**
+
+```bash
+# Check Traefik service has External IP
+kubectl get svc -n traefik-system
+
+# Expected output:
+# NAME      TYPE           CLUSTER-IP     EXTERNAL-IP     PORT(S)
+# traefik   LoadBalancer   10.96.x.x      192.168.68.210   80:xxxxx/TCP,443:xxxxx/TCP
+
+# Test connectivity
+curl -I http://192.168.68.210
+```
+
 ### 8.2 GitOps Bootstrap (ArgoCD)
 
 **File:** `bootstrap/argocd/install.sh`
@@ -4407,6 +4420,23 @@ echo "  kubectl apply -f gitops/services/gitea.yaml"
 
 </details>
 
+**Verify ArgoCD Installation:**
+
+```bash
+# Check ArgoCD pods are running
+kubectl get pods -n argocd
+
+# Get ArgoCD admin password
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d && echo
+```
+
+**Access ArgoCD:**
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| ArgoCD UI | http://argocd.192.168.68.210.nip.io | admin / (password from above) |
+
 ### 8.3 Local Path Provisioner (Optional)
 
 **File:** `gitops/storage/local-path-provisioner.yaml`
@@ -4604,6 +4634,33 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Verify ArgoCD is ready first
+kubectl get pods -n argocd
+
+# Deploy Local Path Provisioner via ArgoCD
+kubectl apply -f gitops/storage/local-path-provisioner.yaml
+
+# Verify the application was created
+kubectl get applications -n argocd local-path-provisioner
+
+# Wait for sync
+kubectl wait --for=jsonpath='{.status.sync.status}'=Synced \
+  application/local-path-provisioner -n argocd --timeout=120s
+```
+
+**Verify Local Path Provisioner:**
+
+```bash
+# Check Local Path Provisioner pods
+kubectl get pods -n local-path-storage
+
+# Check StorageClass was created
+kubectl get storageclass local-path
+```
 
 ### 8.4 Source Control Service (Gitea)
 
@@ -4817,6 +4874,48 @@ spec:
 </details>
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Step 1: Deploy Gitea via ArgoCD
+kubectl apply -f gitops/services/gitea.yaml
+
+# Step 2: Wait for Gitea to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=gitea -n gitea --timeout=300s
+
+# Step 3: Apply the HTTPRoute for web access
+kubectl apply -f gitops/services/gitea-httproute.yaml
+
+# Verify the application status
+kubectl get application -n argocd gitea
+```
+
+**Access Gitea:**
+
+| Service | URL / Address |
+|---------|---------------|
+| Web UI | http://gitea.192.168.68.210.nip.io |
+| SSH Clone | ssh://git@192.168.68.210:2222/user/repo.git |
+
+**First-time Setup (The Pivot Point):**
+
+This is the critical step where we close the GitOps loop:
+
+1. Open Gitea UI: `http://gitea.192.168.68.210.nip.io`
+2. Create your admin account on first visit
+3. Create a new repository named `home-cluster`
+4. Push your local configuration:
+
+```bash
+# Initialize and push to Gitea
+cd /path/to/your/gitops/folder
+git init
+git remote add origin http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
+git add .
+git commit -m "Initial cluster configuration"
+git push -u origin main
+```
 
 ### 8.5 The "App of Apps" Pattern
 
@@ -5069,138 +5168,22 @@ spec:
 
 </details>
 
-### 8.6 Phase 4 Execution Steps
-
-Execute these commands in order from your control machine:
-
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     PHASE 4 EXECUTION CHECKLIST                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  □ Step 1: Install Traefik (Gateway API)                                   │
-│  □ Step 2: Install ArgoCD (GitOps Controller)                              │
-│  □ Step 3: Deploy Local Path Provisioner (Optional)                        │
-│  □ Step 4: Deploy Gitea (Git Server)                                       │
-│  □ Step 5: Create Repository in Gitea                                      │
-│  □ Step 6: Deploy Observability Stack                                      │
-│  □ Step 7: Verify All Services                                             │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**Step 1: Install Traefik**
+**Deploy the App of Apps:**
 
 ```bash
-bash bootstrap/traefik/install.sh
-```
-
-**Verify:**
-```bash
-# Check Traefik service has External IP
-kubectl get svc -n traefik-system
-
-# Expected output:
-# NAME      TYPE           CLUSTER-IP     EXTERNAL-IP     PORT(S)
-# traefik   LoadBalancer   10.96.x.x      192.168.68.210   80:xxxxx/TCP,443:xxxxx/TCP
-```
-
-**Step 2: Install ArgoCD**
-
-```bash
-bash bootstrap/argocd/install.sh
-```
-
-**Verify:**
-```bash
-# Check ArgoCD pods are running
-kubectl get pods -n argocd
-
-# Access ArgoCD UI
-# Open: http://argocd.192.168.68.210.nip.io
-# Username: admin
-# Password: (shown in install script output)
-```
-
-**Step 3: Deploy Local Path Provisioner (Optional)**
-
-> **Note:** This step is optional. Only deploy if you need local node storage for caches or self-replicating applications.
-
-```bash
-# Deploy Local Path Provisioner via ArgoCD
-kubectl apply -f gitops/storage/local-path-provisioner.yaml
-
-# Verify the application was created
-kubectl get applications -n argocd local-path-provisioner
-
-# Wait for sync (ArgoCD will deploy the actual provisioner)
-kubectl wait --for=jsonpath='{.status.sync.status}'=Synced \
-  application/local-path-provisioner -n argocd --timeout=120s
-```
-
-**Verify:**
-```bash
-# Check Local Path Provisioner pods
-kubectl get pods -n local-path-storage
-
-# Check StorageClass was created
-kubectl get storageclass local-path
-```
-
-**Step 4: Deploy Gitea via ArgoCD**
-
-```bash
-kubectl apply -f gitops/services/gitea.yaml
-```
-
-**Verify:**
-```bash
-# Watch the deployment progress
-kubectl get pods -n gitea -w
-
-# Check Application status in ArgoCD
-kubectl get application -n argocd gitea
-
-# Expected: STATUS=Synced, HEALTH=Healthy (wait ~5 minutes)
-```
-
-**Step 5: Initialize Gitea (The Pivot Point)**
-
-This is the critical step where we close the GitOps loop:
-
-1. Open Gitea UI: `http://gitea.192.168.68.210.nip.io`
-2. Create your admin account on first visit
-3. Create a new repository named `home-cluster`
-4. Push your local configuration:
-
-```bash
-# Initialize and push to Gitea
-cd /path/to/your/gitops/folder
-git init
-git remote add origin http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
-git add .
-git commit -m "Initial cluster configuration"
-git push -u origin main
-```
-
-**Step 6: Deploy Observability Stack**
-
-```bash
+# Deploy the root application (this will sync all child applications)
 kubectl apply -f gitops/app-of-apps.yaml
-```
 
-**Verify:**
-```bash
 # Watch deployment progress
 kubectl get pods -n monitoring -w
 
 # Check Application status
-kubectl get application -n argocd observability-stack
+kubectl get application -n argocd
 
-# Expected: All pods Running (wait ~10 minutes for all components)
+# Expected: All apps showing Synced/Healthy (wait ~10 minutes for all components)
 ```
 
-**Step 7: Final Verification**
+**Verify Phase 4 Completion:**
 
 ```bash
 # List all ArgoCD-managed applications
@@ -5212,7 +5195,7 @@ kubectl get applications -n argocd
 # observability-stack   Synced        Healthy
 ```
 
-**Access URLs:**
+**Access URLs (Phase 4):**
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
@@ -5515,6 +5498,19 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy MinIO via ArgoCD
+kubectl apply -f gitops/storage/minio.yaml
+
+# Wait for MinIO to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=minio -n storage --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd minio
+```
+
 ### 9.2 Certificate Automation (Cert-Manager)
 
 **File:** `gitops/infrastructure/cert-manager.yaml`
@@ -5618,6 +5614,19 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Cert-Manager via ArgoCD
+kubectl apply -f gitops/infrastructure/cert-manager.yaml
+
+# Wait for Cert-Manager to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=cert-manager -n cert-manager --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd cert-manager
+```
 
 ### 9.3 Container Registry (Harbor)
 
@@ -5802,6 +5811,19 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Harbor via ArgoCD
+kubectl apply -f gitops/security/harbor.yaml
+
+# Wait for Harbor to be ready (may take several minutes)
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=harbor -n harbor --timeout=600s
+
+# Verify the application status
+kubectl get application -n argocd harbor
+```
+
 ### 9.4 Backup & Restore (Velero)
 
 **File:** `gitops/management/velero.yaml`
@@ -5952,6 +5974,19 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Velero via ArgoCD
+kubectl apply -f gitops/management/velero.yaml
+
+# Wait for Velero to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=velero -n velero --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd velero
+```
+
 ### 9.5 Secrets Management (OpenBao)
 
 **File:** `gitops/security/openbao.yaml`
@@ -6072,6 +6107,24 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy OpenBao via ArgoCD
+kubectl apply -f gitops/security/openbao.yaml
+
+# Wait for OpenBao to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n security --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd openbao
+```
+
+> **First-time Setup:**
+> 1. Port-forward: `kubectl port-forward svc/openbao 8200:8200 -n security`
+> 2. Initialize: `bao operator init`
+> 3. Unseal: `bao operator unseal` (use 3 of 5 keys)
 
 ### 9.6 Policy Enforcement (Kyverno)
 
@@ -6194,6 +6247,22 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Kyverno via ArgoCD
+kubectl apply -f gitops/security/kyverno.yaml
+
+# Wait for Kyverno to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=kyverno -n kyverno --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd kyverno
+
+# Test a policy (dry-run with :latest tag should fail)
+kubectl run test --image=nginx:latest --dry-run=server
+```
 
 ### 9.7 Runtime Security (Falco)
 
@@ -6325,6 +6394,22 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Falco via ArgoCD
+kubectl apply -f gitops/security/falco.yaml
+
+# Wait for Falco to be ready (DaemonSet on all nodes)
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=falco -n security --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd falco
+
+# View Falco alerts
+kubectl logs -n security -l app.kubernetes.io/name=falco
+```
+
 ### 9.8 Configuration Reloader (Reloader)
 
 **File:** `gitops/management/reloader.yaml`
@@ -6423,6 +6508,19 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Reloader via ArgoCD
+kubectl apply -f gitops/management/reloader.yaml
+
+# Wait for Reloader to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=reloader -n kube-system --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd reloader
+```
 
 ### 9.9 Workload Rebalancing (Descheduler)
 
@@ -6541,6 +6639,19 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Descheduler via ArgoCD
+kubectl apply -f gitops/management/descheduler.yaml
+
+# Verify the application status
+kubectl get application -n argocd descheduler
+
+# Check descheduler cronjob
+kubectl get cronjob -n kube-system
+```
     
 ### 9.10 Cluster Dashboard (Headlamp)
 
@@ -6686,6 +6797,24 @@ type: kubernetes.io/service-account-token
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Headlamp via ArgoCD
+kubectl apply -f gitops/management/headlamp.yaml
+
+# Wait for Headlamp to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=headlamp -n headlamp --timeout=300s
+
+# Get the authentication token
+kubectl get secret headlamp-token -n headlamp -o jsonpath='{.data.token}' | base64 -d
+
+# Verify the application status
+kubectl get application -n argocd headlamp
+```
+
+**Access URL:** http://headlamp.192.168.68.210.nip.io
 
 ### 9.11 The Root Application (App of Apps)
 
@@ -7415,6 +7544,21 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Loki Stack via ArgoCD
+kubectl apply -f gitops/observability/loki-stack.yaml
+
+# Wait for Loki to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=loki -n monitoring --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd loki-stack
+```
+
+**Query logs in Grafana:** Navigate to Grafana → Explore → Loki data source
+
 ### 10.3 Log Collection (Fluent Bit)
 
 **File:** `gitops/observability/fluent-bit.yaml`
@@ -7555,6 +7699,19 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Fluent Bit via ArgoCD
+kubectl apply -f gitops/observability/fluent-bit.yaml
+
+# Wait for Fluent Bit to be ready (DaemonSet)
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=fluent-bit -n monitoring --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd fluent-bit
+```
+
 ### 10.4 Distributed Tracing (OpenTelemetry)
 
 **File:** `gitops/observability/opentelemetry.yaml`
@@ -7676,6 +7833,19 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy OpenTelemetry Operator via ArgoCD
+kubectl apply -f gitops/observability/opentelemetry.yaml
+
+# Wait for the operator to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=opentelemetry-operator -n monitoring --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd opentelemetry
+```
 
 ### 10.5 Tracing Backend (Jaeger)
 
@@ -7818,6 +7988,25 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Jaeger via ArgoCD
+kubectl apply -f gitops/observability/jaeger.yaml
+
+# Note: Jaeger is deployed with replicas: 0 by default to save resources
+# Enable when needed:
+kubectl scale deployment jaeger-all-in-one -n monitoring --replicas=1
+
+# Wait for Jaeger to be ready (if scaled up)
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=jaeger -n monitoring --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd jaeger
+```
+
+**Access:** http://jaeger.192.168.68.210.nip.io (when scaled to replicas=1)
+
 ### 10.6 Traffic Analysis (Kubeshark)
 
 **File:** `gitops/observability/kubeshark.yaml`
@@ -7934,6 +8123,23 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Kubeshark via ArgoCD
+kubectl apply -f gitops/observability/kubeshark.yaml
+
+# Note: Kubeshark is deployed with replicas: 0 by default to save resources
+# Enable when needed for traffic analysis:
+kubectl scale deployment kubeshark -n observability --replicas=1
+
+# Wait for Kubeshark to be ready (if scaled up)
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=kubeshark -n observability --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd kubeshark
+```
 
 ### 10.7 Cost Management (OpenCost)
 
@@ -8077,6 +8283,21 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy OpenCost via ArgoCD
+kubectl apply -f gitops/observability/opencost.yaml
+
+# Wait for OpenCost to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=opencost -n monitoring --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd opencost
+```
+
+**Access:** http://opencost.192.168.68.210.nip.io
+
 ### 10.8 AI Diagnostics (K8sGPT)
 
 **File:** `gitops/observability/k8sgpt.yaml`
@@ -8176,6 +8397,26 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy K8sGPT via ArgoCD
+kubectl apply -f gitops/observability/k8sgpt.yaml
+
+# Wait for K8sGPT operator to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=k8sgpt -n observability --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd k8sgpt
+
+# (Optional) Configure with OpenAI API key
+kubectl create secret generic k8sgpt-secret \
+  --from-literal=openai-api-key=YOUR_KEY -n observability
+
+# View scan results
+kubectl get results -n observability
+```
 
 ### 10.9 Observability Verification Script
 
@@ -8851,6 +9092,22 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Argo Image Updater via ArgoCD
+kubectl apply -f gitops/cicd/argo-image-updater.yaml
+
+# Wait for Image Updater to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=argocd-image-updater -n argocd --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd argo-image-updater
+
+# Check logs for registry sync
+kubectl logs -l app.kubernetes.io/name=argocd-image-updater -n argocd --tail=20
+```
+
 ### 11.2 CI Engine (Argo Workflows)
 
 **File:** `gitops/cicd/argo-workflows.yaml`
@@ -9195,6 +9452,24 @@ spec:
 
 </details>
 
+**Deploy this application:**
+
+```bash
+# Deploy Argo Workflows via ArgoCD
+kubectl apply -f gitops/cicd/argo-workflows.yaml
+
+# Wait for Argo Workflows to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=argo-workflows-server -n argo --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd argo-workflows
+
+# Access the UI
+echo "Argo Workflows UI: http://workflows.192.168.68.210.nip.io"
+```
+
+**Access:** http://workflows.192.168.68.210.nip.io
+
 ### 11.3 Event Bus (Argo Events)
 
 **File:** `gitops/cicd/argo-events.yaml`
@@ -9481,6 +9756,22 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Argo Events via ArgoCD
+kubectl apply -f gitops/cicd/argo-events.yaml
+
+# Wait for Argo Events components to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=argo-events -n argo-events --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd argo-events
+
+# Check EventBus status
+kubectl get eventbus -n argo-events
+```
 
 ### 11.4 Security Tooling (Trivy Operator)
 
@@ -9779,6 +10070,25 @@ spec:
 ```
 
 </details>
+
+**Deploy this application:**
+
+```bash
+# Deploy Trivy Operator via ArgoCD
+kubectl apply -f gitops/security/trivy-operator.yaml
+
+# Wait for Trivy Operator to be ready
+kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=trivy-operator -n trivy-system --timeout=300s
+
+# Verify the application status
+kubectl get application -n argocd trivy-operator
+
+# View vulnerability reports
+kubectl get vulnerabilityreports -A
+
+# View config audit reports
+kubectl get configauditreports -A
+```
 
 > **Note on OWASP ZAP:**
 > OWASP ZAP is best run as a step in your **Argo Workflow** (`WorkflowTemplate`) against a staging URL. It does not require a standalone Helm installation for this architecture.
