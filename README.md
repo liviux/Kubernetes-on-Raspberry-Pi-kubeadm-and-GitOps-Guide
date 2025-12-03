@@ -12181,3 +12181,7 @@ kubectl delete volumes.longhorn.io -n longhorn-system --all
 > 1. No other components depend on it
 > 2. Data is backed up (for storage components)
 > 3. ArgoCD auto-sync is disabled (to prevent redeployment)
+
+
+TODO list - for next time I re-create the cluster:
+- create a variable file, considering there are ansible playboks, bash scripts, kubernetes manifests, helm charts, argocd manifest, etc. > maybe a file with variables and then a script to re-crete all the files and in the README (variables for everything, including application versions, even a custom dns, IPs, etc.)
