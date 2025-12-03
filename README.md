@@ -4751,10 +4751,11 @@ spec:
     helm:
       values: |
         # -------------------------------------------------------------------
-        # Global Storage Configuration
+        # Global Configuration
         # -------------------------------------------------------------------
-        global:
-          storageClass: longhorn
+        # NOTE: We do NOT set global.storageClass here because it would
+        # override ALL subcharts (including valkey-cluster). Instead, we
+        # set storageClass explicitly for each component.
         
         # -------------------------------------------------------------------
         # Gitea Application Settings
@@ -4799,7 +4800,7 @@ spec:
           storageClass: longhorn
         
         # -------------------------------------------------------------------
-        # PostgreSQL Database
+        # PostgreSQL Database - Use Longhorn for durability
         # -------------------------------------------------------------------
         postgresql:
           enabled: true
@@ -4807,6 +4808,7 @@ spec:
             storageClass: longhorn
           primary:
             persistence:
+              storageClass: longhorn
               size: 5Gi
             resources:
               requests:
@@ -4824,8 +4826,11 @@ spec:
         # -------------------------------------------------------------------
         # Valkey handles its own replication across cluster nodes, so we use
         # local-path for better I/O performance instead of network storage.
+        # The global.storageClass in valkey-cluster overrides persistence.storageClass
         valkey-cluster:
           enabled: true
+          global:
+            storageClass: local-path
           persistence:
             enabled: true
             storageClass: local-path
