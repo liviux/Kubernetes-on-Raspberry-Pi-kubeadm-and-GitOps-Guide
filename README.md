@@ -4696,7 +4696,7 @@ This is our first **Declarative Application**. Instead of a shell script, this i
 | Service | URL / Address |
 |---------|---------------|
 | Web UI | http://gitea.192.168.68.210.nip.io |
-| SSH Clone | ssh://git@192.168.68.210:2222/user/repo.git |
+| SSH Clone | ssh://git@192.168.68.211:2222/user/repo.git |
 | HTTP Clone | http://gitea.192.168.68.210.nip.io/user/repo.git |
 
 <details>
@@ -4717,7 +4717,7 @@ This is our first **Declarative Application**. Instead of a shell script, this i
 #
 # Access:
 #   - Web: http://gitea.192.168.68.210.nip.io
-#   - SSH: ssh://git@192.168.68.210:2222/user/repo.git
+#   - SSH: ssh://git@192.168.68.211:2222/user/repo.git (separate IP from Traefik)
 #
 # First-time Setup:
 #   1. Access web UI
@@ -4769,7 +4769,7 @@ spec:
             server:
               DOMAIN: "gitea.192.168.68.210.nip.io"
               ROOT_URL: "http://gitea.192.168.68.210.nip.io/"
-              SSH_DOMAIN: "192.168.68.210"
+              SSH_DOMAIN: "192.168.68.211"
               SSH_PORT: "2222"
             
             ui:
@@ -4822,9 +4822,12 @@ spec:
         # -------------------------------------------------------------------
         # Valkey (Redis-compatible cache) - Use local-path for faster I/O
         # -------------------------------------------------------------------
+        # Valkey handles its own replication across cluster nodes, so we use
+        # local-path for better I/O performance instead of network storage.
         valkey-cluster:
           enabled: true
           persistence:
+            enabled: true
             storageClass: local-path
             size: 2Gi
         
@@ -4837,6 +4840,8 @@ spec:
         # -------------------------------------------------------------------
         # Service Configuration
         # -------------------------------------------------------------------
+        # Note: SSH uses a separate IP (192.168.68.211) because Traefik
+        # already uses .210 for HTTP/HTTPS traffic.
         service:
           http:
             type: ClusterIP
@@ -4845,7 +4850,7 @@ spec:
             type: LoadBalancer
             port: 2222
             annotations:
-              io.cilium/lb-ipam-ips: "192.168.68.210"
+              io.cilium/lb-ipam-ips: "192.168.68.211"
   
   destination:
     server: https://kubernetes.default.svc
@@ -4920,7 +4925,7 @@ kubectl get application -n argocd gitea
 | Service | URL / Address |
 |---------|---------------|
 | Web UI | http://gitea.192.168.68.210.nip.io |
-| SSH Clone | ssh://git@192.168.68.210:2222/user/repo.git |
+| SSH Clone | ssh://git@192.168.68.211:2222/user/repo.git |
 
 **First-time Setup (The Pivot Point):**
 
