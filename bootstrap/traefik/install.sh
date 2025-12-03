@@ -72,11 +72,46 @@ helm upgrade --install traefik traefik/traefik \
   --wait
 
 # =============================================================================
-# 3. Verify Installation
+# 3. Create Shared Gateway Resource
 # =============================================================================
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ Step 3: Verifying Installation                                      │"
+echo "│ Step 3: Creating Shared Gateway for All Services                   │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+echo "Creating Gateway API Gateway resource..."
+
+cat <<EOF | kubectl apply -f -
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: traefik-gateway
+  namespace: traefik-system
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: web
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: websecure
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs: []
+EOF
+
+# =============================================================================
+# 4. Verify Installation
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 4: Verifying Installation                                      │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
 echo "Waiting for LoadBalancer IP assignment..."

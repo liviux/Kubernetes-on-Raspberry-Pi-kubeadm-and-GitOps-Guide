@@ -11,14 +11,15 @@ spec:
     targetRevision: 1.15.0
     helm:
       values: |
+        # -------------------------------------------------------------------
+        # Expose Configuration (Disabled - Using Gateway API HTTPRoute)
+        # -------------------------------------------------------------------
         expose:
-          type: ingress
-          ingress:
-            hosts:
-              core: harbor.192.168.68.210.nip.io
-            className: traefik
-            annotations:
-              traefik.ingress.kubernetes.io/router.entrypoints: web
+          type: clusterIP
+          tls:
+            enabled: false
+        
+        externalURL: http://harbor.192.168.68.210.nip.io
         
         # Point to our local MinIO
         persistence:
@@ -50,3 +51,26 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+---
+# =============================================================================
+# HTTPRoute for Harbor Registry (Gateway API)
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: harbor
+  namespace: harbor
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "harbor.192.168.68.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: harbor-core
+          port: 80

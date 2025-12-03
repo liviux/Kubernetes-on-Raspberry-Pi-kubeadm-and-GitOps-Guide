@@ -105,18 +105,10 @@ spec:
                 cpu: 250m
         
         # -------------------------------------------------------------------
-        # Ingress Configuration
+        # Ingress Configuration (Disabled - Using Gateway API HTTPRoute)
         # -------------------------------------------------------------------
         ingress:
-          enabled: true
-          className: traefik
-          hosts:
-            - host: gitea.192.168.68.210.nip.io
-              paths:
-                - path: /
-                  pathType: Prefix
-          annotations:
-            traefik.ingress.kubernetes.io/router.entrypoints: web
+          enabled: false
         
         # -------------------------------------------------------------------
         # Service Configuration

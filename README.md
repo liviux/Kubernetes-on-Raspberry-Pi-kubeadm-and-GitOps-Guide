@@ -3929,7 +3929,7 @@ Throughout this guide, you'll see URLs like `argocd.192.168.68.210.nip.io`. This
 
 | Component | Version | Purpose | Access URL |
 |-----------|---------|---------|------------|
-| **Traefik** | 37.3.0 | Gateway API / Ingress Controller | LoadBalancer: 192.168.68.210 |
+| **Traefik** | 37.3.0 | Gateway API Implementation | LoadBalancer: 192.168.68.210 |
 | **ArgoCD** | 7.7.0 | GitOps Controller | argocd.192.168.68.210.nip.io |
 | **Gitea** | 10.6.0 | Self-hosted Git Server | gitea.192.168.68.210.nip.io |
 | **Prometheus Stack** | 66.3.0 | Metrics & Alerting | grafana.192.168.68.210.nip.io |
@@ -3984,7 +3984,7 @@ The components must be installed in a specific order due to dependencies. This i
 
 **File:** `bootstrap/traefik/install.sh`
 
-This script installs **Traefik v3** as the cluster's ingress controller and Gateway API implementation.
+This script installs **Traefik v3** as the cluster's Gateway API implementation.
 
 **Why Traefik?**
 
@@ -3992,7 +3992,7 @@ This script installs **Traefik v3** as the cluster's ingress controller and Gate
 |---------|-------------------------|
 | **Lightweight** | Low memory footprint (~100MB) |
 | **Gateway API Native** | Modern routing standard, future-proof |
-| **Auto-discovery** | Automatically finds Ingress/HTTPRoute resources |
+| **Auto-discovery** | Automatically finds HTTPRoute resources |
 | **Prometheus Metrics** | Built-in observability integration |
 | **JSON Access Logs** | Structured logs for Loki ingestion |
 
@@ -4019,14 +4019,15 @@ bash bootstrap/traefik/install.sh
 # =============================================================================
 # Phase 4a: Traefik Gateway Bootstrap Script
 # =============================================================================
-# Installs Traefik v3 as the cluster's ingress controller and Gateway API
-# implementation. All external traffic flows through this single entry point.
+# Installs Traefik v3 as the cluster's Gateway API implementation.
+# All external traffic flows through this single entry point.
 #
 # Features:
 #   - LoadBalancer IP from Cilium L2 pool (192.168.68.210)
-#   - Cross-namespace routing support
+#   - Cross-namespace routing support via Gateway API
 #   - Prometheus metrics enabled
 #   - JSON access logs for Loki
+#   - Shared Gateway resource for all HTTPRoutes
 #
 # Prerequisites:
 #   - Cilium CNI with L2 announcements enabled
@@ -4089,11 +4090,46 @@ helm upgrade --install traefik traefik/traefik \
   --wait
 
 # =============================================================================
-# 3. Verify Installation
+# 3. Create Shared Gateway Resource
 # =============================================================================
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ Step 3: Verifying Installation                                      │"
+echo "│ Step 3: Creating Shared Gateway for All Services                   │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+echo "Creating Gateway API Gateway resource..."
+
+cat <<EOF | kubectl apply -f -
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: traefik-gateway
+  namespace: traefik-system
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: web
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: websecure
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs: []
+EOF
+
+# =============================================================================
+# 4. Verify Installation
+# =============================================================================
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ Step 4: Verifying Installation                                      │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
 echo "Waiting for LoadBalancer IP assignment..."
@@ -4184,10 +4220,10 @@ Retrieve Admin Password:
 # Features:
 #   - Insecure mode (TLS offloaded to Traefik)
 #   - JSON logging for Loki integration
-#   - Ingress for UI access
+#   - HTTPRoute for UI access (Gateway API)
 #
 # Prerequisites:
-#   - Traefik installed with Gateway/Ingress support
+#   - Traefik installed with Gateway API support
 #   - kubectl and helm configured
 #
 # Usage: bash bootstrap/argocd/install.sh
@@ -4221,7 +4257,7 @@ echo "Deploying ArgoCD with insecure mode (TLS offload to Traefik)..."
 helm upgrade --install argocd argo/argo-cd \
   --namespace argocd \
   --create-namespace \
-  --version 7.7.0 \
+  --version 9.1.5 \
   --set server.extraArgs="{--insecure}" \
   --set configs.params."server\.insecure"=true \
   --set global.logging.format=json \
@@ -4240,34 +4276,54 @@ helm upgrade --install argocd argo/argo-cd \
   --wait
 
 # =============================================================================
-# 3. Create Ingress for UI Access
+# 3. Create Gateway (if not exists) and HTTPRoute for UI Access
 # =============================================================================
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ Step 3: Creating Ingress for ArgoCD UI                              │"
+echo "│ Step 3: Creating Gateway API Resources for ArgoCD UI               │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
-echo "Creating Ingress for ArgoCD..."
 
+# Create shared Gateway (idempotent - will be used by all services)
+echo "Creating shared Gateway (if not exists)..."
 cat <<EOF | kubectl apply -f -
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: traefik-gateway
+  namespace: traefik-system
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: web
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+EOF
+
+# Create HTTPRoute for ArgoCD
+echo "Creating HTTPRoute for ArgoCD..."
+cat <<EOF | kubectl apply -f -
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: argocd-server
   namespace: argocd
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "argocd.192.168.68.210.nip.io"
   rules:
-    - host: argocd.192.168.68.210.nip.io
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: argocd-server
-                port:
-                  number: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argocd-server
+          port: 80
 EOF
 
 # =============================================================================
@@ -4654,7 +4710,7 @@ spec:
         # ---------------------------------------------------------------------
         # Service Configuration
         # ---------------------------------------------------------------------
-        # Disable built-in ingress - we use separate Ingress resource
+        # Disable built-in ingress - we use Gateway API HTTPRoute
         ingress:
           enabled: false
         
@@ -4679,30 +4735,33 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+```
 
----
+**HTTPRoute for Gitea (separate file: `gitops/services/gitea-httproute.yaml`):**
+
+```yaml
 # =============================================================================
-# Ingress for Gitea Web UI
+# HTTPRoute for Gitea Web UI (Gateway API)
 # =============================================================================
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: gitea
   namespace: gitea
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "gitea.192.168.68.210.nip.io"
   rules:
-    - host: gitea.192.168.68.210.nip.io
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: gitea-http
-                port:
-                  number: 3000
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: gitea-http
+          port: 3000
 ```
 
 </details>
@@ -4858,7 +4917,7 @@ spec:
               cpu: 200m
               memory: 256Mi
           
-          # Disable built-in ingress - we use separate Ingress resource
+          # Disable built-in ingress - we use Gateway API HTTPRoute
           ingress:
             enabled: false
           
@@ -4931,30 +4990,29 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
-
 ---
 # =============================================================================
-# Ingress for Grafana UI
+# HTTPRoute for Grafana UI (Gateway API)
 # =============================================================================
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: grafana
   namespace: monitoring
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "grafana.192.168.68.210.nip.io"
   rules:
-    - host: grafana.192.168.68.210.nip.io
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: prometheus-grafana
-                port:
-                  number: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: prometheus-grafana
+          port: 80
 ```
 
 </details>
@@ -4968,7 +5026,7 @@ Execute these commands in order from your control machine:
 │                     PHASE 4 EXECUTION CHECKLIST                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  □ Step 1: Install Traefik (Gateway/Ingress)                               │
+│  □ Step 1: Install Traefik (Gateway API)                                   │
 │  □ Step 2: Install ArgoCD (GitOps Controller)                              │
 │  □ Step 3: Deploy Local Path Provisioner (Optional)                        │
 │  □ Step 4: Deploy Gitea (Git Server)                                       │
@@ -5330,23 +5388,13 @@ spec:
             purge: false
         
         # -------------------------------------------------------------------
-        # Ingress Configuration
+        # Ingress Configuration (Disabled - Using Gateway API HTTPRoute)
         # -------------------------------------------------------------------
         ingress:
-          enabled: true
-          ingressClassName: traefik
-          hosts:
-            - minio.192.168.68.210.nip.io
-          annotations:
-            traefik.ingress.kubernetes.io/router.entrypoints: web
+          enabled: false
         
         consoleIngress:
-          enabled: true
-          ingressClassName: traefik
-          hosts:
-            - minio-console.192.168.68.210.nip.io
-          annotations:
-            traefik.ingress.kubernetes.io/router.entrypoints: web
+          enabled: false
         
         # -------------------------------------------------------------------
         # Credentials (CHANGE IN PRODUCTION!)
@@ -5365,6 +5413,52 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+---
+# =============================================================================
+# HTTPRoute for MinIO API (Gateway API)
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: minio-api
+  namespace: storage
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "minio.192.168.68.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: minio
+          port: 9000
+---
+# =============================================================================
+# HTTPRoute for MinIO Console (Gateway API)
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: minio-console
+  namespace: storage
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "minio-console.192.168.68.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: minio-console
+          port: 9001
 ```
 
 </details>
@@ -5381,7 +5475,7 @@ Cert-Manager automates TLS certificate management within the cluster.
 |---------|---------|
 | **Automatic Renewal** | Certificates auto-renew before expiry |
 | **Multiple Issuers** | Self-signed, Let's Encrypt, CA, Vault |
-| **Native Integration** | Works with Ingress and Gateway API |
+| **Native Integration** | Works with Gateway API HTTPRoute |
 | **Lightweight** | ~100MB memory footprint |
 
 **Configuration:**
@@ -5406,10 +5500,10 @@ Cert-Manager automates TLS certificate management within the cluster.
 # For Let's Encrypt (production):
 #   1. Configure DNS provider credentials
 #   2. Create ClusterIssuer with ACME solver
-#   3. Update Ingress annotations
+#   3. Update Gateway TLS configuration
 #
-# Usage:
-#   Add to Ingress: cert-manager.io/cluster-issuer: "self-signed"
+# Usage with Gateway API:
+#   Reference Certificate in Gateway listener's certificateRefs
 # =============================================================================
 
 apiVersion: argoproj.io/v1alpha1
@@ -5492,7 +5586,7 @@ Harbor serves as the local "Docker Hub" - a private container registry with buil
 
 | Setting | Value | Purpose |
 |---------|-------|---------|
-| `expose.type` | `ingress` | Access via Traefik |
+| `expose.type` | `clusterIP` | Internal service, exposed via HTTPRoute |
 | `persistence.type` | `s3` | Store images in MinIO |
 | `trivy.enabled` | `true` | Vulnerability scanning |
 | `notary.enabled` | `false` | Save RAM (image signing disabled) |
@@ -5545,16 +5639,12 @@ spec:
     helm:
       values: |
         # -------------------------------------------------------------------
-        # Ingress Configuration
+        # Expose Configuration (Disabled - Using Gateway API HTTPRoute)
         # -------------------------------------------------------------------
         expose:
-          type: ingress
-          ingress:
-            hosts:
-              core: harbor.192.168.68.210.nip.io
-            className: traefik
-            annotations:
-              traefik.ingress.kubernetes.io/router.entrypoints: web
+          type: clusterIP
+          tls:
+            enabled: false
         
         # External URL for Docker client
         externalURL: http://harbor.192.168.68.210.nip.io
@@ -5633,6 +5723,29 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+---
+# =============================================================================
+# HTTPRoute for Harbor Registry (Gateway API)
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: harbor
+  namespace: harbor
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "harbor.192.168.68.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: harbor-core
+          port: 80
 ```
 
 </details>

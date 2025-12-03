@@ -1,0 +1,29 @@
+# =============================================================================
+# Gitea HTTPRoute - Gateway API Routing
+# =============================================================================
+# Routes HTTP traffic to Gitea via the shared Traefik Gateway.
+# Separate from the Helm chart to use Gateway API instead of Ingress.
+#
+# Apply after Gitea is deployed:
+#   kubectl apply -f gitops/services/gitea-httproute.yaml
+# =============================================================================
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "gitea.192.168.68.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: gitea-http
+          port: 3000

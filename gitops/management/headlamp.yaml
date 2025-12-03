@@ -116,8 +116,7 @@ metadata:
 spec:
   parentRefs:
     - name: traefik-gateway
-      namespace: traefik
-      sectionName: web
+      namespace: traefik-system
   hostnames:
     - "headlamp.192.168.68.210.nip.io"
   rules:

@@ -168,7 +168,7 @@ metadata:
 spec:
   parentRefs:
     - name: traefik-gateway
-      namespace: traefik
+      namespace: traefik-system
   hostnames:
     - "workflows.192.168.68.210.nip.io"
   rules:

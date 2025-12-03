@@ -112,7 +112,7 @@ metadata:
   namespace: monitoring
 spec:
   parentRefs:
-    - name: main-gateway
+    - name: traefik-gateway
       namespace: traefik-system
   hostnames:
     - "jaeger.192.168.68.210.nip.io"

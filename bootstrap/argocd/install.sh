@@ -45,7 +45,7 @@ echo "Deploying ArgoCD with insecure mode (TLS offload to Traefik)..."
 helm upgrade --install argocd argo/argo-cd \
   --namespace argocd \
   --create-namespace \
-  --version 7.7.0 \
+  --version 9.1.5 \
   --set server.extraArgs="{--insecure}" \
   --set configs.params."server\.insecure"=true \
   --set global.logging.format=json \
@@ -64,34 +64,54 @@ helm upgrade --install argocd argo/argo-cd \
   --wait
 
 # =============================================================================
-# 3. Create Ingress for UI Access
+# 3. Create Gateway (if not exists) and HTTPRoute for UI Access
 # =============================================================================
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ Step 3: Creating Ingress for ArgoCD UI                              │"
+echo "│ Step 3: Creating Gateway API Resources for ArgoCD UI               │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
-echo "Creating Ingress for ArgoCD..."
 
+# Create shared Gateway (idempotent - will be used by all services)
+echo "Creating shared Gateway (if not exists)..."
 cat <<EOF | kubectl apply -f -
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: traefik-gateway
+  namespace: traefik-system
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: web
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+EOF
+
+# Create HTTPRoute for ArgoCD
+echo "Creating HTTPRoute for ArgoCD..."
+cat <<EOF | kubectl apply -f -
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: argocd-server
   namespace: argocd
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "argocd.192.168.68.210.nip.io"
   rules:
-    - host: argocd.192.168.68.210.nip.io
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: argocd-server
-                port:
-                  number: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argocd-server
+          port: 80
 EOF
 
 # =============================================================================
