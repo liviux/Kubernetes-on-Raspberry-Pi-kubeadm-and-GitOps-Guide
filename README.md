@@ -4938,10 +4938,10 @@ This is the critical step where we close the GitOps loop:
 # Initialize and push to Gitea
 cd /path/to/your/gitops/folder
 git init
-git remote add origin http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
+git remote add gitea http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
 git add .
 git commit -m "Initial cluster configuration"
-git push -u origin main
+git push -u gitea main
 ```
 
 ### 8.5 The "App of Apps" Pattern
