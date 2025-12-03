@@ -4937,28 +4937,91 @@ kubectl get application -n argocd gitea
 
 **First-time Setup (The Pivot Point):**
 
-This is the critical step where we close the GitOps loop:
+This is the critical step where we close the GitOps loop. By default, this guide assumes you're using **this repository** as your GitOps source and want to push to both GitHub (public backup) and Gitea (cluster source of truth).
 
-1. Open Gitea UI: `http://gitea.192.168.68.210.nip.io`
+**Step 1:** Open Gitea UI and create your repository:
+1. Navigate to: `http://gitea.192.168.68.210.nip.io`
 2. Create your admin account on first visit
-3. Create a new repository named `home-cluster`
-4. Push your local configuration:
+3. Create a new repository named `home-cluster` (or your preferred name)
+
+**Step 2:** Configure Git multi-remote push (recommended):
+
+This setup allows you to push to both GitHub and Gitea with a single `git push` command:
 
 ```bash
-# Initialize and push to Gitea
-cd /path/to/your/gitops/folder
+# Navigate to your local copy of this repository
+cd ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide
+
+# Set the primary fetch URL (GitHub)
+git remote set-url origin https://github.com/YOUR_USERNAME/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide.git
+
+# Configure push to go to BOTH remotes
+git remote set-url --add --push origin https://github.com/YOUR_USERNAME/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide.git
+git remote set-url --add --push origin http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
+
+# Verify the configuration
+git remote -v
+# Expected output:
+# origin  https://github.com/YOUR_USERNAME/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide.git (fetch)
+# origin  https://github.com/YOUR_USERNAME/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide.git (push)
+# origin  http://gitea.192.168.68.210.nip.io/admin/home-cluster.git (push)
+
+# Verify connectivity to both remotes
+git ls-remote origin
+```
+
+**Step 3:** Push your configuration to both remotes:
+
+```bash
+# Commit any local changes
+git add .
+git commit -m "Configure cluster for GitOps"
+
+# Push to both GitHub AND Gitea simultaneously
+git push -u origin main
+```
+
+> 💡 **Why Multi-Remote?**
+> - **GitHub**: Public backup, collaboration, issue tracking, CI/CD integration
+> - **Gitea**: Cluster-local source of truth, ArgoCD watches this repo, works even if internet is down
+
+**Alternative: Using a Separate Folder**
+
+If you prefer to manage your cluster configuration in a different folder (not this repository):
+
+```bash
+# Create a new directory for your cluster config
+mkdir ~/home-cluster && cd ~/home-cluster
+
+# Initialize Git
 git init
-git remote add gitea http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
+
+# Copy the gitops folder from this repository
+cp -r ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide/gitops .
+cp -r ~/Kubernetes-on-Raspberry-Pi-kubeadm-and-GitOps-Guide/bootstrap .
+
+# Add Gitea as your remote (primary for ArgoCD)
+git remote add origin http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
+
+# Optionally add GitHub as a backup
+git remote set-url --add --push origin http://gitea.192.168.68.210.nip.io/admin/home-cluster.git
+git remote set-url --add --push origin https://github.com/YOUR_USERNAME/home-cluster.git
+
+# Initial commit and push
 git add .
 git commit -m "Initial cluster configuration"
-git push -u gitea main
+git push -u origin main
 ```
+
+> ⚠️ **Important:** If using a separate folder, update the `repoURL` in `gitops/root-app.yaml` to point to your Gitea repository URL.
 
 ### 8.5 The "App of Apps" Pattern
 
 **File:** `gitops/app-of-apps.yaml`
 
 The **App of Apps** pattern is the key to scalable GitOps. Instead of manually deploying each application, we deploy one "parent" Application that points to a directory containing child Applications. ArgoCD recursively discovers and syncs all of them.
+
+> 📌 **Infrastructure Management:** Once the root application is deployed, ArgoCD also takes over management of the bootstrap infrastructure components (Cilium, Traefik, Longhorn, ArgoCD itself). See [Section 9.12: Infrastructure Components (Managed by ArgoCD)](#912-infrastructure-components-managed-by-argocd) for details on how this adoption works.
 
 **How It Works:**
 
@@ -4969,7 +5032,7 @@ The **App of Apps** pattern is the key to scalable GitOps. Instead of manually d
 │                                                                             │
 │                    ┌─────────────────────────────┐                         │
 │                    │      Root Application       │                         │
-│                    │    (app-of-apps.yaml)       │                         │
+│                    │      (root-app.yaml)        │                         │
 │                    └─────────────┬───────────────┘                         │
 │                                  │                                          │
 │                                  │ watches gitops/ directory                │
@@ -4982,11 +5045,12 @@ The **App of Apps** pattern is the key to scalable GitOps. Instead of manually d
 │ └──┬───┘    └───┬────┘    └──────┬──────┘  └────┬─────┘  └────┬────┘      │
 │    │            │                │              │             │            │
 │    ▼            ▼                ▼              ▼             ▼            │
-│ argo-       cert-         prometheus      kyverno         minio           │
-│ workflows   manager       grafana         falco           velero          │
-│ argo-                     loki            trivy                           │
-│ events                    jaeger          openbao                         │
+│ argo-       cilium ★       prometheus      kyverno         minio          │
+│ workflows   traefik ★      grafana         falco           longhorn ★     │
+│ argo-       argocd ★       loki            trivy                          │
+│ events      cert-manager   jaeger          openbao                        │
 │                                                                             │
+│  ★ = Bootstrap components now managed by ArgoCD (see Section 9.12)        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
