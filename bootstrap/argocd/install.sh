@@ -8,10 +8,10 @@
 # Features:
 #   - Insecure mode (TLS offloaded to Traefik)
 #   - JSON logging for Loki integration
-#   - Ingress for UI access
+#   - HTTPRoute for UI access (Gateway API)
 #
 # Prerequisites:
-#   - Traefik installed with Gateway/Ingress support
+#   - Traefik installed with Gateway API support
 #   - kubectl and helm configured
 #
 # Usage: bash bootstrap/argocd/install.sh
