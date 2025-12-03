@@ -4691,14 +4691,6 @@ This is our first **Declarative Application**. Instead of a shell script, this i
 
 > **💡 Storage Strategy:** Gitea uses **Longhorn** for critical data (PostgreSQL, repositories) and **local-path** for Valkey cache. Caches don't need network-replicated storage since data can be regenerated.
 
-**Access Information:**
-
-| Service | URL / Address |
-|---------|---------------|
-| Web UI | http://gitea.192.168.68.210.nip.io |
-| SSH Clone | ssh://git@192.168.68.211:2222/user/repo.git |
-| HTTP Clone | http://gitea.192.168.68.210.nip.io/user/repo.git |
-
 <details>
 <summary>📄 Click to expand full gitops/services/gitea.yaml</summary>
 
@@ -4925,12 +4917,13 @@ kubectl apply -f gitops/services/gitea-httproute.yaml
 kubectl get application -n argocd gitea
 ```
 
-**Access Gitea:**
+**Access Information:**
 
 | Service | URL / Address |
 |---------|---------------|
 | Web UI | http://gitea.192.168.68.210.nip.io |
 | SSH Clone | ssh://git@192.168.68.211:2222/user/repo.git |
+| HTTP Clone | http://gitea.192.168.68.210.nip.io/user/repo.git |
 
 **First-time Setup (The Pivot Point):**
 
