@@ -1,0 +1,115 @@
+# =============================================================================
+# ArgoCD - Self-Managed ArgoCD Application
+# =============================================================================
+# ArgoCD manages itself! This Application allows ArgoCD to track and update
+# its own deployment through GitOps.
+#
+# Features:
+#   - Insecure mode (TLS offloaded to Traefik)
+#   - JSON logging for Loki integration
+#   - Resource limits optimized for RPi
+#
+# Access:
+#   - URL: http://argocd.192.168.68.210.nip.io
+#   - Username: admin
+#   - Password: kubectl -n argocd get secret argocd-initial-admin-secret \
+#               -o jsonpath='{.data.password}' | base64 -d
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-cd
+    targetRevision: 9.1.5
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Server Configuration
+        # -------------------------------------------------------------------
+        server:
+          extraArgs:
+            - --insecure
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+        
+        # -------------------------------------------------------------------
+        # Global Settings
+        # -------------------------------------------------------------------
+        configs:
+          params:
+            server.insecure: true
+        
+        global:
+          logging:
+            format: json
+        
+        # -------------------------------------------------------------------
+        # Controller Resources
+        # -------------------------------------------------------------------
+        controller:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        
+        # -------------------------------------------------------------------
+        # Repo Server Resources
+        # -------------------------------------------------------------------
+        repoServer:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# =============================================================================
+# ArgoCD HTTPRoute (Gateway API)
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argocd-server
+  namespace: argocd
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "argocd.192.168.68.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argocd-server
+          port: 80

@@ -1,0 +1,130 @@
+# =============================================================================
+# Traefik Gateway - ArgoCD Application
+# =============================================================================
+# Traefik v3 serves as the cluster's ingress controller and Gateway API
+# implementation. All external HTTP/HTTPS traffic flows through Traefik.
+#
+# Features:
+#   - LoadBalancer IP from Cilium L2 pool (192.168.68.210)
+#   - Gateway API support (HTTPRoute, etc.)
+#   - Cross-namespace routing
+#   - Prometheus metrics
+#   - JSON access logs for Loki
+#
+# Access: http://*.192.168.68.210.nip.io
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://traefik.github.io/charts
+    chart: traefik
+    targetRevision: 37.3.0
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Service Configuration
+        # -------------------------------------------------------------------
+        service:
+          type: LoadBalancer
+          spec:
+            loadBalancerIP: 192.168.68.210
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "9100"
+        
+        # -------------------------------------------------------------------
+        # Ports - Disable NodePort
+        # -------------------------------------------------------------------
+        ports:
+          web:
+            nodePort: null
+          websecure:
+            nodePort: null
+        
+        # -------------------------------------------------------------------
+        # Providers
+        # -------------------------------------------------------------------
+        providers:
+          kubernetesCRD:
+            enabled: true
+            allowCrossNamespace: true
+          kubernetesIngress:
+            enabled: true
+          kubernetesGateway:
+            enabled: true
+        
+        # -------------------------------------------------------------------
+        # Gateway API
+        # -------------------------------------------------------------------
+        gateway:
+          enabled: true
+        
+        # -------------------------------------------------------------------
+        # Logging
+        # -------------------------------------------------------------------
+        logs:
+          general:
+            level: INFO
+          access:
+            enabled: true
+            format: json
+        
+        # -------------------------------------------------------------------
+        # Prometheus Metrics
+        # -------------------------------------------------------------------
+        metrics:
+          prometheus:
+            enabled: true
+            addEntryPointsLabels: true
+            addRoutersLabels: true
+            addServicesLabels: true
+        
+        # -------------------------------------------------------------------
+        # Resource Limits for RPi
+        # -------------------------------------------------------------------
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+          limits:
+            cpu: 500m
+            memory: 300Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik-system
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# =============================================================================
+# Traefik Gateway Resource (Gateway API)
+# =============================================================================
+# The shared Gateway that all HTTPRoutes reference
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: traefik-gateway
+  namespace: traefik-system
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: web
+      protocol: HTTP
+      port: 8000
+      allowedRoutes:
+        namespaces:
+          from: All

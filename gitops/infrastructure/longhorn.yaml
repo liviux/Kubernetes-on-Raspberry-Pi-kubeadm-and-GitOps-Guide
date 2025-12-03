@@ -1,0 +1,66 @@
+# =============================================================================
+# Longhorn Distributed Storage - ArgoCD Application
+# =============================================================================
+# Longhorn provides persistent storage for the cluster using the HDD
+# attached to the control plane node (rpi4-1).
+#
+# Configuration:
+#   - Single replica (only 1 HDD available)
+#   - Storage only on rpi4-1 (Control Plane with HDD)
+#   - Workers protected (no storage scheduling on SD cards)
+#   - Data path: /var/lib/longhorn
+#
+# UI Access:
+#   kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
+#
+# NOTE: After initial deployment, you must manually:
+#   1. Label storage node: kubectl label node rpi4-1 node.longhorn.io/create-default-disk=true
+#   2. Disable workers: kubectl patch nodes.longhorn.io <worker> -n longhorn-system --type=merge -p '{"spec":{"allowScheduling": false}}'
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://charts.longhorn.io
+    chart: longhorn
+    targetRevision: 1.10.1
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Default Settings
+        # -------------------------------------------------------------------
+        defaultSettings:
+          # Where Longhorn stores data on nodes
+          defaultDataPath: /var/lib/longhorn
+          
+          # Auto-create disk on labeled nodes
+          createDefaultDiskLabeledNodes: true
+          
+          # Allow drain with single replica (we only have 1 HDD)
+          allowNodeDrainWithLastHealthyReplica: true
+        
+        # -------------------------------------------------------------------
+        # Persistence Settings
+        # -------------------------------------------------------------------
+        persistence:
+          # Single replica - we only have 1 HDD
+          defaultClassReplicaCount: 1
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-system
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

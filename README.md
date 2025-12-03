@@ -49,8 +49,9 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [9.9 Workload Rebalancing (Descheduler)](#99-workload-rebalancing-descheduler)
     *   [9.10 Cluster Dashboard (Headlamp)](#910-cluster-dashboard-headlamp)
     *   [9.11 The Root Application (App of Apps)](#911-the-root-application-app-of-apps)
-    *   [9.12 Security Verification Script](#912-security-verification-script)
-    *   [9.13 Phase 5 Execution Steps](#913-phase-5-execution-steps)
+    *   [9.12 Infrastructure Components (Managed by ArgoCD)](#912-infrastructure-components-managed-by-argocd)
+    *   [9.13 Security Verification Script](#913-security-verification-script)
+    *   [9.14 Phase 5 Execution Steps](#914-phase-5-execution-steps)
 10. [Phase 6: Advanced Observability](#10-phase-6-advanced-observability)
     *   [10.1 On-Demand Observability Tools](#101-on-demand-observability-tools)
     *   [10.2 Log Aggregation (Loki Stack)](#102-log-aggregation-loki-stack)
@@ -855,9 +856,18 @@ This structure follows the **separation of concerns** principle:
 │   ├── app-of-apps.yaml                 # Parent app that deploys all child apps
 │   │
 │   ├── infrastructure/                  # ──────────────────────────────────────
-│   │   │                                # LAYER 1: Core cluster infrastructure
+│   │   │                                # LAYER 0: Core cluster infrastructure
+│   │   │                                # Bootstrap components managed by ArgoCD
 │   │   │                                # sync-wave: -5 (deploys first)
 │   │   │                                # ──────────────────────────────────────
+│   │   ├── argocd.yaml                  # GitOps: ArgoCD self-management + HTTPRoute
+│   │   │                                #         Enables ArgoCD to manage itself
+│   │   ├── cilium.yaml                  # CNI: Cilium network + L2 config Application
+│   │   │                                #      Hubble, Tetragon, L2 announcements
+│   │   ├── traefik.yaml                 # Gateway: Traefik ingress + Gateway resource
+│   │   │                                #          LoadBalancer IP, Gateway API
+│   │   ├── longhorn.yaml                # Storage: Longhorn distributed storage
+│   │   │                                #          Single replica, HDD-only affinity
 │   │   └── cert-manager.yaml            # TLS: Let's Encrypt automation, ClusterIssuers
 │   │
 │   ├── storage/                         # ──────────────────────────────────────
@@ -6944,7 +6954,328 @@ spec:
 
 </details>
 
-### 9.12 Security Verification Script
+### 9.12 Infrastructure Components (Managed by ArgoCD)
+
+Once the root application is deployed, ArgoCD takes over management of the bootstrap infrastructure components that were initially installed manually. This enables **full GitOps control** over the entire cluster, including:
+
+| Component | ArgoCD Application | Helm Chart Version | Purpose |
+|-----------|-------------------|-------------------|---------|
+| **Cilium** | `gitops/infrastructure/cilium.yaml` | 1.18.4 | CNI, L2 announcements, Hubble, Tetragon |
+| **Traefik** | `gitops/infrastructure/traefik.yaml` | 37.3.0 | Gateway API, LoadBalancer |
+| **Longhorn** | `gitops/infrastructure/longhorn.yaml` | 1.10.1 | Distributed block storage |
+| **ArgoCD** | `gitops/infrastructure/argocd.yaml` | 9.1.5 | Self-managed GitOps controller |
+
+**How It Works:**
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                BOOTSTRAP → GITOPS TRANSITION                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  PHASE 1-4: MANUAL BOOTSTRAP          PHASE 5+: ARGOCD MANAGED             │
+│  ──────────────────────────           ─────────────────────────             │
+│                                                                             │
+│  ┌─────────────────────┐              ┌─────────────────────┐              │
+│  │ ansible + helm      │              │     ArgoCD          │              │
+│  │ bootstrap scripts   │    ────►     │   root-app.yaml     │              │
+│  │ (one-time install)  │              │  (continuous sync)  │              │
+│  └─────────────────────┘              └─────────────────────┘              │
+│         │                                       │                           │
+│         ▼                                       ▼                           │
+│  ┌───────────────┐                    ┌───────────────────────────────┐    │
+│  │ cilium        │                    │ gitops/infrastructure/        │    │
+│  │ traefik       │     adopted by     │   ├── cilium.yaml            │    │
+│  │ longhorn      │    ──────────►     │   ├── traefik.yaml           │    │
+│  │ argocd        │                    │   ├── longhorn.yaml          │    │
+│  └───────────────┘                    │   └── argocd.yaml            │    │
+│                                       └───────────────────────────────┘    │
+│                                                                             │
+│  Benefits:                                                                  │
+│  • Configuration drift detection & auto-correction (selfHeal)              │
+│  • Version-controlled infrastructure changes                                │
+│  • Rollback capability via Git history                                      │
+│  • Unified visibility in ArgoCD dashboard                                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Files Created:**
+
+<details>
+<summary>📄 Click to expand gitops/infrastructure/cilium.yaml</summary>
+
+```yaml
+# Cilium CNI - ArgoCD Application
+# Matches Ansible playbook 03_cluster_init.yml configuration exactly
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cilium
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://helm.cilium.io/
+    chart: cilium
+    targetRevision: 1.18.4
+    helm:
+      values: |
+        kubeProxyReplacement: true
+        k8sServiceHost: 192.168.68.201
+        k8sServicePort: 6443
+        ipam:
+          mode: kubernetes
+        operator:
+          replicas: 1
+        bpf:
+          masquerade: true
+        nodeinit:
+          enabled: true
+        hubble:
+          enabled: true
+          relay:
+            enabled: true
+          ui:
+            enabled: true
+            service:
+              type: NodePort
+        l2announcements:
+          enabled: true
+        tetragon:
+          enabled: true
+          serviceAccount:
+            create: true
+        k8sClientRateLimit:
+          qps: 50
+          burst: 100
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+</details>
+
+<details>
+<summary>📄 Click to expand gitops/infrastructure/traefik.yaml</summary>
+
+```yaml
+# Traefik Gateway - ArgoCD Application  
+# Matches bootstrap/traefik/install.sh configuration exactly
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://traefik.github.io/charts
+    chart: traefik
+    targetRevision: 37.3.0
+    helm:
+      values: |
+        service:
+          type: LoadBalancer
+          spec:
+            loadBalancerIP: 192.168.68.210
+        ports:
+          web:
+            nodePort: null
+          websecure:
+            nodePort: null
+        providers:
+          kubernetesCRD:
+            enabled: true
+            allowCrossNamespace: true
+          kubernetesIngress:
+            enabled: true
+          kubernetesGateway:
+            enabled: true
+        gateway:
+          enabled: true
+        logs:
+          general:
+            level: INFO
+          access:
+            enabled: true
+            format: json
+        metrics:
+          prometheus:
+            enabled: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+          limits:
+            cpu: 500m
+            memory: 300Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+---
+# Gateway resource included in same file
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: traefik-gateway
+  namespace: traefik-system
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: web
+      protocol: HTTP
+      port: 8000
+      allowedRoutes:
+        namespaces:
+          from: All
+```
+
+</details>
+
+<details>
+<summary>📄 Click to expand gitops/infrastructure/longhorn.yaml</summary>
+
+```yaml
+# Longhorn Storage - ArgoCD Application
+# Matches bootstrap/longhorn/install.sh configuration exactly
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://charts.longhorn.io
+    chart: longhorn
+    targetRevision: 1.10.1
+    helm:
+      values: |
+        defaultSettings:
+          defaultDataPath: /var/lib/longhorn
+          createDefaultDiskLabeledNodes: true
+          allowNodeDrainWithLastHealthyReplica: true
+        persistence:
+          defaultClassReplicaCount: 1
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+</details>
+
+<details>
+<summary>📄 Click to expand gitops/infrastructure/argocd.yaml</summary>
+
+```yaml
+# ArgoCD Self-Management - ArgoCD Application
+# Matches bootstrap/argocd/install.sh configuration exactly
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-cd
+    targetRevision: 9.1.5
+    helm:
+      values: |
+        server:
+          extraArgs:
+            - --insecure
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+        configs:
+          params:
+            server.insecure: true
+        global:
+          logging:
+            format: json
+        controller:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        repoServer:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+---
+# HTTPRoute for ArgoCD UI
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argocd-server
+  namespace: argocd
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "argocd.192.168.68.210.nip.io"
+  rules:
+    - backendRefs:
+        - name: argocd-server
+          port: 80
+```
+
+</details>
+
+**Verify All Infrastructure Apps in ArgoCD:**
+
+After deploying the root application, verify all infrastructure components appear in ArgoCD:
+
+```bash
+# List all ArgoCD-managed applications
+kubectl get applications -n argocd
+
+# Expected output (after full sync):
+# NAME                  SYNC STATUS   HEALTH STATUS
+# root-app              Synced        Healthy
+# argocd                Synced        Healthy
+# cilium                Synced        Healthy
+# cilium-l2-config      Synced        Healthy
+# traefik               Synced        Healthy
+# longhorn              Synced        Healthy
+# cert-manager          Synced        Healthy
+# gitea                 Synced        Healthy
+# observability-stack   Synced        Healthy
+# ... (other apps)
+```
+
+> ⚠️ **Note:** ArgoCD will **adopt** existing resources that match the Application definitions. If there are configuration differences between what's currently deployed and what's in Git, ArgoCD will reconcile them (with `selfHeal: true`). For critical components like Cilium, monitor the sync process carefully.
+
+### 9.13 Security Verification Script
 
 **File:** `tests/04_security_test.sh`
 
@@ -7155,7 +7486,7 @@ fi
 
 </details>
 
-### 9.13 Phase 5 Execution Steps
+### 9.14 Phase 5 Execution Steps
 
 Execute these commands after Phase 4 (GitOps) is complete:
 

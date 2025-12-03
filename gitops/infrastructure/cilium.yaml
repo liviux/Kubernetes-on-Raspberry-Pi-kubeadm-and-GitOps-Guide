@@ -1,0 +1,131 @@
+# =============================================================================
+# Cilium CNI - ArgoCD Application
+# =============================================================================
+# Cilium is the CNI (Container Network Interface) for the cluster, providing:
+#   - Pod networking
+#   - L2 LoadBalancer announcements (replaces MetalLB)
+#   - Network policies
+#   - Hubble observability
+#   - Tetragon security
+#
+# NOTE: Cilium was initially bootstrapped during cluster setup via Ansible.
+# This Application allows ArgoCD to manage and track Cilium going forward.
+#
+# L2 IP Pool: 192.168.68.210 - 192.168.68.220
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cilium
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://helm.cilium.io/
+    chart: cilium
+    targetRevision: 1.18.4
+    helm:
+      values: |
+        # -------------------------------------------------------------------
+        # Kube-Proxy Replacement (eBPF-based)
+        # -------------------------------------------------------------------
+        kubeProxyReplacement: true
+        k8sServiceHost: 192.168.68.201
+        k8sServicePort: 6443
+        
+        # -------------------------------------------------------------------
+        # IPAM Configuration
+        # -------------------------------------------------------------------
+        ipam:
+          mode: kubernetes
+        
+        # -------------------------------------------------------------------
+        # Operator Settings
+        # -------------------------------------------------------------------
+        operator:
+          replicas: 1
+        
+        # -------------------------------------------------------------------
+        # BPF Masquerade
+        # -------------------------------------------------------------------
+        bpf:
+          masquerade: true
+        
+        # -------------------------------------------------------------------
+        # Node Init
+        # -------------------------------------------------------------------
+        nodeinit:
+          enabled: true
+        
+        # -------------------------------------------------------------------
+        # Hubble (Observability)
+        # -------------------------------------------------------------------
+        hubble:
+          enabled: true
+          relay:
+            enabled: true
+          ui:
+            enabled: true
+            service:
+              type: NodePort
+        
+        # -------------------------------------------------------------------
+        # L2 Announcements (LoadBalancer IPs)
+        # -------------------------------------------------------------------
+        l2announcements:
+          enabled: true
+        
+        # -------------------------------------------------------------------
+        # Tetragon (Security Observability)
+        # -------------------------------------------------------------------
+        tetragon:
+          enabled: true
+          serviceAccount:
+            create: true
+        
+        # -------------------------------------------------------------------
+        # K8s Client Rate Limits
+        # -------------------------------------------------------------------
+        k8sClientRateLimit:
+          qps: 50
+          burst: 100
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+---
+# =============================================================================
+# Cilium L2 Configuration (Applied from Git repo)
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cilium-l2-config
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: http://gitea.192.168.68.210.nip.io/liviu/home-cluster.git
+    targetRevision: main
+    path: bootstrap/cilium
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
