@@ -5305,14 +5305,18 @@ kubectl get applications -n argocd
 | Gitea | http://gitea.192.168.68.210.nip.io | (created on first visit) |
 | Grafana | http://grafana.192.168.68.210.nip.io | admin / prom-operator |
 
+If the default password doesn't work, you can retrieve the actual password stored in the Kubernetes secret using this command:
+
+```bash
+kubectl get secret -n monitoring observability-stack-grafana -o jsonpath="{.data.admin-password}" | base64 -d
+```
+
 Now that Prometheus and Grafana are running, you need to identify which pods are consuming your limited Raspberry Pi resources (RAM/CPU). You have three ways to view this data.
 
 #### Method 1: Built-in Dashboards (Recommended)
 The `kube-prometheus-stack` comes pre-loaded with excellent dashboards.
 
 1.  Log in to Grafana: `http://grafana.192.168.68.210.nip.io`
-    *   **User:** `admin`
-    *   **Password:** `prom-operator`
 2.  Navigate to **Dashboards** (four squares icon) > **Kubernetes**.
 3.  Select **Kubernetes / Compute Resources / Namespace (Pods)**.
 4.  **Usage:**
@@ -5336,7 +5340,7 @@ Use the **Explore** tab (Compass icon) to run raw PromQL queries for instant deb
 
 **Top 10 Pods by Memory (RAM):**
 ```promql
-topk(10, sum(container_memory_working_set_bytes{container!=""}) by (pod, namespace))
+topk(10, sum(container_memory_working_set_bytes{container!=""}) by (pod, namespace)) / 1024
 ```
 
 **Top 10 Pods by CPU Load:**
