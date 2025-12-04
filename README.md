@@ -5294,7 +5294,7 @@ kubectl get applications -n argocd
 # NAME                     SYNC STATUS   HEALTH STATUS
 # gitea                    Synced        Healthy
 # local-path-provisioner   Synced        Healthy
-# observability-stack      Synced        Healthy
+# observability-stack      Synced        Healthy 
 ```
 
 **Access URLs (Phase 4):**
