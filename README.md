@@ -5263,7 +5263,7 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: prometheus-grafana
+        - name: observability-stack-grafana
           port: 80
 ```
 
