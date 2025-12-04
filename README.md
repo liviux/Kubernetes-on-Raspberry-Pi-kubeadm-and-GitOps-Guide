@@ -5416,7 +5416,7 @@ Now that the GitOps engine is running, we utilize it to deploy the infrastructur
 
 | Component | Version | Category | Purpose | Depends On |
 |-----------|---------|----------|---------|------------|
-| **MinIO** | 5.2.0 | Storage | S3-compatible object storage | Longhorn |
+| **MinIO** | 5.4.0 | Storage | S3-compatible object storage | Longhorn |
 | **Cert-Manager** | 1.16.0 | Security | TLS certificate automation | - |
 | **Harbor** | 1.15.0 | Security | Private container registry | MinIO |
 | **Velero** | 5.1.0 | Management | Backup & disaster recovery | MinIO |
@@ -5472,7 +5472,7 @@ Many Cloud Native tools (Velero, Thanos, Loki, Harbor) expect an AWS S3 bucket. 
 | Setting | Value | Purpose |
 |---------|-------|---------|
 | `mode` | `standalone` | Single instance (no distributed mode on RPi) |
-| `persistence.size` | `50Gi` | Storage for all S3 data |
+| `persistence.size` | `200Gi` | Storage for all S3 data |
 | `persistence.storageClass` | `longhorn` | HDD-backed storage |
 | `buckets` | velero, harbor, loki-data, thanos-data | Pre-created buckets |
 
@@ -5524,7 +5524,7 @@ spec:
   source:
     repoURL: https://charts.min.io/
     chart: minio
-    targetRevision: 5.2.0
+    targetRevision: 5.4.0
     helm:
       values: |
         # -------------------------------------------------------------------
@@ -5539,7 +5539,7 @@ spec:
         persistence:
           enabled: true
           storageClass: longhorn
-          size: 50Gi
+          size: 200Gi
           accessMode: ReadWriteOnce
         
         # -------------------------------------------------------------------
@@ -13131,3 +13131,5 @@ TODO list - for next time I re-create the cluster:
 - create a variable file, considering there are ansible playboks, bash scripts, kubernetes manifests, helm charts, argocd manifest, etc. > maybe a file with variables and then a script to re-crete all the files and in the README (variables for everything, including application versions, even a custom dns, IPs, etc.)
 - by default gitea to have an github-like theme
 - create a beautiful web app with all the cluster dashboards and links to everything
+- replace minio as they remove features form community version and exactly when this guide was deployed they put minio comuunity version on maintanance mode
+- move in secrets all hardcoded passwords

@@ -33,7 +33,7 @@ spec:
   source:
     repoURL: https://charts.min.io/
     chart: minio
-    targetRevision: 5.2.0
+    targetRevision: 5.4.0
     helm:
       values: |
         # -------------------------------------------------------------------
@@ -48,7 +48,7 @@ spec:
         persistence:
           enabled: true
           storageClass: longhorn
-          size: 50Gi
+          size: 200Gi
           accessMode: ReadWriteOnce
         
         # -------------------------------------------------------------------
