@@ -5305,6 +5305,47 @@ kubectl get applications -n argocd
 | Gitea | http://gitea.192.168.68.210.nip.io | (created on first visit) |
 | Grafana | http://grafana.192.168.68.210.nip.io | admin / prom-operator |
 
+Now that Prometheus and Grafana are running, you need to identify which pods are consuming your limited Raspberry Pi resources (RAM/CPU). You have three ways to view this data.
+
+#### Method 1: Built-in Dashboards (Recommended)
+The `kube-prometheus-stack` comes pre-loaded with excellent dashboards.
+
+1.  Log in to Grafana: `http://grafana.192.168.68.210.nip.io`
+    *   **User:** `admin`
+    *   **Password:** `prom-operator`
+2.  Navigate to **Dashboards** (four squares icon) > **Kubernetes**.
+3.  Select **Kubernetes / Compute Resources / Namespace (Pods)**.
+4.  **Usage:**
+    *   Select a **Namespace** at the top (e.g., `monitoring`, `argocd`).
+    *   Scroll down to the **CPU Usage** and **Memory Usage** tables.
+    *   Click the **Current** column header to sort pods by highest consumption.
+
+#### Method 2: Import "Cluster Overview" Dashboard
+For a single "birds-eye view" of top consumers across the *entire* cluster:
+
+1.  In Grafana, go to **Dashboards** > **New** > **Import**.
+2.  Enter Dashboard ID: `315` and click **Load**.
+3.  **Configuration:**
+    *   **Name:** `Kubernetes Cluster Overview`
+    *   **Prometheus:** Select your data source (usually named `prometheus`).
+4.  Click **Import**.
+5.  Scroll to the bottom to see panels for **"Top 10 Memory Intensive Pods"** and **"Top 10 CPU Intensive Pods"**.
+
+#### Method 3: Instant Queries (The "Hacker" Way)
+Use the **Explore** tab (Compass icon) to run raw PromQL queries for instant debugging.
+
+**Top 10 Pods by Memory (RAM):**
+```promql
+topk(10, sum(container_memory_working_set_bytes{container!=""}) by (pod, namespace))
+```
+
+**Top 10 Pods by CPU Load:**
+```promql
+topk(10, sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (pod, namespace))
+```
+
+> 💡 **Tip:** In the Explore view, toggle the **"Table"** switch at the top of the results area to see a clean list instead of a graph.
+
 ## 9. Phase 5: Security & Management Stack
 
 Now that the GitOps engine is running, we utilize it to deploy the infrastructure dependencies required for a secure, production-grade environment. This phase establishes the **Defense in Depth** layers and **Day 2 Operations** tooling.
