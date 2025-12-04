@@ -13133,3 +13133,4 @@ TODO list - for next time I re-create the cluster:
 - create a beautiful web app with all the cluster dashboards and links to everything
 - replace minio as they remove features form community version and exactly when this guide was deployed they put minio comuunity version on maintanance mode
 - move in secrets all hardcoded passwords
+- persistent longhorn ui 
