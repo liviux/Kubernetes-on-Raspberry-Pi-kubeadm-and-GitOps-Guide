@@ -1,8 +1,8 @@
 # =============================================================================
 # Observability Stack - Prometheus, Grafana, Alertmanager
 # =============================================================================
-# This is the initial "App of Apps" deployment that provides comprehensive
-# monitoring and alerting for the cluster.
+# This deploys the kube-prometheus-stack for comprehensive monitoring and
+# alerting. 
 #
 # Components Deployed:
 #   - Prometheus: Metrics collection and storage

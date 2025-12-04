@@ -852,8 +852,8 @@ This structure follows the **separation of concerns** principle:
 │   │                                    # Everything below is managed by ArgoCD
 │   │                                    # Sync-waves control deployment order
 │   │                                    # ══════════════════════════════════════
-│   ├── root-app.yaml                    # Points ArgoCD to this gitops/ directory
-│   ├── app-of-apps.yaml                 # Parent app that deploys all child apps
+│   ├── root-app.yaml                    # The "App of Apps" - points ArgoCD to gitops/ directory
+│   ├── observability-stack.yaml         # Prometheus, Grafana, Alertmanager stack
 │   │
 │   ├── infrastructure/                  # ──────────────────────────────────────
 │   │   │                                # LAYER 0: Core cluster infrastructure
@@ -5017,9 +5017,11 @@ git push -u origin main
 
 ### 8.5 The "App of Apps" Pattern
 
-**File:** `gitops/app-of-apps.yaml`
+**File:** `gitops/root-app.yaml`
 
 The **App of Apps** pattern is the key to scalable GitOps. Instead of manually deploying each application, we deploy one "parent" Application that points to a directory containing child Applications. ArgoCD recursively discovers and syncs all of them.
+
+> **📝 Note:** The `root-app.yaml` is the true "App of Apps" that recursively watches the entire `gitops/` directory.
 
 > 📌 **Infrastructure Management:** Once the root application is deployed, ArgoCD also takes over management of the bootstrap infrastructure components (Cilium, Traefik, Longhorn, ArgoCD itself). See [Section 9.12: Infrastructure Components (Managed by ArgoCD)](#912-infrastructure-components-managed-by-argocd) for details on how this adoption works.
 
@@ -5075,14 +5077,13 @@ For the initial deployment, we start with the **kube-prometheus-stack** which pr
 | `alertmanager.storage` | `2Gi` Longhorn | Alert state persistence |
 
 <details>
-<summary>📄 Click to expand full gitops/app-of-apps.yaml</summary>
+<summary>📄 Click to expand full gitops/observability-stack.yaml</summary>
 
 ```yaml
 # =============================================================================
 # Observability Stack - Prometheus, Grafana, Alertmanager
 # =============================================================================
-# This is the initial "App of Apps" deployment that provides comprehensive
-# monitoring and alerting for the cluster.
+# This deploys the kube-prometheus-stack for comprehensive monitoring and
 #
 # Components Deployed:
 #   - Prometheus: Metrics collection and storage
@@ -5269,11 +5270,11 @@ spec:
 
 </details>
 
-**Deploy the App of Apps:**
+**Deploy the Observability Stack:**
 
 ```bash
-# Deploy the root application (this will sync all child applications)
-kubectl apply -f gitops/app-of-apps.yaml
+# Deploy the observability stack (Prometheus, Grafana, Alertmanager)
+kubectl apply -f gitops/observability-stack.yaml
 
 # Watch deployment progress
 kubectl get pods -n monitoring -w
