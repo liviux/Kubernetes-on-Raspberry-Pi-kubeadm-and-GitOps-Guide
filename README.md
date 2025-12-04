@@ -4333,7 +4333,7 @@ helm upgrade --install argocd argo/argo-cd \
   --set controller.resources.requests.cpu="100m" \
   --set controller.resources.requests.memory="256Mi" \
   --set controller.resources.limits.cpu="500m" \
-  --set controller.resources.limits.memory="512Mi" \
+  --set controller.resources.limits.memory="1Gi" \
   --set repoServer.resources.requests.cpu="100m" \
   --set repoServer.resources.requests.memory="128Mi" \
   --set repoServer.resources.limits.cpu="500m" \
@@ -7278,7 +7278,7 @@ spec:
               memory: 256Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
         repoServer:
           resources:
             requests:
