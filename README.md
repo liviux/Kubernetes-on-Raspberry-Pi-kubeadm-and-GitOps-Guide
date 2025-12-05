@@ -82,6 +82,7 @@ TL;DR: This guide details the step-by-step process to deploy a production-grade 
     *   [12.8 Health Check Script](#128-health-check-script)
     *   [12.9 Secrets Migration to OpenBao](#129-secrets-migration-to-openbao)
     *   [12.10 Component Cleanup Commands](#1210-component-cleanup-commands)
+    *   [12.11 Cluster Shutdown & Startup](#1211-cluster-shutdown--startup)
 
 ---
 
@@ -834,6 +835,13 @@ This structure follows the **separation of concerns** principle:
 │       ├── 05_reset_cluster.yml         # Nuclear option: kubeadm reset, cleanup everything
 │       └── 06_rolling_upgrade.yml       # Day 2: Rolling OS upgrades with drain/uncordon
 │
+├── scripts/                             # ══════════════════════════════════════
+│   │                                    # OPERATIONAL SCRIPTS
+│   │                                    # Day 2 cluster management utilities
+│   │                                    # ══════════════════════════════════════
+│   ├── shutdown-cluster.sh              # Graceful shutdown: cordon, scale, power off
+│   └── startup-cluster.sh               # Startup recovery: wait, uncordon, verify
+│
 ├── bootstrap/                           # ══════════════════════════════════════
 │   │                                    # PRE-GITOPS DEPENDENCIES (Manual Helm)
 │   │                                    # Components ArgoCD needs before it can run
@@ -852,6 +860,7 @@ This structure follows the **separation of concerns** principle:
 │   │                                    # Everything below is managed by ArgoCD
 │   │                                    # Sync-waves control deployment order
 │   │                                    # ══════════════════════════════════════
+│   ├── 00-namespaces.yaml               # Pre-create namespaces for HTTPRoutes
 │   ├── root-app.yaml                    # The "App of Apps" - points ArgoCD to gitops/ directory
 │   ├── observability-stack.yaml         # Prometheus, Grafana, Alertmanager stack
 │   │
@@ -883,8 +892,9 @@ This structure follows the **separation of concerns** principle:
 │   │   │                                # LAYER 3: Platform services
 │   │   │                                # sync-wave: -3
 │   │   │                                # ──────────────────────────────────────
-│   │   └── gitea.yaml                   # Git: Self-hosted repo, GitOps source of truth
-│   │                                    #     SQLite DB, PVC for repos, HTTPRoute
+│   │   ├── gitea.yaml                   # Git: Self-hosted repo, GitOps source of truth
+│   │   │                                #     SQLite DB, PVC for repos
+│   │   └── gitea-httproute.yaml         # HTTPRoute for Gitea web UI access
 │   │
 │   ├── observability/                   # ──────────────────────────────────────
 │   │   │                                # LAYER 4: Monitoring & debugging
@@ -13145,6 +13155,1011 @@ kubectl delete volumes.longhorn.io -n longhorn-system --all
 > 2. Data is backed up (for storage components)
 > 3. ArgoCD auto-sync is disabled (to prevent redeployment)
 
+---
+
+### 12.11 Cluster Shutdown & Startup
+
+Since this is a home lab cluster, you'll likely power it off when not in use. These scripts ensure **clean shutdown** (preventing data corruption) and **smooth startup** (verifying health before workloads resume).
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    SHUTDOWN & STARTUP WORKFLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  SHUTDOWN SEQUENCE (scripts/shutdown-cluster.sh)                           │
+│  ─────────────────────────────────────────────────                         │
+│                                                                             │
+│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐   │
+│  │ Cordon  │───►│  Scale  │───►│  Wait   │───►│Shutdown │───►│Shutdown │   │
+│  │  All    │    │  Down   │    │ Detach  │    │ Workers │    │   CP    │   │
+│  │ Nodes   │    │Stateful │    │ Volumes │    │ (rev.)  │    │ (last)  │   │
+│  └─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘   │
+│                                                                             │
+│  Why this order?                                                            │
+│  • Cordon first: Prevents new pods from scheduling                          │
+│  • Scale down: Allows volumes to detach cleanly                             │
+│  • Workers first: Ensures workloads move off before nodes disappear        │
+│  • CP last: API server available until all workers are down                 │
+│                                                                             │
+│  STARTUP SEQUENCE (scripts/startup-cluster.sh)                              │
+│  ───────────────────────────────────────────────                            │
+│                                                                             │
+│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐   │
+│  │Power On │───►│  Wait   │───►│  Wait   │───►│Uncordon │───►│ Verify  │   │
+│  │ CP First│    │  API    │    │  Nodes  │    │   All   │    │ Health  │   │
+│  │         │    │ Server  │    │  Ready  │    │ Nodes   │    │         │   │
+│  └─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘   │
+│                                                                             │
+│  Why this order?                                                            │
+│  • CP first: API server must be up before workers can join                  │
+│  • Wait for Ready: Ensures kubelet and CNI are functional                  │
+│  • Uncordon: Re-enables scheduling on all nodes                             │
+│  • ArgoCD auto-syncs: Workloads restored automatically                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Scripts Location
+
+| Script | Purpose | Usage |
+|--------|---------|-------|
+| `scripts/shutdown-cluster.sh` | Graceful cluster shutdown | Run before powering off |
+| `scripts/startup-cluster.sh` | Post-boot recovery | Run after powering on |
+
+#### Shutdown Script Features
+
+**File:** `scripts/shutdown-cluster.sh`
+
+```bash
+#!/bin/bash
+# Usage examples:
+
+# Full graceful shutdown (recommended)
+bash scripts/shutdown-cluster.sh
+
+# Quick shutdown (skip scaling down workloads)
+bash scripts/shutdown-cluster.sh --skip-scale-down
+
+# Prepare only (don't actually power off nodes)
+bash scripts/shutdown-cluster.sh --skip-shutdown
+
+# Preview what would happen
+bash scripts/shutdown-cluster.sh --dry-run
+```
+
+**What it does:**
+
+1. **Cordons all nodes** - Prevents new pod scheduling
+2. **Scales down stateful workloads** - MinIO, Gitea, Prometheus, Loki, Harbor, etc.
+3. **Waits for volume detachment** - Gives Longhorn time to cleanly detach PVs
+4. **Shuts down workers first** - In reverse order (rpi4-4 → rpi4-3 → rpi4-2)
+5. **Shuts down control plane last** - Ensures API server available during worker shutdown
+
+**Configurable options:**
+
+```bash
+# In the script, adjust these variables:
+SSH_USER="user"                    # Your SSH username
+CONTROL_PLANE="rpi4-1"             # Control plane hostname
+WORKERS=("rpi4-4" "rpi4-3" "rpi4-2")  # Workers in shutdown order
+VOLUME_DETACH_WAIT=30              # Seconds to wait for volumes
+WORKER_SHUTDOWN_DELAY=5            # Delay between worker shutdowns
+
+# Namespaces with stateful workloads to scale down
+STATEFUL_NAMESPACES=(
+    "monitoring"
+    "observability"
+    "gitea"
+    "harbor"
+    "storage"
+    "openbao"
+    "velero"
+)
+```
+
+#### Startup Script Features
+
+**File:** `scripts/startup-cluster.sh`
+
+```bash
+#!/bin/bash
+# Usage examples:
+
+# Full startup with workload restore
+bash scripts/startup-cluster.sh
+
+# Just wait for nodes (don't uncordon or restore)
+bash scripts/startup-cluster.sh --wait-only
+
+# Uncordon but don't scale up workloads
+bash scripts/startup-cluster.sh --skip-restore
+
+# Custom timeout (default 300s)
+bash scripts/startup-cluster.sh --timeout 600
+```
+
+**What it does:**
+
+1. **Waits for API server** - Polls until Kubernetes API responds
+2. **Waits for all nodes** - Ensures all 4 nodes are Ready
+3. **Uncordons nodes** - Re-enables pod scheduling
+4. **Verifies critical pods** - Checks kube-system, longhorn-system, argocd
+5. **Triggers ArgoCD sync** - Lets GitOps restore workloads automatically
+6. **Runs health checks** - Reports any pods not in Running state
+
+<details>
+<summary>📄 Click to expand full scripts/shutdown-cluster.sh</summary>
+
+```bash
+#!/bin/bash
+# =============================================================================
+# Graceful Cluster Shutdown Script
+# =============================================================================
+# This script prepares the Kubernetes cluster for a clean shutdown.
+# It handles volume detachment, workload draining, and ordered node shutdown.
+#
+# Usage: bash scripts/shutdown-cluster.sh [--skip-scale-down] [--skip-shutdown]
+#
+# Options:
+#   --skip-scale-down  Skip scaling down stateful workloads (faster but riskier)
+#   --skip-shutdown    Only prepare cluster, don't SSH shutdown nodes
+#   --dry-run          Show what would happen without executing
+#
+# Prerequisites:
+#   - kubectl configured with cluster access
+#   - SSH access to all nodes (key-based recommended)
+#   - Run from the repository root directory
+# =============================================================================
+
+set -euo pipefail
+
+# =============================================================================
+# CONFIGURATION - Adjust these to match your environment
+# =============================================================================
+SSH_USER="${SSH_USER:-user}"
+CONTROL_PLANE="rpi4-1"
+WORKERS=("rpi4-4" "rpi4-3" "rpi4-2")  # Shutdown order: last worker first
+
+# Namespaces with stateful workloads to scale down
+STATEFUL_NAMESPACES=(
+    "monitoring"
+    "observability"
+    "logging"
+    "gitea"
+    "harbor"
+    "storage"
+    "openbao"
+    "velero"
+)
+
+# How long to wait for volumes to detach (seconds)
+VOLUME_DETACH_WAIT=30
+
+# How long to wait between worker shutdowns (seconds)
+WORKER_SHUTDOWN_DELAY=5
+
+# =============================================================================
+# PARSE ARGUMENTS
+# =============================================================================
+SKIP_SCALE_DOWN=false
+SKIP_SHUTDOWN=false
+DRY_RUN=false
+
+for arg in "$@"; do
+    case $arg in
+        --skip-scale-down)
+            SKIP_SCALE_DOWN=true
+            shift
+            ;;
+        --skip-shutdown)
+            SKIP_SHUTDOWN=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--skip-scale-down] [--skip-shutdown] [--dry-run]"
+            echo ""
+            echo "Options:"
+            echo "  --skip-scale-down  Skip scaling down stateful workloads"
+            echo "  --skip-shutdown    Only prepare cluster, don't shutdown nodes"
+            echo "  --dry-run          Show what would happen without executing"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_step() { echo -e "${BLUE}▶${NC} $1"; }
+log_success() { echo -e "${GREEN}✅${NC} $1"; }
+log_warning() { echo -e "${YELLOW}⚠️${NC} $1"; }
+log_error() { echo -e "${RED}❌${NC} $1"; }
+
+run_cmd() {
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}[DRY-RUN]${NC} $*"
+    else
+        eval "$@"
+    fi
+}
+
+check_prerequisites() {
+    log_step "Checking prerequisites..."
+    
+    if ! command -v kubectl &> /dev/null; then
+        log_error "kubectl not found. Please install kubectl first."
+        exit 1
+    fi
+    
+    if ! kubectl cluster-info &> /dev/null; then
+        log_error "Cannot connect to Kubernetes cluster. Check your kubeconfig."
+        exit 1
+    fi
+    
+    log_success "Prerequisites check passed"
+}
+
+# =============================================================================
+# MAIN SHUTDOWN SEQUENCE
+# =============================================================================
+
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              GRACEFUL CLUSTER SHUTDOWN SEQUENCE                       ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+if [ "$DRY_RUN" = true ]; then
+    log_warning "DRY-RUN MODE - No changes will be made"
+    echo ""
+fi
+
+check_prerequisites
+
+# -----------------------------------------------------------------------------
+# STEP 1: Cordon all nodes to prevent new scheduling
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 1: Cordoning all nodes                                         │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+log_step "Cordoning all nodes to prevent new pod scheduling..."
+run_cmd "kubectl cordon -l kubernetes.io/os=linux --dry-run=client -o name 2>/dev/null | xargs -r kubectl cordon 2>/dev/null || kubectl cordon --all"
+log_success "All nodes cordoned"
+
+# -----------------------------------------------------------------------------
+# STEP 2: Scale down stateful workloads (optional but recommended)
+# -----------------------------------------------------------------------------
+if [ "$SKIP_SCALE_DOWN" = false ]; then
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│ STEP 2: Scaling down stateful workloads                             │"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+
+    for ns in "${STATEFUL_NAMESPACES[@]}"; do
+        if kubectl get namespace "$ns" &> /dev/null; then
+            log_step "Scaling down workloads in namespace: $ns"
+            
+            # Scale deployments
+            DEPLOYMENTS=$(kubectl get deployments -n "$ns" -o name 2>/dev/null || true)
+            if [ -n "$DEPLOYMENTS" ]; then
+                run_cmd "kubectl scale deployment -n $ns --replicas=0 --all 2>/dev/null || true"
+            fi
+            
+            # Scale statefulsets
+            STATEFULSETS=$(kubectl get statefulsets -n "$ns" -o name 2>/dev/null || true)
+            if [ -n "$STATEFULSETS" ]; then
+                run_cmd "kubectl scale statefulset -n $ns --replicas=0 --all 2>/dev/null || true"
+            fi
+        fi
+    done
+    log_success "Stateful workloads scaled down"
+
+    # Wait for volumes to detach
+    echo ""
+    log_step "Waiting ${VOLUME_DETACH_WAIT}s for volumes to detach cleanly..."
+    if [ "$DRY_RUN" = false ]; then
+        sleep "$VOLUME_DETACH_WAIT"
+    fi
+    log_success "Volume detach wait complete"
+else
+    log_warning "Skipping scale-down (--skip-scale-down specified)"
+fi
+
+# -----------------------------------------------------------------------------
+# STEP 3: Check for stuck pods or volumes
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 3: Checking for stuck resources                                │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+log_step "Checking for pods in Terminating state..."
+TERMINATING=$(kubectl get pods -A --field-selector=status.phase=Running -o json 2>/dev/null | grep -c '"phase": "Terminating"' || echo "0")
+if [ "$TERMINATING" -gt 0 ]; then
+    log_warning "$TERMINATING pods still terminating. Consider waiting or using --skip-scale-down next time."
+else
+    log_success "No terminating pods detected"
+fi
+
+log_step "Checking Longhorn volume status..."
+if kubectl get volumes.longhorn.io -n longhorn-system &> /dev/null; then
+    ATTACHED=$(kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{.items[*].status.state}' 2>/dev/null | tr ' ' '\n' | grep -c "attached" || echo "0")
+    if [ "$ATTACHED" -gt 0 ]; then
+        log_warning "$ATTACHED Longhorn volumes still attached. This is normal if workloads are running."
+    else
+        log_success "All Longhorn volumes detached"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# STEP 4: Shutdown nodes in order
+# -----------------------------------------------------------------------------
+if [ "$SKIP_SHUTDOWN" = false ]; then
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│ STEP 4: Shutting down nodes (workers first, then control plane)    │"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+
+    # Shutdown workers first (in reverse order)
+    for worker in "${WORKERS[@]}"; do
+        log_step "Shutting down worker: $worker"
+        run_cmd "ssh ${SSH_USER}@${worker} 'sudo shutdown -h now' 2>/dev/null || true"
+        log_success "$worker shutdown signal sent"
+        
+        if [ "$DRY_RUN" = false ]; then
+            sleep "$WORKER_SHUTDOWN_DELAY"
+        fi
+    done
+
+    # Wait a bit for workers to fully shutdown
+    log_step "Waiting 10s for workers to complete shutdown..."
+    if [ "$DRY_RUN" = false ]; then
+        sleep 10
+    fi
+
+    # Shutdown control plane last
+    log_step "Shutting down control plane: $CONTROL_PLANE"
+    run_cmd "ssh ${SSH_USER}@${CONTROL_PLANE} 'sudo shutdown -h now' 2>/dev/null || true"
+    log_success "$CONTROL_PLANE shutdown signal sent"
+else
+    log_warning "Skipping node shutdown (--skip-shutdown specified)"
+    echo ""
+    echo "To manually shutdown nodes, run these commands in order:"
+    echo ""
+    for worker in "${WORKERS[@]}"; do
+        echo "  ssh ${SSH_USER}@${worker} 'sudo shutdown -h now'"
+    done
+    echo "  ssh ${SSH_USER}@${CONTROL_PLANE} 'sudo shutdown -h now'"
+fi
+
+# -----------------------------------------------------------------------------
+# SUMMARY
+# -----------------------------------------------------------------------------
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║                     SHUTDOWN SEQUENCE COMPLETE                        ║"
+echo "╠═══════════════════════════════════════════════════════════════════════╣"
+echo "║                                                                       ║"
+if [ "$SKIP_SHUTDOWN" = false ]; then
+echo "║  ✅ All nodes have received shutdown signal                           ║"
+echo "║                                                                       ║"
+echo "║  To start the cluster again:                                          ║"
+echo "║    1. Power on rpi4-1 (control plane) first                           ║"
+echo "║    2. Wait 2-3 minutes for it to boot                                 ║"
+echo "║    3. Power on workers: rpi4-2, rpi4-3, rpi4-4                        ║"
+echo "║    4. Run: bash scripts/startup-cluster.sh                            ║"
+else
+echo "║  ✅ Cluster prepared for shutdown (nodes not powered off)             ║"
+echo "║                                                                       ║"
+echo "║  Run with full shutdown:                                              ║"
+echo "║    bash scripts/shutdown-cluster.sh                                   ║"
+fi
+echo "║                                                                       ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+```
+
+</details>
+
+<details>
+<summary>📄 Click to expand full scripts/startup-cluster.sh</summary>
+
+```bash
+#!/bin/bash
+# =============================================================================
+# Cluster Startup & Recovery Script
+# =============================================================================
+# This script validates cluster health after powering on and restores workloads.
+# Run this after physically powering on all Raspberry Pi nodes.
+#
+# Usage: bash scripts/startup-cluster.sh [--wait-only] [--skip-restore]
+#
+# Options:
+#   --wait-only     Only wait for nodes, don't uncordon or restore
+#   --skip-restore  Uncordon nodes but don't scale up workloads
+#   --timeout <s>   Max seconds to wait for nodes (default: 300)
+#
+# Prerequisites:
+#   - All nodes physically powered on
+#   - kubectl configured with cluster access
+#   - Control plane should be powered on 2-3 min before workers
+# =============================================================================
+
+set -euo pipefail
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+EXPECTED_NODES=4
+MAX_WAIT=${MAX_WAIT:-300}  # 5 minutes default
+
+# Namespaces with stateful workloads to restore (reverse of shutdown order)
+STATEFUL_NAMESPACES=(
+    "storage"
+    "openbao"
+    "monitoring"
+    "observability"
+    "logging"
+    "harbor"
+    "gitea"
+    "velero"
+)
+
+# Default replica counts for known stateful workloads
+# Format: "namespace/resource-type/name:replicas"
+declare -A DEFAULT_REPLICAS=(
+    ["storage/deployment/minio"]="1"
+    ["gitea/statefulset/gitea"]="1"
+    ["monitoring/statefulset/prometheus-kube-prometheus-stack-prometheus"]="1"
+    ["monitoring/statefulset/alertmanager-kube-prometheus-stack-alertmanager"]="1"
+    ["observability/statefulset/loki"]="1"
+    ["harbor/statefulset/harbor-registry"]="1"
+    ["harbor/statefulset/harbor-database"]="1"
+)
+
+# =============================================================================
+# PARSE ARGUMENTS
+# =============================================================================
+WAIT_ONLY=false
+SKIP_RESTORE=false
+
+for arg in "$@"; do
+    case $arg in
+        --wait-only)
+            WAIT_ONLY=true
+            shift
+            ;;
+        --skip-restore)
+            SKIP_RESTORE=true
+            shift
+            ;;
+        --timeout)
+            MAX_WAIT="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--wait-only] [--skip-restore] [--timeout <seconds>]"
+            echo ""
+            echo "Options:"
+            echo "  --wait-only     Only wait for nodes to be ready"
+            echo "  --skip-restore  Don't scale up workloads after uncordoning"
+            echo "  --timeout <s>   Max seconds to wait (default: 300)"
+            exit 0
+            ;;
+        *)
+            # Skip unknown args
+            ;;
+    esac
+done
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log_step() { echo -e "${BLUE}▶${NC} $1"; }
+log_success() { echo -e "${GREEN}✅${NC} $1"; }
+log_warning() { echo -e "${YELLOW}⚠️${NC} $1"; }
+log_error() { echo -e "${RED}❌${NC} $1"; }
+log_info() { echo -e "${CYAN}ℹ️${NC} $1"; }
+
+wait_for_api() {
+    local elapsed=0
+    local interval=5
+    
+    log_step "Waiting for Kubernetes API server..."
+    
+    while ! kubectl cluster-info &> /dev/null; do
+        if [ $elapsed -ge $MAX_WAIT ]; then
+            log_error "Timeout waiting for API server after ${MAX_WAIT}s"
+            echo ""
+            echo "Troubleshooting steps:"
+            echo "  1. Check if control plane (rpi4-1) is powered on and booted"
+            echo "  2. Verify network connectivity: ping rpi4-1"
+            echo "  3. Check kubelet: ssh rpi4-1 'sudo systemctl status kubelet'"
+            echo "  4. Check API server: ssh rpi4-1 'sudo crictl ps | grep kube-apiserver'"
+            exit 1
+        fi
+        
+        printf "\r  Waiting... %ds / %ds" $elapsed $MAX_WAIT
+        sleep $interval
+        elapsed=$((elapsed + interval))
+    done
+    
+    echo ""
+    log_success "API server is responding"
+}
+
+wait_for_nodes() {
+    local elapsed=0
+    local interval=10
+    local ready_nodes=0
+    
+    log_step "Waiting for all $EXPECTED_NODES nodes to be Ready..."
+    
+    while [ $ready_nodes -lt $EXPECTED_NODES ]; do
+        if [ $elapsed -ge $MAX_WAIT ]; then
+            log_error "Timeout waiting for nodes after ${MAX_WAIT}s"
+            echo ""
+            kubectl get nodes
+            echo ""
+            echo "Not all nodes are ready. Check:"
+            echo "  1. Are all Raspberry Pis powered on?"
+            echo "  2. Network connectivity to nodes"
+            echo "  3. Kubelet status: ssh <node> 'sudo systemctl status kubelet'"
+            exit 1
+        fi
+        
+        ready_nodes=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready" || echo "0")
+        printf "\r  Ready nodes: %d / %d (waiting %ds / %ds)" $ready_nodes $EXPECTED_NODES $elapsed $MAX_WAIT
+        
+        if [ $ready_nodes -lt $EXPECTED_NODES ]; then
+            sleep $interval
+            elapsed=$((elapsed + interval))
+        fi
+    done
+    
+    echo ""
+    log_success "All $EXPECTED_NODES nodes are Ready"
+}
+
+check_critical_pods() {
+    log_step "Checking critical system pods..."
+    
+    local critical_namespaces=("kube-system" "longhorn-system" "argocd")
+    local all_healthy=true
+    
+    for ns in "${critical_namespaces[@]}"; do
+        if kubectl get namespace "$ns" &> /dev/null; then
+            NOT_RUNNING=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
+            if [ "$NOT_RUNNING" -gt 0 ]; then
+                log_warning "Namespace $ns has $NOT_RUNNING pods not running"
+                all_healthy=false
+            fi
+        fi
+    done
+    
+    if [ "$all_healthy" = true ]; then
+        log_success "Critical system pods are healthy"
+    else
+        log_warning "Some critical pods are not running. This may resolve shortly."
+    fi
+}
+
+# =============================================================================
+# MAIN STARTUP SEQUENCE
+# =============================================================================
+
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║              CLUSTER STARTUP & RECOVERY SEQUENCE                      ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+# -----------------------------------------------------------------------------
+# STEP 1: Wait for API server
+# -----------------------------------------------------------------------------
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 1: Connecting to Kubernetes API                                │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+wait_for_api
+
+# -----------------------------------------------------------------------------
+# STEP 2: Wait for all nodes
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 2: Waiting for all nodes to be Ready                           │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+wait_for_nodes
+
+echo ""
+kubectl get nodes -o wide
+
+if [ "$WAIT_ONLY" = true ]; then
+    echo ""
+    log_success "All nodes are ready (--wait-only mode)"
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# STEP 3: Uncordon all nodes
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 3: Uncordoning nodes                                           │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+log_step "Uncordoning all nodes to allow scheduling..."
+
+CORDONED_NODES=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{"\n"}{end}' | grep true | awk '{print $1}' || true)
+
+if [ -n "$CORDONED_NODES" ]; then
+    for node in $CORDONED_NODES; do
+        kubectl uncordon "$node"
+        log_success "Uncordoned: $node"
+    done
+else
+    log_info "No cordoned nodes found"
+fi
+
+# -----------------------------------------------------------------------------
+# STEP 4: Check critical system pods
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 4: Verifying critical system components                        │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+# Wait a bit for pods to stabilize
+log_step "Waiting 15s for pods to stabilize..."
+sleep 15
+
+check_critical_pods
+
+# Check Cilium status
+if command -v cilium &> /dev/null; then
+    log_step "Checking Cilium CNI status..."
+    if cilium status --wait &> /dev/null; then
+        log_success "Cilium CNI is healthy"
+    else
+        log_warning "Cilium status check failed. Run 'cilium status' for details."
+    fi
+fi
+
+# Check Longhorn
+if kubectl get namespace longhorn-system &> /dev/null; then
+    log_step "Checking Longhorn storage..."
+    LH_PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
+    if [ "$LH_PODS" -eq 0 ]; then
+        log_success "Longhorn storage is healthy"
+    else
+        log_warning "Longhorn has $LH_PODS pods not running. Storage may be recovering."
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# STEP 5: Restore workloads (optional)
+# -----------------------------------------------------------------------------
+if [ "$SKIP_RESTORE" = false ]; then
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────────┐"
+    echo "│ STEP 5: Restoring stateful workloads                                │"
+    echo "└─────────────────────────────────────────────────────────────────────┘"
+
+    log_info "ArgoCD will automatically sync and restore most workloads."
+    log_info "Manually scaled workloads may need attention."
+    
+    # Check if ArgoCD is running
+    if kubectl get deployment -n argocd argocd-server &> /dev/null; then
+        ARGOCD_READY=$(kubectl get deployment -n argocd argocd-server -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        if [ "$ARGOCD_READY" -gt 0 ]; then
+            log_success "ArgoCD is running - GitOps reconciliation will restore workloads"
+            
+            # Optionally trigger a sync
+            if command -v argocd &> /dev/null; then
+                log_step "Triggering ArgoCD sync for all applications..."
+                argocd app list -o name 2>/dev/null | xargs -r -I {} argocd app sync {} --async 2>/dev/null || true
+                log_info "ArgoCD sync initiated (running in background)"
+            fi
+        else
+            log_warning "ArgoCD server not ready yet. Workloads will sync once it's up."
+        fi
+    fi
+    
+    # Restore known stateful workloads that might have been scaled to 0
+    for key in "${!DEFAULT_REPLICAS[@]}"; do
+        IFS='/' read -r ns type name <<< "$key"
+        replicas="${DEFAULT_REPLICAS[$key]}"
+        
+        if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
+            CURRENT=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+            if [ "$CURRENT" -eq 0 ]; then
+                log_step "Scaling up $type/$name in $ns to $replicas replicas"
+                kubectl scale "$type" "$name" -n "$ns" --replicas="$replicas" 2>/dev/null || true
+            fi
+        fi
+    done
+else
+    log_info "Skipping workload restore (--skip-restore specified)"
+fi
+
+# -----------------------------------------------------------------------------
+# STEP 6: Final health check
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 6: Final cluster health check                                  │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+log_step "Running cluster health summary..."
+
+echo ""
+echo "Node Status:"
+kubectl get nodes
+
+echo ""
+echo "System Pods:"
+kubectl get pods -n kube-system --no-headers | head -10
+
+echo ""
+echo "Problem Pods (if any):"
+PROBLEM_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -v "Running\|Completed" | head -10 || true)
+if [ -n "$PROBLEM_PODS" ]; then
+    echo "$PROBLEM_PODS"
+    echo ""
+    log_warning "Some pods are not running. They may still be starting up."
+else
+    log_success "No problem pods detected"
+fi
+
+# -----------------------------------------------------------------------------
+# SUMMARY
+# -----------------------------------------------------------------------------
+echo ""
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║                     STARTUP SEQUENCE COMPLETE                         ║"
+echo "╠═══════════════════════════════════════════════════════════════════════╣"
+echo "║                                                                       ║"
+echo "║  ✅ All $EXPECTED_NODES nodes are Ready                                        ║"
+echo "║  ✅ Nodes uncordoned and schedulable                                  ║"
+echo "║                                                                       ║"
+echo "║  Useful commands:                                                     ║"
+echo "║    kubectl get pods -A              # View all pods                   ║"
+echo "║    kubectl top nodes                # Check resource usage            ║"
+echo "║    argocd app list                  # View ArgoCD applications        ║"
+echo "║    cilium status                    # Check CNI health                ║"
+echo "║    bash tests/01_infra_test.sh      # Run infrastructure tests        ║"
+echo "║                                                                       ║"
+echo "║  If workloads are slow to start, wait 2-3 minutes for:               ║"
+echo "║    - Longhorn volumes to reattach                                     ║"
+echo "║    - ArgoCD to reconcile applications                                 ║"
+echo "║    - Health checks to pass                                            ║"
+echo "║                                                                       ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo ""
+```
+
+</details>
+
+#### Physical Power-On Procedure
+
+When powering on the cluster hardware:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    PHYSICAL POWER-ON PROCEDURE                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  STEP 1: Power on Control Plane (rpi4-1)                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  ⚡ Plug in rpi4-1                                                   │   │
+│  │  ⏳ Wait 2-3 minutes for full boot                                   │   │
+│  │  ✅ Verify: ping rpi4-1 or ssh rpi4-1 'uptime'                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  STEP 2: Power on Workers (can be simultaneous)                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  ⚡ Plug in rpi4-2, rpi4-3, rpi4-4                                   │   │
+│  │  ⏳ Wait 1-2 minutes for boot                                        │   │
+│  │  ✅ Verify: ping rpi4-2 rpi4-3 rpi4-4                                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  STEP 3: Run Startup Script                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  $ bash scripts/startup-cluster.sh                                   │   │
+│  │  (Waits for nodes, uncordons, verifies health)                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  STEP 4: Verify Cluster                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  $ kubectl get nodes                                                 │   │
+│  │  $ kubectl get pods -A | grep -v Running                             │   │
+│  │  $ argocd app list (optional)                                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Complete Shutdown Example
+
+```bash
+# 1. Run the shutdown script
+$ bash scripts/shutdown-cluster.sh
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║              GRACEFUL CLUSTER SHUTDOWN SEQUENCE                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+✅ Prerequisites check passed
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Cordoning all nodes                                         │
+└─────────────────────────────────────────────────────────────────────┘
+▶ Cordoning all nodes to prevent new pod scheduling...
+✅ All nodes cordoned
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ STEP 2: Scaling down stateful workloads                             │
+└─────────────────────────────────────────────────────────────────────┘
+▶ Scaling down workloads in namespace: monitoring
+▶ Scaling down workloads in namespace: gitea
+▶ Scaling down workloads in namespace: storage
+✅ Stateful workloads scaled down
+
+▶ Waiting 30s for volumes to detach cleanly...
+✅ Volume detach wait complete
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ STEP 4: Shutting down nodes (workers first, then control plane)    │
+└─────────────────────────────────────────────────────────────────────┘
+▶ Shutting down worker: rpi4-4
+✅ rpi4-4 shutdown signal sent
+▶ Shutting down worker: rpi4-3
+✅ rpi4-3 shutdown signal sent
+▶ Shutting down worker: rpi4-2
+✅ rpi4-2 shutdown signal sent
+▶ Waiting 10s for workers to complete shutdown...
+▶ Shutting down control plane: rpi4-1
+✅ rpi4-1 shutdown signal sent
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║                     SHUTDOWN SEQUENCE COMPLETE                        ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║  ✅ All nodes have received shutdown signal                           ║
+║                                                                       ║
+║  To start the cluster again:                                          ║
+║    1. Power on rpi4-1 (control plane) first                           ║
+║    2. Wait 2-3 minutes for it to boot                                 ║
+║    3. Power on workers: rpi4-2, rpi4-3, rpi4-4                        ║
+║    4. Run: bash scripts/startup-cluster.sh                            ║
+╚═══════════════════════════════════════════════════════════════════════╝
+```
+
+#### Complete Startup Example
+
+```bash
+# 1. After powering on all nodes, run the startup script
+$ bash scripts/startup-cluster.sh
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║              CLUSTER STARTUP & RECOVERY SEQUENCE                      ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Connecting to Kubernetes API                                │
+└─────────────────────────────────────────────────────────────────────┘
+▶ Waiting for Kubernetes API server...
+  Waiting... 15s / 300s
+✅ API server is responding
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ STEP 2: Waiting for all nodes to be Ready                           │
+└─────────────────────────────────────────────────────────────────────┘
+▶ Waiting for all 4 nodes to be Ready...
+  Ready nodes: 4 / 4 (waiting 30s / 300s)
+✅ All 4 nodes are Ready
+
+NAME     STATUS   ROLES           AGE   VERSION   INTERNAL-IP
+rpi4-1   Ready    control-plane   90d   v1.33.0   192.168.68.201
+rpi4-2   Ready    <none>          90d   v1.33.0   192.168.68.202
+rpi4-3   Ready    <none>          90d   v1.33.0   192.168.68.203
+rpi4-4   Ready    <none>          90d   v1.33.0   192.168.68.204
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ STEP 3: Uncordoning nodes                                           │
+└─────────────────────────────────────────────────────────────────────┘
+▶ Uncordoning all nodes to allow scheduling...
+✅ Uncordoned: rpi4-1
+✅ Uncordoned: rpi4-2
+✅ Uncordoned: rpi4-3
+✅ Uncordoned: rpi4-4
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ STEP 4: Verifying critical system components                        │
+└─────────────────────────────────────────────────────────────────────┘
+▶ Waiting 15s for pods to stabilize...
+▶ Checking critical system pods...
+✅ Critical system pods are healthy
+▶ Checking Cilium CNI status...
+✅ Cilium CNI is healthy
+▶ Checking Longhorn storage...
+✅ Longhorn storage is healthy
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║                     STARTUP SEQUENCE COMPLETE                         ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║  ✅ All 4 nodes are Ready                                             ║
+║  ✅ Nodes uncordoned and schedulable                                  ║
+║                                                                       ║
+║  Useful commands:                                                     ║
+║    kubectl get pods -A              # View all pods                   ║
+║    kubectl top nodes                # Check resource usage            ║
+║    argocd app list                  # View ArgoCD applications        ║
+╚═══════════════════════════════════════════════════════════════════════╝
+```
+
+#### Troubleshooting Startup Issues
+
+| Issue | Possible Cause | Solution |
+|-------|---------------|----------|
+| API server not responding | Control plane not booted | Wait longer or check `ssh rpi4-1 'sudo systemctl status kubelet'` |
+| Nodes stuck in NotReady | CNI not ready | `kubectl describe node <name>` and check Cilium pods |
+| Volumes not attaching | Longhorn recovering | Wait 2-3 min, check `kubectl get volumes.longhorn.io -n longhorn-system` |
+| Pods CrashLooping | Dependencies not ready | Check pod logs, often resolves after MinIO/storage is up |
+| ArgoCD not syncing | ArgoCD pods not ready | `kubectl get pods -n argocd`, wait for server to be Running |
+
+#### Quick Reference Commands
+
+```bash
+# Pre-shutdown checklist
+kubectl get pods -A | grep -v Running | grep -v Completed  # Any unhealthy pods?
+kubectl get pvc -A  # Any pending PVCs?
+
+# Graceful shutdown
+bash scripts/shutdown-cluster.sh
+
+# After power-on
+bash scripts/startup-cluster.sh
+
+# Manual node operations (if scripts fail)
+kubectl cordon rpi4-2                    # Prevent scheduling
+kubectl drain rpi4-2 --ignore-daemonsets # Evict pods
+kubectl uncordon rpi4-2                  # Allow scheduling
+
+# Check cluster health after startup
+kubectl get nodes
+kubectl top nodes
+kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
+```
+
+---
 
 TODO list - for next time I re-create the cluster:
 - create a variable file, considering there are ansible playboks, bash scripts, kubernetes manifests, helm charts, argocd manifest, etc. > maybe a file with variables and then a script to re-crete all the files and in the README (variables for everything, including application versions, even a custom dns, IPs, etc.)
