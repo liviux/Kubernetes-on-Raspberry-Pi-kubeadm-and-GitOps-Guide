@@ -4447,6 +4447,20 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
 |---------|-----|-------------|
 | ArgoCD UI | http://argocd.192.168.68.210.nip.io | admin / (password from above) |
 
+**⚠️ IMPORTANT: Pre-create Namespaces Before Deploying Applications:**
+
+Before deploying any ArgoCD Applications, you **must** create the namespaces first. This prevents errors when `kubectl apply` tries to create HTTPRoutes in namespaces that don't exist yet:
+
+```bash
+# Create all namespaces used by GitOps applications
+kubectl apply -f gitops/00-namespaces.yaml
+
+# Verify namespaces were created
+kubectl get namespaces | grep -E "monitoring|storage|security|harbor|gitea"
+```
+
+> **Why is this needed?** ArgoCD Application files often include HTTPRoutes and other resources that reference their target namespace. When you run `kubectl apply -f`, it tries to create ALL resources in the file immediately - but ArgoCD's `CreateNamespace=true` only works during the sync phase (after the Application is created). Pre-creating namespaces avoids "namespace not found" errors.
+
 ### 8.3 Local Path Provisioner (Optional)
 
 **File:** `gitops/storage/local-path-provisioner.yaml`
@@ -4914,13 +4928,16 @@ spec:
 **Deploy this application:**
 
 ```bash
-# Step 1: Deploy Gitea via ArgoCD
+# Ensure namespaces exist (if not already done)
+kubectl apply -f gitops/00-namespaces.yaml
+
+# Deploy Gitea via ArgoCD
 kubectl apply -f gitops/services/gitea.yaml
 
-# Step 2: Wait for Gitea to be ready
+# Wait for Gitea to be ready
 kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=gitea -n gitea --timeout=300s
 
-# Step 3: Apply the HTTPRoute for web access
+# Apply the HTTPRoute for web access
 kubectl apply -f gitops/services/gitea-httproute.yaml
 
 # Verify the application status
@@ -7636,6 +7653,8 @@ git push origin main
 ```
 
 **Step 3: Apply Root Application**
+
+> **Note:** Ensure namespaces were created in Phase 4 (`kubectl apply -f gitops/00-namespaces.yaml`). This prevents "namespace not found" errors for HTTPRoutes.
 
 ```bash
 kubectl apply -f gitops/root-app.yaml

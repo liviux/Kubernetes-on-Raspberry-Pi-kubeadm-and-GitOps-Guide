@@ -111,8 +111,6 @@ kind: HTTPRoute
 metadata:
   name: headlamp
   namespace: headlamp
-  annotations:
-    argocd.argoproj.io/sync-wave: "4"
 spec:
   parentRefs:
     - name: traefik-gateway
@@ -140,5 +138,4 @@ metadata:
   namespace: headlamp
   annotations:
     kubernetes.io/service-account.name: headlamp
-    argocd.argoproj.io/sync-wave: "4"
 type: kubernetes.io/service-account-token

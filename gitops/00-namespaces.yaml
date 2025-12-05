@@ -1,0 +1,111 @@
+# =============================================================================
+# Cluster Namespaces - Pre-created for ArgoCD Applications
+# =============================================================================
+# This file creates all namespaces BEFORE ArgoCD Applications deploy.
+# Apply this file FIRST when bootstrapping the cluster:
+#
+#   kubectl apply -f gitops/00-namespaces.yaml
+#
+# Why This Exists:
+#   ArgoCD Applications with CreateNamespace=true create namespaces during sync,
+#   but HTTPRoutes and other resources in the same file need the namespace to
+#   exist BEFORE kubectl apply runs. Pre-creating namespaces solves this.
+## =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trivy-system
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: headlamp
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-workflows
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-events
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/managed-by: argocd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+  labels:
+    app.kubernetes.io/managed-by: argocd

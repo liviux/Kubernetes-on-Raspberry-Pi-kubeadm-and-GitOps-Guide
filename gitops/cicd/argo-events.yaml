@@ -48,6 +48,8 @@ metadata:
     app.kubernetes.io/part-of: cicd-pipeline
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
