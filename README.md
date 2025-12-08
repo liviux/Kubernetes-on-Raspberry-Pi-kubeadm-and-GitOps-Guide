@@ -13749,6 +13749,8 @@ declare -A DEFAULT_REPLICAS=(
     ["observability/statefulset/loki"]="1"
     ["harbor/statefulset/harbor-registry"]="1"
     ["harbor/statefulset/harbor-database"]="1"
+    # Added Grafana here to ensure it wakes up if it was scaled down to fix locks
+    ["monitoring/deployment/observability-stack-grafana"]="1"
 )
 
 # =============================================================================
@@ -14053,6 +14055,33 @@ done
 
 log_step "Waiting an extra 90s for volume metadata sync..."
 sleep 90
+
+# =============================================================================
+# NEW ADDITION: ZOMBIE POD CLEANUP
+# =============================================================================
+log_step "Checking for stuck volume locks (Terminating/Unknown pods)..."
+
+# Delete pods stuck in Terminating or Unknown state that might hold volume locks
+# This fixes the Multi-Attach errors seen in Grafana
+STUCK_PODS=$(kubectl get pods -A --no-headers | grep -E 'Terminating|Unknown|NodeLost' | awk '{print $1 " " $2}')
+
+if [ -n "$STUCK_PODS" ]; then
+    log_warning "Found stuck pods holding potential volume locks. Force deleting..."
+    echo "$STUCK_PODS" | while read -r ns pod; do
+        log_verbose "Force deleting $pod in $ns"
+        kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+        log_success "Deleted zombie pod: $pod"
+    done
+    log_success "Stuck pods cleared."
+    
+    # Wait a moment for volume attachments to clear after pod deletion
+    log_step "Waiting 15s for locks to release..."
+    sleep 15
+else
+    log_verbose "No stuck pods found."
+    log_success "No zombie pods detected"
+fi
+# =============================================================================
 
 # -----------------------------------------------------------------------------
 # STEP 5: Restore workloads (optional)
