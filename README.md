@@ -13504,8 +13504,13 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
             if [ -n "$DEPLOYMENTS" ]; then
                 DEP_COUNT=$(echo "$DEPLOYMENTS" | wc -l)
                 log_verbose "Found $DEP_COUNT deployments in $ns"
+                for dep in $DEPLOYMENTS; do
+                    log_verbose "Scaling down $dep"
+                done
                 run_cmd "kubectl scale deployment -n $ns --replicas=0 --all 2>/dev/null || true"
                 SCALED_COUNT=$((SCALED_COUNT + DEP_COUNT))
+            else
+                log_verbose "No deployments found in $ns"
             fi
             
             # Scale statefulsets
@@ -13513,8 +13518,13 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
             if [ -n "$STATEFULSETS" ]; then
                 STS_COUNT=$(echo "$STATEFULSETS" | wc -l)
                 log_verbose "Found $STS_COUNT statefulsets in $ns"
+                for sts in $STATEFULSETS; do
+                    log_verbose "Scaling down $sts"
+                done
                 run_cmd "kubectl scale statefulset -n $ns --replicas=0 --all 2>/dev/null || true"
                 SCALED_COUNT=$((SCALED_COUNT + STS_COUNT))
+            else
+                log_verbose "No statefulsets found in $ns"
             fi
         else
             log_verbose "Namespace $ns does not exist, skipping"
@@ -13546,7 +13556,10 @@ log_verbose "Running: kubectl get pods -A | grep Terminating"
 TERMINATING_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -i "Terminating" || true)
 TERMINATING_COUNT=$(echo "$TERMINATING_PODS" | grep -c "Terminating" 2>/dev/null || echo "0")
 if [ "$TERMINATING_COUNT" -gt 0 ]; then
-    log_warning "$TERMINATING_COUNT pods still terminating"
+    log_warning "$TERMINATING_COUNT pods still terminating:"
+    if [ "$VERBOSE" = true ]; then
+        echo "$TERMINATING_PODS" | head -10
+    fi
 else
     log_success "No terminating pods detected"
 fi
@@ -13555,13 +13568,27 @@ log_step "Checking Longhorn volume status..."
 if kubectl get crd volumes.longhorn.io &> /dev/null; then
     log_verbose "Longhorn CRD found, checking volumes..."
     if kubectl get namespace longhorn-system &> /dev/null; then
-        ATTACHED=$(kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{.items[*].status.state}' 2>/dev/null | tr ' ' '\n' | grep -c "attached" || echo "0")
-        if [ "$ATTACHED" -gt 0 ]; then
-            log_warning "$ATTACHED Longhorn volumes still attached"
+        VOLUME_STATES=$(kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}={.status.state}{"\n"}{end}' 2>/dev/null || true)
+        if [ -n "$VOLUME_STATES" ]; then
+            log_verbose "Volume states:"
+            if [ "$VERBOSE" = true ]; then
+                echo "$VOLUME_STATES"
+            fi
+            ATTACHED=$(echo "$VOLUME_STATES" | grep -c "attached" || echo "0")
+            if [ "$ATTACHED" -gt 0 ]; then
+                log_warning "$ATTACHED Longhorn volumes still attached. This is normal if workloads are running."
+            else
+                log_success "All Longhorn volumes detached"
+            fi
         else
-            log_success "All Longhorn volumes detached"
+            log_verbose "No Longhorn volumes found"
+            log_success "No Longhorn volumes to detach"
         fi
+    else
+        log_verbose "longhorn-system namespace not found"
     fi
+else
+    log_verbose "Longhorn CRD not found, skipping volume check"
 fi
 
 # -----------------------------------------------------------------------------
@@ -13575,6 +13602,7 @@ if [ "$SKIP_SHUTDOWN" = false ]; then
 
     log_verbose "SSH user: $SSH_USER"
     log_verbose "Workers shutdown order: ${WORKERS[*]}"
+    log_verbose "Control plane: $CONTROL_PLANE"
 
     # Shutdown workers first (in reverse order)
     for worker in "${WORKERS[@]}"; do
@@ -13583,10 +13611,11 @@ if [ "$SKIP_SHUTDOWN" = false ]; then
         if run_cmd "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${SSH_USER}@${worker} 'sudo shutdown -h now' 2>&1"; then
             log_success "$worker shutdown signal sent"
         else
-            log_warning "$worker shutdown command returned error"
+            log_warning "$worker shutdown command returned error (node may already be shutting down)"
         fi
         
         if [ "$DRY_RUN" = false ]; then
+            log_verbose "Waiting ${WORKER_SHUTDOWN_DELAY}s before next worker..."
             sleep "$WORKER_SHUTDOWN_DELAY"
         fi
     done
@@ -13599,8 +13628,12 @@ if [ "$SKIP_SHUTDOWN" = false ]; then
 
     # Shutdown control plane last
     log_step "Shutting down control plane: $CONTROL_PLANE"
-    run_cmd "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${SSH_USER}@${CONTROL_PLANE} 'sudo shutdown -h now' 2>&1" || true
-    log_success "$CONTROL_PLANE shutdown signal sent"
+    log_verbose "Running: ssh ${SSH_USER}@${CONTROL_PLANE} 'sudo shutdown -h now'"
+    if run_cmd "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${SSH_USER}@${CONTROL_PLANE} 'sudo shutdown -h now' 2>&1"; then
+        log_success "$CONTROL_PLANE shutdown signal sent"
+    else
+        log_warning "$CONTROL_PLANE shutdown command returned error (node may already be shutting down)"
+    fi
 else
     log_warning "Skipping node shutdown (--skip-shutdown specified)"
     echo ""
@@ -13637,6 +13670,7 @@ fi
 echo "║                                                                       ║"
 echo "╚═══════════════════════════════════════════════════════════════════════╝"
 echo ""
+
 ```
 
 </details>
@@ -13767,6 +13801,7 @@ wait_for_api() {
     
     log_step "Waiting for Kubernetes API server..."
     log_verbose "Timeout set to ${MAX_WAIT}s"
+    log_verbose "KUBECONFIG=${KUBECONFIG:-~/.kube/config}"
     
     while ! kubectl cluster-info &> /dev/null; do
         if [ $elapsed -ge $MAX_WAIT ]; then
@@ -13837,6 +13872,9 @@ check_critical_pods() {
             NOT_RUNNING=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
             if [ "$NOT_RUNNING" -gt 0 ]; then
                 log_warning "Namespace $ns has $NOT_RUNNING pods not running"
+                if [ "$VERBOSE" = true ]; then
+                    kubectl get pods -n "$ns" --no-headers | grep -v "Running\|Completed" | head -5
+                fi
                 all_healthy=false
             else
                 log_verbose "All pods in $ns are Running/Completed"
@@ -13971,6 +14009,9 @@ if kubectl get namespace longhorn-system &> /dev/null; then
         log_success "Longhorn storage is healthy"
     else
         log_warning "Longhorn has $LH_PODS pods not running. Storage may be recovering."
+        if [ "$VERBOSE" = true ]; then
+            kubectl get pods -n longhorn-system --no-headers | grep -v "Running\|Completed" | head -5
+        fi
     fi
 else
     log_verbose "longhorn-system namespace not found"
@@ -14068,12 +14109,20 @@ kubectl get nodes -o wide
 echo ""
 echo "System Pods (kube-system):"
 kubectl get pods -n kube-system --no-headers 2>/dev/null | head -10
+KUBE_SYSTEM_TOTAL=$(kubectl get pods -n kube-system --no-headers 2>/dev/null | wc -l || echo "0")
+if [ "$KUBE_SYSTEM_TOTAL" -gt 10 ]; then
+    echo "  ... and $((KUBE_SYSTEM_TOTAL - 10)) more pods"
+fi
 
 echo ""
 echo "Problem Pods (if any):"
 PROBLEM_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -v "Running\|Completed" | head -10 || true)
 if [ -n "$PROBLEM_PODS" ]; then
     echo "$PROBLEM_PODS"
+    PROBLEM_COUNT=$(kubectl get pods -A --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
+    if [ "$PROBLEM_COUNT" -gt 10 ]; then
+        echo "  ... and $((PROBLEM_COUNT - 10)) more problem pods"
+    fi
     echo ""
     log_warning "Some pods are not running. They may still be starting up."
 else
