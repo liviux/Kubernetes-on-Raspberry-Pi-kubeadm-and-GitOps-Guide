@@ -5334,10 +5334,29 @@ kubectl get applications -n argocd
 | Gitea | http://gitea.192.168.68.210.nip.io | (created on first visit) |
 | Grafana | http://grafana.192.168.68.210.nip.io | admin / prom-operator |
 
-If the default password doesn't work, you can retrieve the actual password stored in the Kubernetes secret using this command:
+If the default password doesn't work, you can retrieve the actual credentials stored in the Kubernetes secret using this script:
 
 ```bash
-kubectl get secret -n monitoring observability-stack-grafana -o jsonpath="{.data.admin-password}" | base64 -d
+# Extract and print clearly
+USER=$(kubectl get secret -n monitoring observability-stack-grafana -o jsonpath="{.data.admin-user}" | base64 -d)
+PASS=$(kubectl get secret -n monitoring observability-stack-grafana -o jsonpath="{.data.admin-password}" | base64 -d)
+
+echo ""
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║              GRAFANA CREDENTIALS                     ║"
+echo "╠══════════════════════════════════════════════════════╣"
+echo "║ Username: >${USER}<                                  ║"
+echo "║ Password: >${PASS}<                                  ║"
+echo "╚══════════════════════════════════════════════════════╝"
+echo ""
+```
+
+**Workaround - Reset Password to 'admin':**
+
+If the above doesn't work or you prefer a simple password, you can reset the admin password directly (new pass is admin):
+
+```bash
+kubectl exec -it -n monitoring deployment/observability-stack-grafana -c grafana -- grafana-cli admin reset-admin-password admin
 ```
 
 Now that Prometheus and Grafana are running, you need to identify which pods are consuming your limited Raspberry Pi resources (RAM/CPU). You have three ways to view this data.
@@ -13341,7 +13360,7 @@ STATEFUL_NAMESPACES=(
 )
 
 # How long to wait for volumes to detach (seconds)
-VOLUME_DETACH_WAIT=30
+VOLUME_DETACH_WAIT=60
 
 # How long to wait between worker shutdowns (seconds)
 WORKER_SHUTDOWN_DELAY=5
@@ -14016,6 +14035,24 @@ if kubectl get namespace longhorn-system &> /dev/null; then
 else
     log_verbose "longhorn-system namespace not found"
 fi
+
+log_step "Waiting for Longhorn Nodes to be schedulable..."
+# We loop until all Longhorn nodes report "allowScheduling: true" (or at least the HDD node)
+while true; do
+    # Check if rpi4-1 (our storage node) is ready in Longhorn
+    LH_READY=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null || echo "false")
+    
+    if [ "$LH_READY" == "true" ]; then
+        log_success "Longhorn storage node is active."
+        break
+    fi
+    
+    echo "   Waiting for Longhorn storage node to initialize... (Retrying in 10s)"
+    sleep 10
+done
+
+log_step "Waiting an extra 30s for volume metadata sync..."
+sleep 30
 
 # -----------------------------------------------------------------------------
 # STEP 5: Restore workloads (optional)

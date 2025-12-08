@@ -41,7 +41,7 @@ STATEFUL_NAMESPACES=(
 )
 
 # How long to wait for volumes to detach (seconds)
-VOLUME_DETACH_WAIT=30
+VOLUME_DETACH_WAIT=60
 
 # How long to wait between worker shutdowns (seconds)
 WORKER_SHUTDOWN_DELAY=5

@@ -336,6 +336,24 @@ else
     log_verbose "longhorn-system namespace not found"
 fi
 
+log_step "Waiting for Longhorn Nodes to be schedulable..."
+# We loop until all Longhorn nodes report "allowScheduling: true" (or at least the HDD node)
+while true; do
+    # Check if rpi4-1 (our storage node) is ready in Longhorn
+    LH_READY=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null || echo "false")
+    
+    if [ "$LH_READY" == "true" ]; then
+        log_success "Longhorn storage node is active."
+        break
+    fi
+    
+    echo "   Waiting for Longhorn storage node to initialize... (Retrying in 10s)"
+    sleep 10
+done
+
+log_step "Waiting an extra 30s for volume metadata sync..."
+sleep 30
+
 # -----------------------------------------------------------------------------
 # STEP 5: Restore workloads (optional)
 # -----------------------------------------------------------------------------
