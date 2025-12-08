@@ -20,7 +20,7 @@ metadata:
   name: cilium
   namespace: argocd
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -113,7 +113,7 @@ metadata:
   name: cilium-l2-config
   namespace: argocd
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:

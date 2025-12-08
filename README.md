@@ -1,6 +1,7 @@
 # Kubernetes Cluster on Raspberry Pi 4: Bare Metal GitOps Guide
 
 TL;DR: This guide details the step-by-step process to deploy a production-grade Kubernetes cluster on Raspberry Pi 4 hardware using Ansible for infrastructure provisioning and ArgoCD for GitOps-based application management. And a ton of modern cloud-native tools along it.
+Just notices Github trunkates the readme if it's too long, so there's a TODO idem to split it or to use another documentation format. For now you can open the READMe file separately to see the full content.
 
 ## Table of Contents
 1.  [Introduction and Scope](#1-introduction-and-scope)
@@ -4602,7 +4603,7 @@ metadata:
     # Deploy early - storage classes should be available before apps
     argocd.argoproj.io/sync-wave: "-4"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -4760,7 +4761,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-options: ServerSideApply=true
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   # Ignore volumeClaimTemplates differences (apiVersion/kind fields are auto-added by K8s)
@@ -5132,7 +5133,7 @@ metadata:
   name: observability-stack
   namespace: argocd
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -5545,7 +5546,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "-2"
     argocd.argoproj.io/sync-options: ServerSideApply=true
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -5737,13 +5738,13 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
     repoURL: https://charts.jetstack.io
     chart: cert-manager
-    targetRevision: v1.16.0
+    targetRevision: v1.19.1
     helm:
       parameters:
         - name: installCRDs
@@ -5865,7 +5866,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -6066,7 +6067,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -6217,7 +6218,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "0"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -6357,7 +6358,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "0"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -6498,7 +6499,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "1"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -6647,7 +6648,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -6750,7 +6751,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "0"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -6900,7 +6901,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "3"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -7065,7 +7066,7 @@ metadata:
   name: root-app
   namespace: argocd
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -7949,7 +7950,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "1"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -8118,7 +8119,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -8288,7 +8289,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "1"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -8403,7 +8404,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -8569,7 +8570,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "3"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -8699,7 +8700,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -8860,7 +8861,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "3"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:
@@ -14168,3 +14169,4 @@ TODO list - for next time I re-create the cluster:
 - replace minio as they remove features form community version and exactly when this guide was deployed they put minio comuunity version on maintanance mode
 - move in secrets all hardcoded passwords
 - persistent longhorn ui 
+- github trunkates the README on main page so a new solution is needed for the full guide

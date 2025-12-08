@@ -1,23 +1,69 @@
+# =============================================================================
+# Cert-Manager - TLS Certificate Automation
+# =============================================================================
+# Handles automatic provisioning and renewal of TLS certificates.
+# Currently configured for self-signed certificates (internal use).
+#
+# For Let's Encrypt (production):
+#   1. Configure DNS provider credentials
+#   2. Create ClusterIssuer with ACME solver
+#   3. Update Gateway TLS configuration
+#
+# Usage with Gateway API:
+#   Reference Certificate in Gateway listener's certificateRefs
+# =============================================================================
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: cert-manager
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer/resources-finalizer
 spec:
   project: default
   source:
     repoURL: https://charts.jetstack.io
     chart: cert-manager
-    targetRevision: v1.16.0
+    targetRevision: v1.19.1
     helm:
       parameters:
         - name: installCRDs
           value: "true"
+      values: |
+        # Resource limits for RPi
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        
+        webhook:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+        
+        cainjector:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+  
   destination:
     server: https://kubernetes.default.svc
     namespace: cert-manager
+  
   syncPolicy:
     automated:
       prune: true

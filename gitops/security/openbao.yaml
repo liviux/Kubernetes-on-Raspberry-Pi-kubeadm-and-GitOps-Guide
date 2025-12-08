@@ -4,7 +4,7 @@ metadata:
   name: openbao
   namespace: argocd
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   source:

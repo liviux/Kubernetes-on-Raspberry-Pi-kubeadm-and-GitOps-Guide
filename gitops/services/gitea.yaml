@@ -29,7 +29,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-options: ServerSideApply=true
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
 spec:
   project: default
   # Ignore volumeClaimTemplates differences (apiVersion/kind fields are auto-added by K8s)
