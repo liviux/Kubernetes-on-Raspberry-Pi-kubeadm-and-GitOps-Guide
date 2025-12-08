@@ -13749,7 +13749,7 @@ declare -A DEFAULT_REPLICAS=(
     ["observability/statefulset/loki"]="1"
     ["harbor/statefulset/harbor-registry"]="1"
     ["harbor/statefulset/harbor-database"]="1"
-    # Added Grafana here to ensure it wakes up if it was scaled down to fix locks
+    # Added Grafana here so Step 5 scales it back up after we reset it
     ["monitoring/deployment/observability-stack-grafana"]="1"
 )
 
@@ -13988,7 +13988,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# STEP 4: Check critical system pods
+# STEP 4: Check critical system pods & Longhorn Status
 # -----------------------------------------------------------------------------
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
@@ -14027,42 +14027,41 @@ if kubectl get namespace longhorn-system &> /dev/null; then
     log_verbose "longhorn-system namespace exists, checking pods..."
     LH_PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
     if [ "$LH_PODS" -eq 0 ]; then
-        log_success "Longhorn storage is healthy"
+        log_success "Longhorn pods are running"
     else
         log_warning "Longhorn has $LH_PODS pods not running. Storage may be recovering."
         if [ "$VERBOSE" = true ]; then
             kubectl get pods -n longhorn-system --no-headers | grep -v "Running\|Completed" | head -5
         fi
     fi
+    
+    # NEW: Wait for HDD Node to be Schedulable
+    log_step "Waiting for Longhorn Node (rpi4-1) to be schedulable..."
+    while true; do
+        LH_READY=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null || echo "false")
+        if [ "$LH_READY" == "true" ]; then
+            log_success "Longhorn storage node is active and schedulable."
+            break
+        fi
+        log_verbose "Storage node not ready yet..."
+        echo "   Waiting for Longhorn storage node to initialize... (Retrying in 10s)"
+        sleep 10
+    done
 else
     log_verbose "longhorn-system namespace not found"
 fi
 
-log_step "Waiting for Longhorn Nodes to be schedulable..."
-# We loop until all Longhorn nodes report "allowScheduling: true" (or at least the HDD node)
-while true; do
-    # Check if rpi4-1 (our storage node) is ready in Longhorn
-    LH_READY=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null || echo "false")
-    
-    if [ "$LH_READY" == "true" ]; then
-        log_success "Longhorn storage node is active."
-        break
-    fi
-    
-    echo "   Waiting for Longhorn storage node to initialize... (Retrying in 10s)"
-    sleep 10
-done
+# -----------------------------------------------------------------------------
+# STEP 4.5: FIX STUCK VOLUMES / ZOMBIE PODS
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 4.5: Cleaning up Stuck Volume Locks (Zombie Pods)              │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
 
-log_step "Waiting an extra 90s for volume metadata sync..."
-sleep 90
+log_step "Scanning for pods stuck in Terminating/Unknown/NodeLost states..."
 
-# =============================================================================
-# NEW ADDITION: ZOMBIE POD CLEANUP
-# =============================================================================
-log_step "Checking for stuck volume locks (Terminating/Unknown pods)..."
-
-# Delete pods stuck in Terminating or Unknown state that might hold volume locks
-# This fixes the Multi-Attach errors seen in Grafana
+# Find stuck pods (Terminating or Unknown)
 STUCK_PODS=$(kubectl get pods -A --no-headers | grep -E 'Terminating|Unknown|NodeLost' | awk '{print $1 " " $2}')
 
 if [ -n "$STUCK_PODS" ]; then
@@ -14074,14 +14073,22 @@ if [ -n "$STUCK_PODS" ]; then
     done
     log_success "Stuck pods cleared."
     
-    # Wait a moment for volume attachments to clear after pod deletion
-    log_step "Waiting 15s for locks to release..."
-    sleep 15
+    log_step "Waiting 30s for locks to release..."
+    sleep 30
 else
     log_verbose "No stuck pods found."
     log_success "No zombie pods detected"
 fi
-# =============================================================================
+
+# Pre-cycle Grafana if not skipping restore
+# This clears the Multi-Attach error specifically for Grafana
+if [ "$SKIP_RESTORE" = false ]; then
+    log_step "Pre-cycling Grafana to clear potential volume locks..."
+    kubectl scale deployment observability-stack-grafana -n monitoring --replicas=0 2>/dev/null || true
+    log_verbose "Waiting 15s for detach..."
+    sleep 15
+    # (It gets scaled back up in Step 5 via DEFAULT_REPLICAS)
+fi
 
 # -----------------------------------------------------------------------------
 # STEP 5: Restore workloads (optional)
