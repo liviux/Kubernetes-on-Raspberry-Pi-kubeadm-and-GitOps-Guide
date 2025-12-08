@@ -13226,6 +13226,9 @@ bash scripts/shutdown-cluster.sh --skip-shutdown
 
 # Preview what would happen
 bash scripts/shutdown-cluster.sh --dry-run
+
+# Enable verbose output for debugging
+bash scripts/shutdown-cluster.sh --verbose
 ```
 
 **What it does:**
@@ -13277,6 +13280,9 @@ bash scripts/startup-cluster.sh --skip-restore
 
 # Custom timeout (default 300s)
 bash scripts/startup-cluster.sh --timeout 600
+
+# Enable verbose output for debugging
+bash scripts/startup-cluster.sh --verbose
 ```
 
 **What it does:**
@@ -13305,6 +13311,7 @@ bash scripts/startup-cluster.sh --timeout 600
 #   --skip-scale-down  Skip scaling down stateful workloads (faster but riskier)
 #   --skip-shutdown    Only prepare cluster, don't SSH shutdown nodes
 #   --dry-run          Show what would happen without executing
+#   --verbose          Enable verbose output for debugging
 #
 # Prerequisites:
 #   - kubectl configured with cluster access
@@ -13345,6 +13352,7 @@ WORKER_SHUTDOWN_DELAY=5
 SKIP_SCALE_DOWN=false
 SKIP_SHUTDOWN=false
 DRY_RUN=false
+VERBOSE=false
 
 for arg in "$@"; do
     case $arg in
@@ -13360,13 +13368,18 @@ for arg in "$@"; do
             DRY_RUN=true
             shift
             ;;
+        --verbose|-v)
+            VERBOSE=true
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--skip-scale-down] [--skip-shutdown] [--dry-run]"
+            echo "Usage: $0 [--skip-scale-down] [--skip-shutdown] [--dry-run] [--verbose]"
             echo ""
             echo "Options:"
             echo "  --skip-scale-down  Skip scaling down stateful workloads"
             echo "  --skip-shutdown    Only prepare cluster, don't shutdown nodes"
             echo "  --dry-run          Show what would happen without executing"
+            echo "  --verbose, -v      Enable verbose output for debugging"
             exit 0
             ;;
         *)
@@ -13383,17 +13396,25 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 log_step() { echo -e "${BLUE}▶${NC} $1"; }
 log_success() { echo -e "${GREEN}✅${NC} $1"; }
 log_warning() { echo -e "${YELLOW}⚠️${NC} $1"; }
 log_error() { echo -e "${RED}❌${NC} $1"; }
+log_verbose() { 
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${CYAN}  [VERBOSE]${NC} $1"
+    fi
+}
 
 run_cmd() {
     if [ "$DRY_RUN" = true ]; then
         echo -e "${YELLOW}[DRY-RUN]${NC} $*"
+        return 0
     else
+        log_verbose "Executing: $*"
         eval "$@"
     fi
 }
@@ -13401,15 +13422,20 @@ run_cmd() {
 check_prerequisites() {
     log_step "Checking prerequisites..."
     
+    log_verbose "Checking for kubectl..."
     if ! command -v kubectl &> /dev/null; then
         log_error "kubectl not found. Please install kubectl first."
         exit 1
     fi
+    log_verbose "kubectl found: $(command -v kubectl)"
     
+    log_verbose "Testing cluster connectivity..."
     if ! kubectl cluster-info &> /dev/null; then
         log_error "Cannot connect to Kubernetes cluster. Check your kubeconfig."
+        log_verbose "KUBECONFIG=${KUBECONFIG:-~/.kube/config}"
         exit 1
     fi
+    log_verbose "Cluster connection successful"
     
     log_success "Prerequisites check passed"
 }
@@ -13440,8 +13466,23 @@ echo "│ STEP 1: Cordoning all nodes                                         �
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
 log_step "Cordoning all nodes to prevent new pod scheduling..."
-run_cmd "kubectl cordon -l kubernetes.io/os=linux --dry-run=client -o name 2>/dev/null | xargs -r kubectl cordon 2>/dev/null || kubectl cordon --all"
-log_success "All nodes cordoned"
+
+# Get all node names and cordon each one individually
+NODES=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}')
+log_verbose "Found nodes: $NODES"
+
+CORDON_COUNT=0
+for node in $NODES; do
+    log_verbose "Cordoning node: $node"
+    if run_cmd "kubectl cordon '$node'"; then
+        log_success "Cordoned: $node"
+        CORDON_COUNT=$((CORDON_COUNT + 1))
+    else
+        log_warning "Failed to cordon: $node (may already be cordoned)"
+    fi
+done
+
+log_success "Cordoned $CORDON_COUNT nodes"
 
 # -----------------------------------------------------------------------------
 # STEP 2: Scale down stateful workloads (optional but recommended)
@@ -13452,24 +13493,34 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
     echo "│ STEP 2: Scaling down stateful workloads                             │"
     echo "└─────────────────────────────────────────────────────────────────────┘"
 
+    SCALED_COUNT=0
     for ns in "${STATEFUL_NAMESPACES[@]}"; do
+        log_verbose "Checking namespace: $ns"
         if kubectl get namespace "$ns" &> /dev/null; then
             log_step "Scaling down workloads in namespace: $ns"
             
             # Scale deployments
             DEPLOYMENTS=$(kubectl get deployments -n "$ns" -o name 2>/dev/null || true)
             if [ -n "$DEPLOYMENTS" ]; then
+                DEP_COUNT=$(echo "$DEPLOYMENTS" | wc -l)
+                log_verbose "Found $DEP_COUNT deployments in $ns"
                 run_cmd "kubectl scale deployment -n $ns --replicas=0 --all 2>/dev/null || true"
+                SCALED_COUNT=$((SCALED_COUNT + DEP_COUNT))
             fi
             
             # Scale statefulsets
             STATEFULSETS=$(kubectl get statefulsets -n "$ns" -o name 2>/dev/null || true)
             if [ -n "$STATEFULSETS" ]; then
+                STS_COUNT=$(echo "$STATEFULSETS" | wc -l)
+                log_verbose "Found $STS_COUNT statefulsets in $ns"
                 run_cmd "kubectl scale statefulset -n $ns --replicas=0 --all 2>/dev/null || true"
+                SCALED_COUNT=$((SCALED_COUNT + STS_COUNT))
             fi
+        else
+            log_verbose "Namespace $ns does not exist, skipping"
         fi
     done
-    log_success "Stateful workloads scaled down"
+    log_success "Scaled down $SCALED_COUNT workloads"
 
     # Wait for volumes to detach
     echo ""
@@ -13491,20 +13542,25 @@ echo "│ STEP 3: Checking for stuck resources                                �
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
 log_step "Checking for pods in Terminating state..."
-TERMINATING=$(kubectl get pods -A --field-selector=status.phase=Running -o json 2>/dev/null | grep -c '"phase": "Terminating"' || echo "0")
-if [ "$TERMINATING" -gt 0 ]; then
-    log_warning "$TERMINATING pods still terminating. Consider waiting or using --skip-scale-down next time."
+log_verbose "Running: kubectl get pods -A | grep Terminating"
+TERMINATING_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -i "Terminating" || true)
+TERMINATING_COUNT=$(echo "$TERMINATING_PODS" | grep -c "Terminating" 2>/dev/null || echo "0")
+if [ "$TERMINATING_COUNT" -gt 0 ]; then
+    log_warning "$TERMINATING_COUNT pods still terminating"
 else
     log_success "No terminating pods detected"
 fi
 
 log_step "Checking Longhorn volume status..."
-if kubectl get volumes.longhorn.io -n longhorn-system &> /dev/null; then
-    ATTACHED=$(kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{.items[*].status.state}' 2>/dev/null | tr ' ' '\n' | grep -c "attached" || echo "0")
-    if [ "$ATTACHED" -gt 0 ]; then
-        log_warning "$ATTACHED Longhorn volumes still attached. This is normal if workloads are running."
-    else
-        log_success "All Longhorn volumes detached"
+if kubectl get crd volumes.longhorn.io &> /dev/null; then
+    log_verbose "Longhorn CRD found, checking volumes..."
+    if kubectl get namespace longhorn-system &> /dev/null; then
+        ATTACHED=$(kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{.items[*].status.state}' 2>/dev/null | tr ' ' '\n' | grep -c "attached" || echo "0")
+        if [ "$ATTACHED" -gt 0 ]; then
+            log_warning "$ATTACHED Longhorn volumes still attached"
+        else
+            log_success "All Longhorn volumes detached"
+        fi
     fi
 fi
 
@@ -13517,11 +13573,18 @@ if [ "$SKIP_SHUTDOWN" = false ]; then
     echo "│ STEP 4: Shutting down nodes (workers first, then control plane)    │"
     echo "└─────────────────────────────────────────────────────────────────────┘"
 
+    log_verbose "SSH user: $SSH_USER"
+    log_verbose "Workers shutdown order: ${WORKERS[*]}"
+
     # Shutdown workers first (in reverse order)
     for worker in "${WORKERS[@]}"; do
         log_step "Shutting down worker: $worker"
-        run_cmd "ssh ${SSH_USER}@${worker} 'sudo shutdown -h now' 2>/dev/null || true"
-        log_success "$worker shutdown signal sent"
+        log_verbose "Running: ssh ${SSH_USER}@${worker} 'sudo shutdown -h now'"
+        if run_cmd "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${SSH_USER}@${worker} 'sudo shutdown -h now' 2>&1"; then
+            log_success "$worker shutdown signal sent"
+        else
+            log_warning "$worker shutdown command returned error"
+        fi
         
         if [ "$DRY_RUN" = false ]; then
             sleep "$WORKER_SHUTDOWN_DELAY"
@@ -13536,7 +13599,7 @@ if [ "$SKIP_SHUTDOWN" = false ]; then
 
     # Shutdown control plane last
     log_step "Shutting down control plane: $CONTROL_PLANE"
-    run_cmd "ssh ${SSH_USER}@${CONTROL_PLANE} 'sudo shutdown -h now' 2>/dev/null || true"
+    run_cmd "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${SSH_USER}@${CONTROL_PLANE} 'sudo shutdown -h now' 2>&1" || true
     log_success "$CONTROL_PLANE shutdown signal sent"
 else
     log_warning "Skipping node shutdown (--skip-shutdown specified)"
@@ -13595,6 +13658,7 @@ echo ""
 #   --wait-only     Only wait for nodes, don't uncordon or restore
 #   --skip-restore  Uncordon nodes but don't scale up workloads
 #   --timeout <s>   Max seconds to wait for nodes (default: 300)
+#   --verbose, -v   Enable verbose output for debugging
 #
 # Prerequisites:
 #   - All nodes physically powered on
@@ -13639,9 +13703,10 @@ declare -A DEFAULT_REPLICAS=(
 # =============================================================================
 WAIT_ONLY=false
 SKIP_RESTORE=false
+VERBOSE=false
 
-for arg in "$@"; do
-    case $arg in
+while [[ $# -gt 0 ]]; do
+    case $1 in
         --wait-only)
             WAIT_ONLY=true
             shift
@@ -13654,17 +13719,23 @@ for arg in "$@"; do
             MAX_WAIT="$2"
             shift 2
             ;;
+        --verbose|-v)
+            VERBOSE=true
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--wait-only] [--skip-restore] [--timeout <seconds>]"
+            echo "Usage: $0 [--wait-only] [--skip-restore] [--timeout <seconds>] [--verbose]"
             echo ""
             echo "Options:"
             echo "  --wait-only     Only wait for nodes to be ready"
             echo "  --skip-restore  Don't scale up workloads after uncordoning"
             echo "  --timeout <s>   Max seconds to wait (default: 300)"
+            echo "  --verbose, -v   Enable verbose output for debugging"
             exit 0
             ;;
         *)
             # Skip unknown args
+            shift
             ;;
     esac
 done
@@ -13684,12 +13755,18 @@ log_success() { echo -e "${GREEN}✅${NC} $1"; }
 log_warning() { echo -e "${YELLOW}⚠️${NC} $1"; }
 log_error() { echo -e "${RED}❌${NC} $1"; }
 log_info() { echo -e "${CYAN}ℹ️${NC} $1"; }
+log_verbose() { 
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${CYAN}  [VERBOSE]${NC} $1"
+    fi
+}
 
 wait_for_api() {
     local elapsed=0
     local interval=5
     
     log_step "Waiting for Kubernetes API server..."
+    log_verbose "Timeout set to ${MAX_WAIT}s"
     
     while ! kubectl cluster-info &> /dev/null; do
         if [ $elapsed -ge $MAX_WAIT ]; then
@@ -13709,6 +13786,7 @@ wait_for_api() {
     done
     
     echo ""
+    log_verbose "API server responded successfully"
     log_success "API server is responding"
 }
 
@@ -13718,6 +13796,7 @@ wait_for_nodes() {
     local ready_nodes=0
     
     log_step "Waiting for all $EXPECTED_NODES nodes to be Ready..."
+    log_verbose "Checking node readiness every ${interval}s"
     
     while [ $ready_nodes -lt $EXPECTED_NODES ]; do
         if [ $elapsed -ge $MAX_WAIT ]; then
@@ -13733,6 +13812,7 @@ wait_for_nodes() {
         fi
         
         ready_nodes=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready" || echo "0")
+        log_verbose "Ready nodes: $ready_nodes / $EXPECTED_NODES"
         printf "\r  Ready nodes: %d / %d (waiting %ds / %ds)" $ready_nodes $EXPECTED_NODES $elapsed $MAX_WAIT
         
         if [ $ready_nodes -lt $EXPECTED_NODES ]; then
@@ -13752,12 +13832,17 @@ check_critical_pods() {
     local all_healthy=true
     
     for ns in "${critical_namespaces[@]}"; do
+        log_verbose "Checking namespace: $ns"
         if kubectl get namespace "$ns" &> /dev/null; then
             NOT_RUNNING=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
             if [ "$NOT_RUNNING" -gt 0 ]; then
                 log_warning "Namespace $ns has $NOT_RUNNING pods not running"
                 all_healthy=false
+            else
+                log_verbose "All pods in $ns are Running/Completed"
             fi
+        else
+            log_verbose "Namespace $ns does not exist"
         fi
     done
     
@@ -13815,16 +13900,32 @@ echo "│ STEP 3: Uncordoning nodes                                           �
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
 log_step "Uncordoning all nodes to allow scheduling..."
+log_verbose "Checking for cordoned nodes..."
 
-CORDONED_NODES=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{"\n"}{end}' | grep true | awk '{print $1}' || true)
+# Get all nodes and check which are cordoned
+UNCORDON_COUNT=0
+ALL_NODES=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}')
+log_verbose "Found nodes: $ALL_NODES"
 
-if [ -n "$CORDONED_NODES" ]; then
-    for node in $CORDONED_NODES; do
-        kubectl uncordon "$node"
-        log_success "Uncordoned: $node"
-    done
+for node in $ALL_NODES; do
+    IS_UNSCHEDULABLE=$(kubectl get node "$node" -o jsonpath='{.spec.unschedulable}' 2>/dev/null || echo "false")
+    log_verbose "Node $node unschedulable: $IS_UNSCHEDULABLE"
+    
+    if [ "$IS_UNSCHEDULABLE" = "true" ]; then
+        log_verbose "Uncordoning node: $node"
+        if kubectl uncordon "$node"; then
+            log_success "Uncordoned: $node"
+            UNCORDON_COUNT=$((UNCORDON_COUNT + 1))
+        else
+            log_warning "Failed to uncordon: $node"
+        fi
+    fi
+done
+
+if [ $UNCORDON_COUNT -eq 0 ]; then
+    log_info "No cordoned nodes found - all nodes already schedulable"
 else
-    log_info "No cordoned nodes found"
+    log_success "Uncordoned $UNCORDON_COUNT nodes"
 fi
 
 # -----------------------------------------------------------------------------
@@ -13837,29 +13938,42 @@ echo "└───────────────────────�
 
 # Wait a bit for pods to stabilize
 log_step "Waiting 15s for pods to stabilize..."
+log_verbose "Sleeping 15 seconds..."
 sleep 15
 
 check_critical_pods
 
 # Check Cilium status
+log_step "Checking Cilium CNI status..."
 if command -v cilium &> /dev/null; then
-    log_step "Checking Cilium CNI status..."
-    if cilium status --wait &> /dev/null; then
+    log_verbose "Cilium CLI found, running status check..."
+    if cilium status --wait 2>&1 | tee /dev/null; then
         log_success "Cilium CNI is healthy"
     else
         log_warning "Cilium status check failed. Run 'cilium status' for details."
     fi
+else
+    log_verbose "Cilium CLI not installed, checking pods instead..."
+    CILIUM_PODS=$(kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -v "Running" | wc -l || echo "0")
+    if [ "$CILIUM_PODS" -eq 0 ]; then
+        log_success "Cilium pods are running"
+    else
+        log_warning "Some Cilium pods are not running"
+    fi
 fi
 
 # Check Longhorn
+log_step "Checking Longhorn storage..."
 if kubectl get namespace longhorn-system &> /dev/null; then
-    log_step "Checking Longhorn storage..."
+    log_verbose "longhorn-system namespace exists, checking pods..."
     LH_PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
     if [ "$LH_PODS" -eq 0 ]; then
         log_success "Longhorn storage is healthy"
     else
         log_warning "Longhorn has $LH_PODS pods not running. Storage may be recovering."
     fi
+else
+    log_verbose "longhorn-system namespace not found"
 fi
 
 # -----------------------------------------------------------------------------
@@ -13875,35 +13989,64 @@ if [ "$SKIP_RESTORE" = false ]; then
     log_info "Manually scaled workloads may need attention."
     
     # Check if ArgoCD is running
+    log_verbose "Checking ArgoCD status..."
     if kubectl get deployment -n argocd argocd-server &> /dev/null; then
         ARGOCD_READY=$(kubectl get deployment -n argocd argocd-server -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        log_verbose "ArgoCD server ready replicas: $ARGOCD_READY"
         if [ "$ARGOCD_READY" -gt 0 ]; then
             log_success "ArgoCD is running - GitOps reconciliation will restore workloads"
             
             # Optionally trigger a sync
             if command -v argocd &> /dev/null; then
                 log_step "Triggering ArgoCD sync for all applications..."
-                argocd app list -o name 2>/dev/null | xargs -r -I {} argocd app sync {} --async 2>/dev/null || true
-                log_info "ArgoCD sync initiated (running in background)"
+                log_verbose "Running: argocd app list -o name | xargs argocd app sync --async"
+                APPS=$(argocd app list -o name 2>/dev/null || true)
+                if [ -n "$APPS" ]; then
+                    echo "$APPS" | xargs -r -I {} argocd app sync {} --async 2>/dev/null || true
+                    log_info "ArgoCD sync initiated (running in background)"
+                else
+                    log_verbose "No ArgoCD applications found or not logged in"
+                fi
+            else
+                log_verbose "ArgoCD CLI not installed, skipping sync trigger"
             fi
         else
             log_warning "ArgoCD server not ready yet. Workloads will sync once it's up."
         fi
+    else
+        log_verbose "ArgoCD deployment not found"
     fi
     
     # Restore known stateful workloads that might have been scaled to 0
+    log_step "Checking for workloads scaled to 0..."
+    RESTORED_COUNT=0
     for key in "${!DEFAULT_REPLICAS[@]}"; do
         IFS='/' read -r ns type name <<< "$key"
         replicas="${DEFAULT_REPLICAS[$key]}"
         
+        log_verbose "Checking $type/$name in $ns..."
         if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
             CURRENT=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+            log_verbose "Current replicas: $CURRENT, desired: $replicas"
             if [ "$CURRENT" -eq 0 ]; then
                 log_step "Scaling up $type/$name in $ns to $replicas replicas"
-                kubectl scale "$type" "$name" -n "$ns" --replicas="$replicas" 2>/dev/null || true
+                if kubectl scale "$type" "$name" -n "$ns" --replicas="$replicas" 2>/dev/null; then
+                    log_success "Scaled: $type/$name"
+                    RESTORED_COUNT=$((RESTORED_COUNT + 1))
+                else
+                    log_warning "Failed to scale: $type/$name"
+                fi
             fi
+        else
+            log_verbose "$type/$name not found in $ns"
         fi
     done
+    
+    if [ $RESTORED_COUNT -gt 0 ]; then
+        log_success "Restored $RESTORED_COUNT workloads"
+    else
+        log_info "No workloads needed manual restoration"
+    fi
 else
     log_info "Skipping workload restore (--skip-restore specified)"
 fi
@@ -13920,11 +14063,11 @@ log_step "Running cluster health summary..."
 
 echo ""
 echo "Node Status:"
-kubectl get nodes
+kubectl get nodes -o wide
 
 echo ""
-echo "System Pods:"
-kubectl get pods -n kube-system --no-headers | head -10
+echo "System Pods (kube-system):"
+kubectl get pods -n kube-system --no-headers 2>/dev/null | head -10
 
 echo ""
 echo "Problem Pods (if any):"
@@ -13935,6 +14078,14 @@ if [ -n "$PROBLEM_PODS" ]; then
     log_warning "Some pods are not running. They may still be starting up."
 else
     log_success "No problem pods detected"
+fi
+
+# Show resource usage if metrics-server is available
+log_verbose "Checking for metrics-server..."
+if kubectl top nodes &> /dev/null; then
+    echo ""
+    echo "Resource Usage:"
+    kubectl top nodes
 fi
 
 # -----------------------------------------------------------------------------
@@ -14170,3 +14321,4 @@ TODO list - for next time I re-create the cluster:
 - move in secrets all hardcoded passwords
 - persistent longhorn ui 
 - github trunkates the README on main page so a new solution is needed for the full guide
+- a comprehesiv test after each tool/phase that will test multiple things for each tool and how tools interact with each other
