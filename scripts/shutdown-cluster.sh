@@ -5,13 +5,13 @@
 # This script prepares the Kubernetes cluster for a clean shutdown.
 # It handles volume detachment, workload draining, and ordered node shutdown.
 #
-# Usage: bash scripts/shutdown-cluster.sh [--skip-scale-down] [--skip-shutdown]
+# Usage: bash scripts/shutdown-cluster.sh [OPTIONS]
 #
 # Options:
 #   --skip-scale-down  Skip scaling down stateful workloads (faster but riskier)
 #   --skip-shutdown    Only prepare cluster, don't SSH shutdown nodes
 #   --dry-run          Show what would happen without executing
-#   --verbose          Enable verbose output for debugging
+#   --verbose, -v      Enable verbose output for debugging
 #
 # Prerequisites:
 #   - kubectl configured with cluster access

@@ -5,13 +5,13 @@
 # This script validates cluster health after powering on and restores workloads.
 # Run this after physically powering on all Raspberry Pi nodes.
 #
-# Usage: bash scripts/startup-cluster.sh [--wait-only] [--skip-restore]
+# Usage: bash scripts/startup-cluster.sh [OPTIONS]
 #
 # Options:
-#   --wait-only     Only wait for nodes, don't uncordon or restore
-#   --skip-restore  Uncordon nodes but don't scale up workloads
-#   --timeout <s>   Max seconds to wait for nodes (default: 300)
-#   --verbose, -v   Enable verbose output for debugging
+#   --wait-only       Only wait for nodes, don't uncordon or restore
+#   --skip-restore    Uncordon nodes but don't scale up workloads
+#   --timeout <s>     Max seconds to wait for nodes (default: 300)
+#   --verbose, -v     Enable verbose output for debugging
 #
 # Prerequisites:
 #   - All nodes physically powered on
