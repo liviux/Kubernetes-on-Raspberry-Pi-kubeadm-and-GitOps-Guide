@@ -14051,8 +14051,8 @@ while true; do
     sleep 10
 done
 
-log_step "Waiting an extra 60s for volume metadata sync..."
-sleep 60
+log_step "Waiting an extra 90s for volume metadata sync..."
+sleep 90
 
 # -----------------------------------------------------------------------------
 # STEP 5: Restore workloads (optional)
