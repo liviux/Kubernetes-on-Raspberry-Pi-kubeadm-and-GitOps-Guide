@@ -14444,3 +14444,4 @@ TODO list - for next time I re-create the cluster:
 - persistent longhorn ui 
 - github trunkates the README on main page so a new solution is needed for the full guide
 - a comprehesiv test after each tool/phase that will test multiple things for each tool and how tools interact with each other
+- remove skafold
