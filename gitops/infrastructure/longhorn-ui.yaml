@@ -1,0 +1,42 @@
+# =============================================================================
+# Longhorn UI HTTPRoute - ArgoCD Application
+# =============================================================================
+# Exposes Longhorn UI via Gateway API for persistent browser access.
+# Separate from the main Longhorn Application because HTTPRoute is not
+# part of the Longhorn Helm chart.
+#
+# Access URL: http://longhorn.192.168.68.210.nip.io
+#
+# SECURITY NOTE: 
+# Longhorn UI has NO built-in authentication. Anyone with network access
+# can view and manage storage. Consider:
+#   - Restricting access to internal network only
+#   - Adding Traefik BasicAuth middleware
+#   - Using a VPN for remote access
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn-ui
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/resources-finalizer
+spec:
+  project: default
+  source:
+    # Points to the raw manifests directory in your Git repo
+    repoURL: http://gitea.192.168.68.210.nip.io/liviu/home-cluster.git
+    targetRevision: main
+    path: gitops/infrastructure/longhorn-ui-manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

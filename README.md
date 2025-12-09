@@ -894,7 +894,9 @@ This structure follows the **separation of concerns** principle:
 │   │   │                                #          LoadBalancer IP, Gateway API
 │   │   ├── longhorn.yaml                # Storage: Longhorn distributed storage
 │   │   │                                #          Single replica, HDD-only affinity
-│   │   │                                #          Includes HTTPRoute for UI access
+│   │   ├── longhorn-ui.yaml             # ArgoCD App for Longhorn UI HTTPRoute
+│   │   ├── longhorn-ui-manifests/       # Raw manifests for Longhorn UI
+│   │   │   └── httproute.yaml           #   HTTPRoute for browser access
 │   │   └── cert-manager.yaml            # TLS: Let's Encrypt automation, ClusterIssuers
 │   │
 │   ├── storage/                         # ──────────────────────────────────────
@@ -3897,7 +3899,16 @@ Longhorn UI is exposed via Gateway API for persistent browser access (no port-fo
 | **HTTPRoute (persistent)** | http://longhorn.192.168.68.210.nip.io | Normal access from any device on network |
 | **Port-forward (fallback)** | `kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80` | If Gateway/Traefik is down |
 
-The HTTPRoute is included in `gitops/infrastructure/longhorn.yaml` and applied automatically by ArgoCD.
+The HTTPRoute is managed by a separate ArgoCD Application:
+
+* **ArgoCD App:** `gitops/infrastructure/longhorn-ui.yaml`
+* **HTTPRoute manifest:** `gitops/infrastructure/longhorn-ui-manifests/httproute.yaml`
+
+To apply manually (if not using root-app pattern):
+
+```bash
+kubectl apply -f gitops/infrastructure/longhorn-ui-manifests/httproute.yaml
+```
 
 > ⚠️ **Security Note:** Longhorn UI has no built-in authentication. Access is open to anyone on your network. Consider restricting network access or adding Traefik BasicAuth middleware for production use.
 
