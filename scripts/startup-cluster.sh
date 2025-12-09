@@ -318,91 +318,244 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# STEP 4: Check critical system pods & Longhorn Status
+# STEP 3.5: Immediate cleanup of zombie/Unknown pods
 # -----------------------------------------------------------------------------
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ STEP 4: Verifying critical system components                        │"
+echo "│ STEP 3.5: Immediate cleanup of zombie pods                          │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
-# Wait a bit for pods to stabilize
-log_step "Waiting 15s for pods to stabilize..."
-log_verbose "Sleeping 15 seconds..."
-sleep 15
+log_step "Force deleting all pods in Unknown/Terminating/NodeLost state..."
 
-check_critical_pods
+# Delete ALL pods in Unknown state across all namespaces - these are zombies from node outage
+ZOMBIE_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | awk '$4 == "Unknown" || $4 ~ /Terminating/ || $4 ~ /NodeLost/ {print $1, $2}' || true)
 
-# Check Cilium status
-log_step "Checking Cilium CNI status..."
-if command -v cilium &> /dev/null; then
-    log_verbose "Cilium CLI found, running status check..."
-    if cilium status --wait 2>&1 | tee /dev/null; then
-        log_success "Cilium CNI is healthy"
-    else
-        log_warning "Cilium status check failed. Run 'cilium status' for details."
-    fi
+if [ -n "$ZOMBIE_PODS" ]; then
+    ZOMBIE_COUNT=$(echo "$ZOMBIE_PODS" | wc -l | tr -d '[:space:]')
+    log_warning "Found $ZOMBIE_COUNT zombie pods. Force deleting..."
+    echo "$ZOMBIE_PODS" | while read -r ns pod; do
+        if [ -n "$ns" ] && [ -n "$pod" ]; then
+            log_verbose "Force deleting zombie: $pod in $ns"
+            kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+        fi
+    done
+    log_success "Zombie pods deleted"
+    
+    log_step "Waiting 10s for Kubernetes to process deletions..."
+    sleep 10
 else
-    log_verbose "Cilium CLI not installed, checking pods instead..."
-    CILIUM_PODS=$(kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -v "Running" | wc -l | tr -d '[:space:]')
-    CILIUM_PODS=${CILIUM_PODS:-0}
-    if [ "$CILIUM_PODS" -eq 0 ] 2>/dev/null; then
-        log_success "Cilium pods are running"
-    else
-        log_warning "Some Cilium pods are not running"
-    fi
+    log_success "No zombie pods found"
 fi
 
-# Check Longhorn - wait for all pods to be running first
-log_step "Checking Longhorn storage..."
-if kubectl get namespace longhorn-system &> /dev/null; then
-    log_verbose "longhorn-system namespace exists, waiting for pods..."
-    
-    # Wait for Longhorn pods to be ready (with timeout)
-    LH_WAIT=0
-    LH_TIMEOUT=180  # 3 minutes for Longhorn pods
-    while [ $LH_WAIT -lt $LH_TIMEOUT ]; do
-        LH_PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l | tr -d '[:space:]')
-        LH_PODS=${LH_PODS:-0}
-        if [ "$LH_PODS" -eq 0 ] 2>/dev/null; then
-            log_success "All Longhorn pods are running"
+# -----------------------------------------------------------------------------
+# STEP 4: Wait for Infrastructure Components (in order)
+# -----------------------------------------------------------------------------
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────────┐"
+echo "│ STEP 4: Waiting for infrastructure (Cilium → Longhorn → ArgoCD)     │"
+echo "└─────────────────────────────────────────────────────────────────────┘"
+
+log_info "Infrastructure must start in order: Cilium (CNI) → Longhorn (Storage) → ArgoCD (GitOps)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4a: Wait for Cilium CNI (required for pod networking)
+# ─────────────────────────────────────────────────────────────────────────────
+log_step "4a. Waiting for Cilium CNI (pod networking)..."
+
+set +e
+CILIUM_WAIT=0
+CILIUM_TIMEOUT=180  # 3 minutes for Cilium pods
+
+while [ $CILIUM_WAIT -lt $CILIUM_TIMEOUT ]; do
+    # Run kubectl with a strict system timeout (10s) to prevent hanging
+    timeout 10s kubectl get pods -n kube-system -l k8s-app=cilium --no-headers > /tmp/cilium_debug.out 2> /tmp/cilium_debug.err
+    CMD_EXIT=$?
+
+    if [ $CMD_EXIT -ne 0 ]; then
+        if [ $CMD_EXIT -eq 124 ]; then
+             echo -e "\n  [DEBUG] kubectl command timed out (hung). API Server might be slow."
+        fi
+        TOTAL_PODS=0
+    else
+        TOTAL_PODS=$(wc -l < /tmp/cilium_debug.out)
+    fi
+
+    if [ "$TOTAL_PODS" -eq 0 ]; then
+        printf "\r  Waiting for Cilium pods to appear... (%ds/%ds)   " "$CILIUM_WAIT" "$CILIUM_TIMEOUT"
+    else
+        NOT_RUNNING=$(grep -v "Running" /tmp/cilium_debug.out | wc -l)
+        
+        if [ "$NOT_RUNNING" -eq 0 ]; then
+            printf "\r\033[K"
+            log_success "Cilium CNI ready ($TOTAL_PODS pods running)"
             break
         fi
-        printf "\r  Waiting for Longhorn pods... (%s not ready, %ds / %ds)  " "$LH_PODS" "$LH_WAIT" "$LH_TIMEOUT"
+        
+        RUNNING=$((TOTAL_PODS - NOT_RUNNING))
+        printf "\r  Waiting for Cilium pods... (%d/%d ready, %ds/%ds)   " "$RUNNING" "$TOTAL_PODS" "$CILIUM_WAIT" "$CILIUM_TIMEOUT"
+    fi
+
+    sleep 5
+    CILIUM_WAIT=$((CILIUM_WAIT + 5))
+done
+echo ""
+
+if [ $CILIUM_WAIT -ge $CILIUM_TIMEOUT ]; then
+    log_warning "Cilium pods not ready after ${CILIUM_TIMEOUT}s - continuing anyway"
+    kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null || echo "Could not list pods"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4b: Wait for CoreDNS (required for service discovery)
+# ─────────────────────────────────────────────────────────────────────────────
+log_step "4b. Waiting for CoreDNS (service discovery)..."
+
+COREDNS_WAIT=0
+COREDNS_TIMEOUT=120  # 2 minutes for CoreDNS
+
+while [ $COREDNS_WAIT -lt $COREDNS_TIMEOUT ]; do
+    timeout 10s kubectl get pods -n kube-system -l k8s-app=kube-dns --no-headers > /tmp/coredns_debug.out 2>/dev/null
+    CMD_EXIT=$?
+
+    if [ $CMD_EXIT -eq 0 ]; then
+        TOTAL_PODS=$(wc -l < /tmp/coredns_debug.out)
+        NOT_RUNNING=$(grep -v "Running" /tmp/coredns_debug.out | wc -l)
+        
+        if [ "$TOTAL_PODS" -gt 0 ] && [ "$NOT_RUNNING" -eq 0 ]; then
+            printf "\r\033[K"
+            log_success "CoreDNS ready ($TOTAL_PODS pods running)"
+            break
+        fi
+        
+        RUNNING=$((TOTAL_PODS - NOT_RUNNING))
+        printf "\r  Waiting for CoreDNS pods... (%d/%d ready, %ds/%ds)   " "$RUNNING" "$TOTAL_PODS" "$COREDNS_WAIT" "$COREDNS_TIMEOUT"
+    else
+        printf "\r  Waiting for CoreDNS pods... (%ds/%ds)   " "$COREDNS_WAIT" "$COREDNS_TIMEOUT"
+    fi
+
+    sleep 5
+    COREDNS_WAIT=$((COREDNS_WAIT + 5))
+done
+echo ""
+
+if [ $COREDNS_WAIT -ge $COREDNS_TIMEOUT ]; then
+    log_warning "CoreDNS not ready after ${COREDNS_TIMEOUT}s - continuing anyway"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4c: Wait for Longhorn Storage (required for PVCs)
+# ─────────────────────────────────────────────────────────────────────────────
+log_step "4c. Waiting for Longhorn storage system..."
+
+if kubectl get namespace longhorn-system &> /dev/null; then
+    LH_WAIT=0
+    LH_TIMEOUT=240  # 4 minutes for Longhorn pods
+    
+    while [ $LH_WAIT -lt $LH_TIMEOUT ]; do
+        timeout 10s kubectl get pods -n longhorn-system --no-headers > /tmp/lh_debug.out 2>/dev/null
+        CMD_EXIT=$?
+
+        if [ $CMD_EXIT -eq 0 ]; then
+            TOTAL_PODS=$(wc -l < /tmp/lh_debug.out)
+            NOT_RUNNING=$(grep -v -E "Running|Completed" /tmp/lh_debug.out | wc -l)
+            
+            if [ "$TOTAL_PODS" -gt 0 ] && [ "$NOT_RUNNING" -eq 0 ]; then
+                printf "\r\033[K"
+                log_success "Longhorn storage ready ($TOTAL_PODS pods running)"
+                break
+            fi
+            
+            RUNNING=$((TOTAL_PODS - NOT_RUNNING))
+            printf "\r  Waiting for Longhorn pods... (%d/%d ready, %ds/%ds)   " "$RUNNING" "$TOTAL_PODS" "$LH_WAIT" "$LH_TIMEOUT"
+        else
+            printf "\r  Waiting for Longhorn pods... (%ds/%ds)   " "$LH_WAIT" "$LH_TIMEOUT"
+        fi
+
         sleep 10
         LH_WAIT=$((LH_WAIT + 10))
     done
     echo ""
     
-    if [ "$LH_PODS" != "0" ] && [ -n "$LH_PODS" ]; then
-        log_warning "Longhorn has $LH_PODS pods not running after ${LH_TIMEOUT}s. Continuing anyway..."
-        if [ "$VERBOSE" = true ]; then
-            kubectl get pods -n longhorn-system --no-headers | grep -v "Running\|Completed" | head -5
-        fi
+    if [ $LH_WAIT -ge $LH_TIMEOUT ]; then
+        log_warning "Longhorn not fully ready after ${LH_TIMEOUT}s - continuing anyway"
+        kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v -E "Running|Completed" | head -5 || true
     fi
     
-    # Wait for HDD Node to be Schedulable
-    log_step "Waiting for Longhorn Node (rpi4-1) to be schedulable..."
+    # Wait for storage node to be schedulable
+    log_step "    Waiting for storage node (rpi4-1) to be schedulable..."
     LH_NODE_WAIT=0
-    LH_NODE_TIMEOUT=120  # 2 minutes for node
+    LH_NODE_TIMEOUT=120
+    
     while [ $LH_NODE_WAIT -lt $LH_NODE_TIMEOUT ]; do
-        LH_READY=$(kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null || echo "false")
+        LH_READY=$(timeout 5s kubectl get nodes.longhorn.io rpi4-1 -n longhorn-system -o jsonpath='{.spec.allowScheduling}' 2>/dev/null || echo "false")
+        
         if [ "$LH_READY" == "true" ]; then
-            log_success "Longhorn storage node is active and schedulable."
+            log_success "    Storage node is schedulable"
             break
         fi
-        log_verbose "Storage node not ready yet..."
-        printf "\r  Waiting for storage node to initialize... (%ds / %ds)" $LH_NODE_WAIT $LH_NODE_TIMEOUT
+        
+        printf "\r      Waiting for storage node... (%ds/%ds)" $LH_NODE_WAIT $LH_NODE_TIMEOUT
         sleep 10
         LH_NODE_WAIT=$((LH_NODE_WAIT + 10))
     done
     echo ""
     
     if [ "$LH_READY" != "true" ]; then
-        log_warning "Longhorn storage node not schedulable after ${LH_NODE_TIMEOUT}s. Continuing..."
+        log_warning "    Storage node not schedulable after ${LH_NODE_TIMEOUT}s - continuing"
     fi
 else
-    log_verbose "longhorn-system namespace not found"
+    log_warning "Longhorn namespace not found - skipping storage wait"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4d: Wait for ArgoCD (required for GitOps workload management)
+# ─────────────────────────────────────────────────────────────────────────────
+log_step "4d. Waiting for ArgoCD (GitOps controller)..."
+
+if kubectl get namespace argocd &> /dev/null; then
+    ARGO_WAIT=0
+    ARGO_TIMEOUT=180  # 3 minutes for ArgoCD
+    
+    while [ $ARGO_WAIT -lt $ARGO_TIMEOUT ]; do
+        # Check if the core ArgoCD components are running
+        timeout 10s kubectl get pods -n argocd --no-headers > /tmp/argo_debug.out 2>/dev/null
+        CMD_EXIT=$?
+
+        if [ $CMD_EXIT -eq 0 ]; then
+            TOTAL_PODS=$(wc -l < /tmp/argo_debug.out)
+            NOT_RUNNING=$(grep -v -E "Running|Completed" /tmp/argo_debug.out | wc -l)
+            
+            # ArgoCD is "ready enough" when argocd-server is running
+            SERVER_READY=$(grep "argocd-server" /tmp/argo_debug.out | grep -c "Running" || echo "0")
+            
+            if [ "$SERVER_READY" -gt 0 ] && [ "$NOT_RUNNING" -le 2 ]; then
+                printf "\r\033[K"
+                log_success "ArgoCD ready (server running, $((TOTAL_PODS - NOT_RUNNING))/$TOTAL_PODS pods)"
+                break
+            fi
+            
+            RUNNING=$((TOTAL_PODS - NOT_RUNNING))
+            printf "\r  Waiting for ArgoCD pods... (%d/%d ready, %ds/%ds)   " "$RUNNING" "$TOTAL_PODS" "$ARGO_WAIT" "$ARGO_TIMEOUT"
+        else
+            printf "\r  Waiting for ArgoCD pods... (%ds/%ds)   " "$ARGO_WAIT" "$ARGO_TIMEOUT"
+        fi
+
+        sleep 10
+        ARGO_WAIT=$((ARGO_WAIT + 10))
+    done
+    echo ""
+    
+    if [ $ARGO_WAIT -ge $ARGO_TIMEOUT ]; then
+        log_warning "ArgoCD not fully ready after ${ARGO_TIMEOUT}s - continuing anyway"
+        kubectl get pods -n argocd --no-headers 2>/dev/null | grep -v -E "Running|Completed" | head -5 || true
+    fi
+else
+    log_warning "ArgoCD namespace not found - skipping"
+fi
+
+set -e
+log_success "Infrastructure components ready!"
+
 
 # -----------------------------------------------------------------------------
 # STEP 4.5: FIX STUCK VOLUMES / ZOMBIE PODS
@@ -412,45 +565,46 @@ echo "┌───────────────────────�
 echo "│ STEP 4.5: Cleaning up Stuck Volume Locks (Zombie Pods)              │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
-log_step "Scanning for pods stuck in Terminating/Unknown/NodeLost states..."
+log_step "Second pass: cleaning any remaining stuck pods..."
 
-# Find stuck pods (Terminating or Unknown) - handle empty results properly
-STUCK_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -E 'Terminating|Unknown|NodeLost' || true)
+# Find stuck pods (Terminating, Unknown, or any bad state) - handle empty results properly
+STUCK_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | awk '$4 == "Unknown" || $4 ~ /Terminating/ || $4 ~ /NodeLost/ || $4 ~ /Error/ || $4 ~ /ImagePullBackOff/ || $4 ~ /CrashLoopBackOff/ {print $1, $2}' || true)
 
 if [ -n "$STUCK_PODS" ]; then
-    log_warning "Found stuck pods holding potential volume locks. Force deleting..."
-    echo "$STUCK_PODS" | awk '{print $1 " " $2}' | while read -r ns pod; do
+    STUCK_COUNT=$(echo "$STUCK_PODS" | wc -l | tr -d '[:space:]')
+    log_warning "Found $STUCK_COUNT stuck/problematic pods. Force deleting..."
+    echo "$STUCK_PODS" | while read -r ns pod; do
         if [ -n "$ns" ] && [ -n "$pod" ]; then
             log_verbose "Force deleting $pod in $ns"
             kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
-            log_success "Deleted zombie pod: $pod"
         fi
     done
     log_success "Stuck pods cleared."
     
-    log_step "Waiting 20s for locks to release..."
-    sleep 20
+    log_step "Waiting 15s for Kubernetes to recreate pods..."
+    sleep 15
 else
-    log_success "No zombie pods detected"
+    log_success "No stuck pods detected"
 fi
 
-# Delete old pods from previous ReplicaSets that may be holding volume locks
-log_step "Cleaning up old pods holding volume locks..."
-for workload in "monitoring/observability-stack-grafana" "gitea/gitea" "argocd/argocd-repo-server"; do
-    IFS='/' read -r ns name <<< "$workload"
+# Clean up ALL non-running pods in critical namespaces (argocd, monitoring, gitea, storage)
+log_step "Cleaning up non-running pods in critical namespaces..."
+for ns in "argocd" "monitoring" "gitea" "storage" "observability"; do
     if kubectl get namespace "$ns" &> /dev/null; then
-        # Find pods that are not Running/Completed and delete them
-        OLD_PODS=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep "$name" | grep -v "Running\|Completed" | awk '{print $1}' || true)
-        if [ -n "$OLD_PODS" ]; then
-            echo "$OLD_PODS" | while read -r pod; do
+        # Find ALL pods that are not Running/Completed and delete them
+        BAD_PODS=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v "Running\|Completed" | awk '{print $1}' || true)
+        if [ -n "$BAD_PODS" ]; then
+            log_warning "Found non-running pods in $ns namespace, cleaning up..."
+            echo "$BAD_PODS" | while read -r pod; do
                 if [ -n "$pod" ]; then
-                    log_warning "Deleting non-running pod: $pod in $ns"
+                    log_verbose "Deleting non-running pod: $pod in $ns"
                     kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
                 fi
             done
         fi
     fi
 done
+log_success "Critical namespace cleanup complete"
 
 # Proactively clean up stale VolumeAttachments that reference old pods
 log_step "Checking for stale VolumeAttachments..."

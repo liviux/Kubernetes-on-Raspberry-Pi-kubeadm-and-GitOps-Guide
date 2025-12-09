@@ -112,11 +112,13 @@ log_step() { echo -e "${BLUE}▶${NC} $1"; }
 log_success() { echo -e "${GREEN}✅${NC} $1"; }
 log_warning() { echo -e "${YELLOW}⚠️${NC} $1"; }
 log_error() { echo -e "${RED}❌${NC} $1"; }
+log_info() { echo -e "${CYAN}ℹ️${NC} $1"; }
 log_verbose() { 
     if [ "$VERBOSE" = true ]; then
         echo -e "${CYAN}  [VERBOSE]${NC} $1"
     fi
 }
+
 
 run_cmd() {
     if [ "$DRY_RUN" = true ]; then
@@ -194,16 +196,41 @@ done
 log_success "Cordoned $CORDON_COUNT nodes"
 
 # -----------------------------------------------------------------------------
-# STEP 2: Scale down stateful workloads (optional but recommended)
+# STEP 2: Scale down in reverse dependency order
 # -----------------------------------------------------------------------------
 if [ "$SKIP_SCALE_DOWN" = false ]; then
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│ STEP 2: Scaling down stateful workloads                             │"
+    echo "│ STEP 2: Scaling down workloads (reverse dependency order)           │"
     echo "└─────────────────────────────────────────────────────────────────────┘"
 
-    # First, scale down critical workloads individually to ensure clean shutdown
-    log_step "Scaling down critical workloads first..."
+    log_info "Shutdown order: User workloads → ArgoCD → Longhorn consumers → MinIO"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2a: Pause ArgoCD sync to prevent reconciliation during shutdown
+    # ─────────────────────────────────────────────────────────────────────────
+    log_step "2a. Pausing ArgoCD auto-sync..."
+    if kubectl get namespace argocd &> /dev/null; then
+        # Pause all ArgoCD applications to prevent them from recreating scaled-down workloads
+        ARGOCD_APPS=$(kubectl get applications -n argocd -o name 2>/dev/null || true)
+        if [ -n "$ARGOCD_APPS" ]; then
+            for app in $ARGOCD_APPS; do
+                APP_NAME=$(echo "$app" | sed 's|application.argoproj.io/||')
+                log_verbose "Pausing ArgoCD app: $APP_NAME"
+                run_cmd "kubectl patch application $APP_NAME -n argocd --type=merge -p '{\"spec\":{\"syncPolicy\":null}}' 2>/dev/null || true"
+            done
+            log_success "ArgoCD applications paused"
+        else
+            log_verbose "No ArgoCD applications found"
+        fi
+    else
+        log_verbose "ArgoCD namespace not found"
+    fi
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2b: Scale down user workloads first (Gitea, Grafana, etc.)
+    # ─────────────────────────────────────────────────────────────────────────
+    log_step "2b. Scaling down user workloads..."
     for workload in "${CRITICAL_WORKLOADS[@]}"; do
         IFS='/' read -r ns type name <<< "$workload"
         if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
@@ -214,29 +241,28 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
     done
     
     # Wait for critical workloads to terminate
-    log_step "Waiting 30s for critical workloads to terminate..."
+    log_step "    Waiting 30s for workloads to terminate..."
     if [ "$DRY_RUN" = false ]; then
         sleep 30
     fi
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2c: Scale down remaining namespaced workloads
+    # ─────────────────────────────────────────────────────────────────────────
+    log_step "2c. Scaling down remaining workloads by namespace..."
     SCALED_COUNT=0
     for ns in "${STATEFUL_NAMESPACES[@]}"; do
         log_verbose "Checking namespace: $ns"
         if kubectl get namespace "$ns" &> /dev/null; then
-            log_step "Scaling down remaining workloads in namespace: $ns"
+            log_step "    Processing namespace: $ns"
             
             # Scale deployments
             DEPLOYMENTS=$(kubectl get deployments -n "$ns" -o name 2>/dev/null || true)
             if [ -n "$DEPLOYMENTS" ]; then
                 DEP_COUNT=$(echo "$DEPLOYMENTS" | wc -l)
                 log_verbose "Found $DEP_COUNT deployments in $ns"
-                for dep in $DEPLOYMENTS; do
-                    log_verbose "Scaling down $dep"
-                done
                 run_cmd "kubectl scale deployment -n $ns --replicas=0 --all 2>/dev/null || true"
                 SCALED_COUNT=$((SCALED_COUNT + DEP_COUNT))
-            else
-                log_verbose "No deployments found in $ns"
             fi
             
             # Scale statefulsets
@@ -244,23 +270,30 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
             if [ -n "$STATEFULSETS" ]; then
                 STS_COUNT=$(echo "$STATEFULSETS" | wc -l)
                 log_verbose "Found $STS_COUNT statefulsets in $ns"
-                for sts in $STATEFULSETS; do
-                    log_verbose "Scaling down $sts"
-                done
                 run_cmd "kubectl scale statefulset -n $ns --replicas=0 --all 2>/dev/null || true"
                 SCALED_COUNT=$((SCALED_COUNT + STS_COUNT))
-            else
-                log_verbose "No statefulsets found in $ns"
             fi
         else
             log_verbose "Namespace $ns does not exist, skipping"
         fi
     done
-    log_success "Scaled down $SCALED_COUNT workloads"
+    log_success "Scaled down $SCALED_COUNT total workloads"
 
-    # Wait for volumes to detach
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2d: Scale down ArgoCD itself (so it doesn't restart workloads)
+    # ─────────────────────────────────────────────────────────────────────────
+    log_step "2d. Scaling down ArgoCD..."
+    if kubectl get namespace argocd &> /dev/null; then
+        run_cmd "kubectl scale deployment -n argocd --replicas=0 --all 2>/dev/null || true"
+        run_cmd "kubectl scale statefulset -n argocd --replicas=0 --all 2>/dev/null || true"
+        log_success "ArgoCD scaled down"
+    fi
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2e: Wait for volumes to detach
+    # ─────────────────────────────────────────────────────────────────────────
     echo ""
-    log_step "Waiting ${VOLUME_DETACH_WAIT}s for volumes to detach cleanly..."
+    log_step "2e. Waiting ${VOLUME_DETACH_WAIT}s for volumes to detach cleanly..."
     if [ "$DRY_RUN" = false ]; then
         sleep "$VOLUME_DETACH_WAIT"
     fi
