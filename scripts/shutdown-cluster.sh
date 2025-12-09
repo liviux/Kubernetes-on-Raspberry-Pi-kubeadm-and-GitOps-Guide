@@ -46,6 +46,15 @@ VOLUME_DETACH_WAIT=60
 # How long to wait between worker shutdowns (seconds)
 WORKER_SHUTDOWN_DELAY=5
 
+# Critical workloads to scale down first (in order)
+CRITICAL_WORKLOADS=(
+    "gitea/statefulset/gitea"
+    "monitoring/deployment/observability-stack-grafana"
+    "monitoring/statefulset/prometheus-kube-prometheus-stack-prometheus"
+    "observability/statefulset/loki"
+    "storage/deployment/minio"
+)
+
 # =============================================================================
 # PARSE ARGUMENTS
 # =============================================================================
@@ -193,11 +202,28 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
     echo "│ STEP 2: Scaling down stateful workloads                             │"
     echo "└─────────────────────────────────────────────────────────────────────┘"
 
+    # First, scale down critical workloads individually to ensure clean shutdown
+    log_step "Scaling down critical workloads first..."
+    for workload in "${CRITICAL_WORKLOADS[@]}"; do
+        IFS='/' read -r ns type name <<< "$workload"
+        if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
+            log_verbose "Scaling down $name in $ns"
+            run_cmd "kubectl scale $type $name -n $ns --replicas=0 2>/dev/null || true"
+            log_success "Scaled down: $name"
+        fi
+    done
+    
+    # Wait for critical workloads to terminate
+    log_step "Waiting 30s for critical workloads to terminate..."
+    if [ "$DRY_RUN" = false ]; then
+        sleep 30
+    fi
+
     SCALED_COUNT=0
     for ns in "${STATEFUL_NAMESPACES[@]}"; do
         log_verbose "Checking namespace: $ns"
         if kubectl get namespace "$ns" &> /dev/null; then
-            log_step "Scaling down workloads in namespace: $ns"
+            log_step "Scaling down remaining workloads in namespace: $ns"
             
             # Scale deployments
             DEPLOYMENTS=$(kubectl get deployments -n "$ns" -o name 2>/dev/null || true)
@@ -244,11 +270,11 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# STEP 3: Check for stuck pods or volumes
+# STEP 3: Check for stuck pods or volumes and clean up
 # -----------------------------------------------------------------------------
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ STEP 3: Checking for stuck resources                                │"
+echo "│ STEP 3: Checking and cleaning stuck resources                       │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
 log_step "Checking for pods in Terminating state..."
@@ -256,9 +282,19 @@ log_verbose "Running: kubectl get pods -A | grep Terminating"
 TERMINATING_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -i "Terminating" || true)
 TERMINATING_COUNT=$(echo "$TERMINATING_PODS" | grep -c "Terminating" 2>/dev/null || echo "0")
 if [ "$TERMINATING_COUNT" -gt 0 ]; then
-    log_warning "$TERMINATING_COUNT pods still terminating:"
-    if [ "$VERBOSE" = true ]; then
-        echo "$TERMINATING_PODS" | head -10
+    log_warning "$TERMINATING_COUNT pods still terminating. Force deleting..."
+    echo "$TERMINATING_PODS" | awk '{print $1 " " $2}' | while read -r ns pod; do
+        if [ -n "$ns" ] && [ -n "$pod" ]; then
+            log_verbose "Force deleting $pod in $ns"
+            run_cmd "kubectl delete pod '$pod' -n '$ns' --force --grace-period=0 2>/dev/null || true"
+        fi
+    done
+    log_success "Terminating pods force deleted"
+    
+    # Wait for pods to be gone
+    log_step "Waiting 15s for pods to be removed..."
+    if [ "$DRY_RUN" = false ]; then
+        sleep 15
     fi
 else
     log_success "No terminating pods detected"
@@ -276,7 +312,21 @@ if kubectl get crd volumes.longhorn.io &> /dev/null; then
             fi
             ATTACHED=$(echo "$VOLUME_STATES" | grep -c "attached" || echo "0")
             if [ "$ATTACHED" -gt 0 ]; then
-                log_warning "$ATTACHED Longhorn volumes still attached. This is normal if workloads are running."
+                log_warning "$ATTACHED Longhorn volumes still attached."
+                
+                # Wait a bit more for volumes to detach
+                log_step "Waiting additional 30s for volumes to detach..."
+                if [ "$DRY_RUN" = false ]; then
+                    sleep 30
+                fi
+                
+                # Check again
+                ATTACHED=$(kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}={.status.state}{"\n"}{end}' 2>/dev/null | grep -c "attached" || echo "0")
+                if [ "$ATTACHED" -gt 0 ]; then
+                    log_warning "Still $ATTACHED volumes attached. They will detach when nodes shut down."
+                else
+                    log_success "All volumes now detached"
+                fi
             else
                 log_success "All Longhorn volumes detached"
             fi

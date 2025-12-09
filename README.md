@@ -13288,7 +13288,7 @@ STATEFUL_NAMESPACES=(
 #!/bin/bash
 # Usage examples:
 
-# Full startup with workload restore
+# Full startup with workload restore (recommended)
 bash scripts/startup-cluster.sh
 
 # Just wait for nodes (don't uncordon or restore)
@@ -13296,6 +13296,9 @@ bash scripts/startup-cluster.sh --wait-only
 
 # Uncordon but don't scale up workloads
 bash scripts/startup-cluster.sh --skip-restore
+
+# Skip waiting for critical workloads (faster, but no verification)
+bash scripts/startup-cluster.sh --skip-wait
 
 # Custom timeout (default 300s)
 bash scripts/startup-cluster.sh --timeout 600
@@ -13310,8 +13313,12 @@ bash scripts/startup-cluster.sh --verbose
 2. **Waits for all nodes** - Ensures all 4 nodes are Ready
 3. **Uncordons nodes** - Re-enables pod scheduling
 4. **Verifies critical pods** - Checks kube-system, longhorn-system, argocd
-5. **Triggers ArgoCD sync** - Lets GitOps restore workloads automatically
-6. **Runs health checks** - Reports any pods not in Running state
+5. **Waits for Longhorn** - Ensures storage pods and nodes are ready
+6. **Cleans up stuck resources** - Force deletes zombie pods, stale VolumeAttachments, and stuck volumes
+7. **Pre-cycles workloads** - Scales down Grafana/Gitea/MinIO to clear volume locks, then scales back up
+8. **Triggers ArgoCD sync** - Lets GitOps restore workloads automatically
+9. **Waits for critical workloads** - Ensures MinIO, Grafana, and Gitea are fully ready before completing
+10. **Runs health checks** - Reports any pods not in Running state
 
 <details>
 <summary>📄 Click to expand full scripts/shutdown-cluster.sh</summary>
@@ -13364,6 +13371,15 @@ VOLUME_DETACH_WAIT=60
 
 # How long to wait between worker shutdowns (seconds)
 WORKER_SHUTDOWN_DELAY=5
+
+# Critical workloads to scale down first (in order)
+CRITICAL_WORKLOADS=(
+    "gitea/statefulset/gitea"
+    "monitoring/deployment/observability-stack-grafana"
+    "monitoring/statefulset/prometheus-kube-prometheus-stack-prometheus"
+    "observability/statefulset/loki"
+    "storage/deployment/minio"
+)
 
 # =============================================================================
 # PARSE ARGUMENTS
@@ -13712,6 +13728,7 @@ echo ""
 #   --skip-restore    Uncordon nodes but don't scale up workloads
 #   --timeout <s>     Max seconds to wait for nodes (default: 300)
 #   --verbose, -v     Enable verbose output for debugging
+#   --skip-wait       Skip waiting for critical workloads to be ready
 #
 # Prerequisites:
 #   - All nodes physically powered on
@@ -13726,6 +13743,7 @@ set -euo pipefail
 # =============================================================================
 EXPECTED_NODES=4
 MAX_WAIT=${MAX_WAIT:-300}  # 5 minutes default
+WORKLOAD_WAIT=${WORKLOAD_WAIT:-600}  # 10 minutes for critical workloads
 
 # Namespaces with stateful workloads to restore (reverse of shutdown order)
 STATEFUL_NAMESPACES=(
@@ -13749,6 +13767,24 @@ declare -A DEFAULT_REPLICAS=(
     ["observability/statefulset/loki"]="1"
     ["harbor/statefulset/harbor-registry"]="1"
     ["harbor/statefulset/harbor-database"]="1"
+    ["monitoring/deployment/observability-stack-grafana"]="1"
+)
+
+# Critical workloads to wait for before declaring startup complete
+# Format: "namespace/resource-type/name"
+CRITICAL_WORKLOADS=(
+    "storage/deployment/minio"
+    "monitoring/deployment/observability-stack-grafana"
+    "gitea/statefulset/gitea"
+)
+declare -A DEFAULT_REPLICAS=(
+    ["storage/deployment/minio"]="1"
+    ["gitea/statefulset/gitea"]="1"
+    ["monitoring/statefulset/prometheus-kube-prometheus-stack-prometheus"]="1"
+    ["monitoring/statefulset/alertmanager-kube-prometheus-stack-alertmanager"]="1"
+    ["observability/statefulset/loki"]="1"
+    ["harbor/statefulset/harbor-registry"]="1"
+    ["harbor/statefulset/harbor-database"]="1"
     # Added Grafana here so Step 5 scales it back up after we reset it
     ["monitoring/deployment/observability-stack-grafana"]="1"
 )
@@ -13758,6 +13794,7 @@ declare -A DEFAULT_REPLICAS=(
 # =============================================================================
 WAIT_ONLY=false
 SKIP_RESTORE=false
+SKIP_WAIT=false
 VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
@@ -13770,6 +13807,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_RESTORE=true
             shift
             ;;
+        --skip-wait)
+            SKIP_WAIT=true
+            shift
+            ;;
         --timeout)
             MAX_WAIT="$2"
             shift 2
@@ -13779,11 +13820,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--wait-only] [--skip-restore] [--timeout <seconds>] [--verbose]"
+            echo "Usage: $0 [--wait-only] [--skip-restore] [--skip-wait] [--timeout <seconds>] [--verbose]"
             echo ""
             echo "Options:"
             echo "  --wait-only     Only wait for nodes to be ready"
             echo "  --skip-restore  Don't scale up workloads after uncordoning"
+            echo "  --skip-wait     Skip waiting for critical workloads"
             echo "  --timeout <s>   Max seconds to wait (default: 300)"
             echo "  --verbose, -v   Enable verbose output for debugging"
             exit 0
