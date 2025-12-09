@@ -47,10 +47,16 @@ VOLUME_DETACH_WAIT=60
 WORKER_SHUTDOWN_DELAY=5
 
 # Critical workloads to scale down first (in order)
+# These should match the workloads in startup-cluster.sh DEFAULT_REPLICAS
 CRITICAL_WORKLOADS=(
-    "gitea/statefulset/gitea"
+    "gitea/deployment/gitea"
+    "gitea/statefulset/gitea-postgresql"
+    "gitea/statefulset/gitea-valkey-cluster"
     "monitoring/deployment/observability-stack-grafana"
-    "monitoring/statefulset/prometheus-kube-prometheus-stack-prometheus"
+    "monitoring/deployment/observability-stack-kube-state-metrics"
+    "monitoring/deployment/prometheus-operator"
+    "monitoring/statefulset/prometheus-prometheus-prometheus"
+    "monitoring/statefulset/alertmanager-prometheus-alertmanager"
     "observability/statefulset/loki"
     "storage/deployment/minio"
 )

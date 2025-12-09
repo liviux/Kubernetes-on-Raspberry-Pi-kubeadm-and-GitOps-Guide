@@ -13438,11 +13438,13 @@ log_step() { echo -e "${BLUE}▶${NC} $1"; }
 log_success() { echo -e "${GREEN}✅${NC} $1"; }
 log_warning() { echo -e "${YELLOW}⚠️${NC} $1"; }
 log_error() { echo -e "${RED}❌${NC} $1"; }
+log_info() { echo -e "${CYAN}ℹ️${NC} $1"; }
 log_verbose() { 
     if [ "$VERBOSE" = true ]; then
         echo -e "${CYAN}  [VERBOSE]${NC} $1"
     fi
 }
+
 
 run_cmd() {
     if [ "$DRY_RUN" = true ]; then
@@ -14105,33 +14107,48 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# STEP 3.5: Immediate cleanup of zombie/Unknown pods
+# STEP 3.5: Clean up Completed, Failed, and Zombie pods
 # -----------------------------------------------------------------------------
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ STEP 3.5: Immediate cleanup of zombie pods                          │"
+echo "│ STEP 3.5: Cleaning up Completed, Failed, and Zombie pods            │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
-log_step "Force deleting all pods in Unknown/Terminating/NodeLost state..."
+log_step "Cleaning up garbage pods (Completed, Evicted, Failed)..."
 
-# Delete ALL pods in Unknown state across all namespaces - these are zombies from node outage
-ZOMBIE_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | awk '$4 == "Unknown" || $4 ~ /Terminating/ || $4 ~ /NodeLost/ {print $1, $2}' || true)
+# 1. Fast cleanup using Kubernetes field selectors (Standard cleanup)
+# This removes "Completed" (Succeeded) and "Evicted/Error" (Failed) pods efficiently
+kubectl delete pods -A --field-selector=status.phase=Succeeded --grace-period=0 2>/dev/null || true
+kubectl delete pods -A --field-selector=status.phase=Failed --grace-period=0 2>/dev/null || true
+
+# 2. Aggressive cleanup for "Stuck" states (Zombie cleanup)
+# Captures: Unknown, Terminating, NodeLost, ImagePullBackOff, CrashLoopBackOff, CreateContainerConfigError
+log_step "Force deleting stuck/zombie pods..."
+
+ZOMBIE_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | \
+    awk '$4 == "Unknown" || $4 ~ /Terminating/ || $4 ~ /NodeLost/ || $4 ~ /Error/ || $4 ~ /BackOff/ || $4 ~ /ConfigError/ {print $1, $2}' || true)
 
 if [ -n "$ZOMBIE_PODS" ]; then
     ZOMBIE_COUNT=$(echo "$ZOMBIE_PODS" | wc -l | tr -d '[:space:]')
-    log_warning "Found $ZOMBIE_COUNT zombie pods. Force deleting..."
-    echo "$ZOMBIE_PODS" | while read -r ns pod; do
-        if [ -n "$ns" ] && [ -n "$pod" ]; then
-            log_verbose "Force deleting zombie: $pod in $ns"
-            kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
-        fi
-    done
-    log_success "Zombie pods deleted"
     
-    log_step "Waiting 10s for Kubernetes to process deletions..."
-    sleep 10
+    # Only print if count > 0 to avoid empty "Found 0..." logs
+    if [ "$ZOMBIE_COUNT" != "0" ]; then
+        log_warning "Found $ZOMBIE_COUNT stuck pods. Force deleting..."
+        echo "$ZOMBIE_PODS" | while read -r ns pod; do
+            if [ -n "$ns" ] && [ -n "$pod" ]; then
+                log_verbose "Force deleting: $pod in $ns"
+                kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+            fi
+        done
+        log_success "Stuck pods deleted"
+        
+        log_step "Waiting 10s for Kubernetes to process deletions..."
+        sleep 10
+    else
+        log_success "No stuck pods found"
+    fi
 else
-    log_success "No zombie pods found"
+    log_success "No stuck pods found"
 fi
 
 # -----------------------------------------------------------------------------
@@ -14297,44 +14314,53 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 4d: Wait for ArgoCD (required for GitOps workload management)
 # ─────────────────────────────────────────────────────────────────────────────
-log_step "4d. Waiting for ArgoCD (GitOps controller)..."
+log_step "4d. Waking up ArgoCD..."
 
 if kubectl get namespace argocd &> /dev/null; then
+    # 1. DETECT & SCALE UP
+    # If replicas are 0, we must scale up manually because the shutdown script scaled them down.
+    SERVER_REPLICAS=$(kubectl get deployment -n argocd argocd-server -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+    
+    if [ "$SERVER_REPLICAS" == "0" ]; then
+        log_warning "ArgoCD is sleeping (0 replicas). Waking it up..."
+        kubectl scale deployment -n argocd --replicas=1 argocd-server argocd-repo-server argocd-dex-server 2>/dev/null || true
+        kubectl scale statefulset -n argocd --replicas=1 argocd-application-controller 2>/dev/null || true
+        log_info "Scale up commands sent."
+    fi
+
+    # 2. WAIT LOOP
     ARGO_WAIT=0
-    ARGO_TIMEOUT=180  # 3 minutes for ArgoCD
+    ARGO_TIMEOUT=180
     
     while [ $ARGO_WAIT -lt $ARGO_TIMEOUT ]; do
-        # Check if the core ArgoCD components are running
-        timeout 10s kubectl get pods -n argocd --no-headers > /tmp/argo_debug.out 2>/dev/null
-        CMD_EXIT=$?
-
-        if [ $CMD_EXIT -eq 0 ]; then
-            TOTAL_PODS=$(wc -l < /tmp/argo_debug.out)
-            NOT_RUNNING=$(grep -v -E "Running|Completed" /tmp/argo_debug.out | wc -l)
+        # Get counts safely using wc -l and tr to prevent integer errors
+        TOTAL_PODS=$(kubectl get pods -n argocd --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')
+        
+        if [ "$TOTAL_PODS" == "0" ]; then
+            printf "\r  Waiting for ArgoCD pods to be created... (%ds/%ds)   " "$ARGO_WAIT" "$ARGO_TIMEOUT"
+        else
+            # Check for Running pods
+            RUNNING_PODS=$(kubectl get pods -n argocd --no-headers 2>/dev/null | grep "Running" | wc -l | tr -d '[:space:]')
             
-            # ArgoCD is "ready enough" when argocd-server is running
-            SERVER_READY=$(grep "argocd-server" /tmp/argo_debug.out | grep -c "Running" || echo "0")
+            # Check specifically for server ready status
+            SERVER_READY=$(kubectl get deployment -n argocd argocd-server -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
             
-            if [ "$SERVER_READY" -gt 0 ] && [ "$NOT_RUNNING" -le 2 ]; then
-                printf "\r\033[K"
-                log_success "ArgoCD ready (server running, $((TOTAL_PODS - NOT_RUNNING))/$TOTAL_PODS pods)"
+            if [ "$SERVER_READY" == "1" ]; then
+                echo ""
+                log_success "ArgoCD Server is Ready!"
                 break
             fi
             
-            RUNNING=$((TOTAL_PODS - NOT_RUNNING))
-            printf "\r  Waiting for ArgoCD pods... (%d/%d ready, %ds/%ds)   " "$RUNNING" "$TOTAL_PODS" "$ARGO_WAIT" "$ARGO_TIMEOUT"
-        else
-            printf "\r  Waiting for ArgoCD pods... (%ds/%ds)   " "$ARGO_WAIT" "$ARGO_TIMEOUT"
+            printf "\r  Waiting for ArgoCD... (%d/%d pods running, Server Ready: %s) %ds   " "$RUNNING_PODS" "$TOTAL_PODS" "$SERVER_READY" "$ARGO_WAIT"
         fi
-
-        sleep 10
-        ARGO_WAIT=$((ARGO_WAIT + 10))
+        
+        sleep 5
+        ARGO_WAIT=$((ARGO_WAIT + 5))
     done
-    echo ""
     
     if [ $ARGO_WAIT -ge $ARGO_TIMEOUT ]; then
-        log_warning "ArgoCD not fully ready after ${ARGO_TIMEOUT}s - continuing anyway"
-        kubectl get pods -n argocd --no-headers 2>/dev/null | grep -v -E "Running|Completed" | head -5 || true
+        echo ""
+        log_warning "ArgoCD not fully ready, but continuing to allow restore attempts..."
     fi
 else
     log_warning "ArgoCD namespace not found - skipping"
@@ -14342,7 +14368,6 @@ fi
 
 set -e
 log_success "Infrastructure components ready!"
-
 
 # -----------------------------------------------------------------------------
 # STEP 4.5: FIX STUCK VOLUMES / ZOMBIE PODS

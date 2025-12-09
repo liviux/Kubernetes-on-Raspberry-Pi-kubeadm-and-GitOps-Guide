@@ -43,23 +43,39 @@ STATEFUL_NAMESPACES=(
 
 # Default replica counts for known stateful workloads
 # Format: "namespace/resource-type/name:replicas"
+# IMPORTANT: These are restored in order, so dependencies must come first!
 declare -A DEFAULT_REPLICAS=(
+    # ArgoCD components (must be restored first for GitOps to work)
+    ["argocd/deployment/argocd-redis"]="1"
+    ["argocd/deployment/argocd-applicationset-controller"]="1"
+    ["argocd/deployment/argocd-notifications-controller"]="1"
+    # Storage (needed before workloads that use PVCs)
     ["storage/deployment/minio"]="1"
-    ["gitea/statefulset/gitea"]="1"
-    ["monitoring/statefulset/prometheus-kube-prometheus-stack-prometheus"]="1"
-    ["monitoring/statefulset/alertmanager-kube-prometheus-stack-alertmanager"]="1"
+    # Monitoring - Prometheus stack
+    ["monitoring/deployment/prometheus-operator"]="1"
+    ["monitoring/deployment/observability-stack-kube-state-metrics"]="1"
+    ["monitoring/statefulset/prometheus-prometheus-prometheus"]="1"
+    ["monitoring/statefulset/alertmanager-prometheus-alertmanager"]="1"
+    ["monitoring/deployment/observability-stack-grafana"]="1"
+    # Observability
     ["observability/statefulset/loki"]="1"
+    # Gitea and its dependencies (postgresql and valkey must start before gitea)
+    ["gitea/statefulset/gitea-postgresql"]="1"
+    ["gitea/statefulset/gitea-valkey-cluster"]="3"
+    ["gitea/deployment/gitea"]="1"
+    # Harbor (if installed)
     ["harbor/statefulset/harbor-registry"]="1"
     ["harbor/statefulset/harbor-database"]="1"
-    ["monitoring/deployment/observability-stack-grafana"]="1"
 )
 
 # Critical workloads to wait for before declaring startup complete
 # Format: "namespace/resource-type/name"
 CRITICAL_WORKLOADS=(
+    "argocd/deployment/argocd-redis"
+    "argocd/deployment/argocd-server"
     "storage/deployment/minio"
     "monitoring/deployment/observability-stack-grafana"
-    "gitea/statefulset/gitea"
+    "gitea/deployment/gitea"
 )
 
 # =============================================================================
@@ -318,33 +334,48 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# STEP 3.5: Immediate cleanup of zombie/Unknown pods
+# STEP 3.5: Clean up Completed, Failed, and Zombie pods
 # -----------------------------------------------------------------------------
 echo ""
 echo "┌─────────────────────────────────────────────────────────────────────┐"
-echo "│ STEP 3.5: Immediate cleanup of zombie pods                          │"
+echo "│ STEP 3.5: Cleaning up Completed, Failed, and Zombie pods            │"
 echo "└─────────────────────────────────────────────────────────────────────┘"
 
-log_step "Force deleting all pods in Unknown/Terminating/NodeLost state..."
+log_step "Cleaning up garbage pods (Completed, Evicted, Failed)..."
 
-# Delete ALL pods in Unknown state across all namespaces - these are zombies from node outage
-ZOMBIE_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | awk '$4 == "Unknown" || $4 ~ /Terminating/ || $4 ~ /NodeLost/ {print $1, $2}' || true)
+# 1. Fast cleanup using Kubernetes field selectors (Standard cleanup)
+# This removes "Completed" (Succeeded) and "Evicted/Error" (Failed) pods efficiently
+kubectl delete pods -A --field-selector=status.phase=Succeeded --grace-period=0 2>/dev/null || true
+kubectl delete pods -A --field-selector=status.phase=Failed --grace-period=0 2>/dev/null || true
+
+# 2. Aggressive cleanup for "Stuck" states (Zombie cleanup)
+# Captures: Unknown, Terminating, NodeLost, ImagePullBackOff, CrashLoopBackOff, CreateContainerConfigError
+log_step "Force deleting stuck/zombie pods..."
+
+ZOMBIE_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | \
+    awk '$4 == "Unknown" || $4 ~ /Terminating/ || $4 ~ /NodeLost/ || $4 ~ /Error/ || $4 ~ /BackOff/ || $4 ~ /ConfigError/ {print $1, $2}' || true)
 
 if [ -n "$ZOMBIE_PODS" ]; then
     ZOMBIE_COUNT=$(echo "$ZOMBIE_PODS" | wc -l | tr -d '[:space:]')
-    log_warning "Found $ZOMBIE_COUNT zombie pods. Force deleting..."
-    echo "$ZOMBIE_PODS" | while read -r ns pod; do
-        if [ -n "$ns" ] && [ -n "$pod" ]; then
-            log_verbose "Force deleting zombie: $pod in $ns"
-            kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
-        fi
-    done
-    log_success "Zombie pods deleted"
     
-    log_step "Waiting 10s for Kubernetes to process deletions..."
-    sleep 10
+    # Only print if count > 0 to avoid empty "Found 0..." logs
+    if [ "$ZOMBIE_COUNT" != "0" ]; then
+        log_warning "Found $ZOMBIE_COUNT stuck pods. Force deleting..."
+        echo "$ZOMBIE_PODS" | while read -r ns pod; do
+            if [ -n "$ns" ] && [ -n "$pod" ]; then
+                log_verbose "Force deleting: $pod in $ns"
+                kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+            fi
+        done
+        log_success "Stuck pods deleted"
+        
+        log_step "Waiting 10s for Kubernetes to process deletions..."
+        sleep 10
+    else
+        log_success "No stuck pods found"
+    fi
 else
-    log_success "No zombie pods found"
+    log_success "No stuck pods found"
 fi
 
 # -----------------------------------------------------------------------------
@@ -510,44 +541,67 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 4d: Wait for ArgoCD (required for GitOps workload management)
 # ─────────────────────────────────────────────────────────────────────────────
-log_step "4d. Waiting for ArgoCD (GitOps controller)..."
+log_step "4d. Waking up ArgoCD..."
 
 if kubectl get namespace argocd &> /dev/null; then
+    # 1. DETECT & SCALE UP
+    # If replicas are 0, we must scale up manually because the shutdown script scaled them down.
+    # IMPORTANT: Redis must come up first, then other components
+    
+    REDIS_REPLICAS=$(kubectl get deployment -n argocd argocd-redis -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+    SERVER_REPLICAS=$(kubectl get deployment -n argocd argocd-server -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+    
+    if [ "$REDIS_REPLICAS" == "0" ] || [ "$SERVER_REPLICAS" == "0" ]; then
+        log_warning "ArgoCD is sleeping (0 replicas). Waking it up..."
+        
+        # Scale up Redis FIRST (required for ArgoCD caching)
+        log_step "  Scaling up ArgoCD Redis (required for caching)..."
+        kubectl scale deployment -n argocd argocd-redis --replicas=1 2>/dev/null || true
+        
+        # Wait for Redis to be ready before scaling other components
+        log_step "  Waiting for Redis to be ready..."
+        kubectl rollout status deployment/argocd-redis -n argocd --timeout=120s 2>/dev/null || true
+        
+        # Now scale up the rest of ArgoCD
+        log_step "  Scaling up remaining ArgoCD components..."
+        kubectl scale deployment -n argocd --replicas=1 argocd-server argocd-repo-server argocd-dex-server argocd-applicationset-controller argocd-notifications-controller 2>/dev/null || true
+        kubectl scale statefulset -n argocd --replicas=1 argocd-application-controller 2>/dev/null || true
+        log_info "Scale up commands sent."
+    fi
+
+    # 2. WAIT LOOP
     ARGO_WAIT=0
-    ARGO_TIMEOUT=180  # 3 minutes for ArgoCD
+    ARGO_TIMEOUT=180
     
     while [ $ARGO_WAIT -lt $ARGO_TIMEOUT ]; do
-        # Check if the core ArgoCD components are running
-        timeout 10s kubectl get pods -n argocd --no-headers > /tmp/argo_debug.out 2>/dev/null
-        CMD_EXIT=$?
-
-        if [ $CMD_EXIT -eq 0 ]; then
-            TOTAL_PODS=$(wc -l < /tmp/argo_debug.out)
-            NOT_RUNNING=$(grep -v -E "Running|Completed" /tmp/argo_debug.out | wc -l)
+        # Get counts safely using wc -l and tr to prevent integer errors
+        TOTAL_PODS=$(kubectl get pods -n argocd --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')
+        
+        if [ "$TOTAL_PODS" == "0" ]; then
+            printf "\r  Waiting for ArgoCD pods to be created... (%ds/%ds)   " "$ARGO_WAIT" "$ARGO_TIMEOUT"
+        else
+            # Check for Running pods
+            RUNNING_PODS=$(kubectl get pods -n argocd --no-headers 2>/dev/null | grep "Running" | wc -l | tr -d '[:space:]')
             
-            # ArgoCD is "ready enough" when argocd-server is running
-            SERVER_READY=$(grep "argocd-server" /tmp/argo_debug.out | grep -c "Running" || echo "0")
+            # Check specifically for server ready status
+            SERVER_READY=$(kubectl get deployment -n argocd argocd-server -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
             
-            if [ "$SERVER_READY" -gt 0 ] && [ "$NOT_RUNNING" -le 2 ]; then
-                printf "\r\033[K"
-                log_success "ArgoCD ready (server running, $((TOTAL_PODS - NOT_RUNNING))/$TOTAL_PODS pods)"
+            if [ "$SERVER_READY" == "1" ]; then
+                echo ""
+                log_success "ArgoCD Server is Ready!"
                 break
             fi
             
-            RUNNING=$((TOTAL_PODS - NOT_RUNNING))
-            printf "\r  Waiting for ArgoCD pods... (%d/%d ready, %ds/%ds)   " "$RUNNING" "$TOTAL_PODS" "$ARGO_WAIT" "$ARGO_TIMEOUT"
-        else
-            printf "\r  Waiting for ArgoCD pods... (%ds/%ds)   " "$ARGO_WAIT" "$ARGO_TIMEOUT"
+            printf "\r  Waiting for ArgoCD... (%d/%d pods running, Server Ready: %s) %ds   " "$RUNNING_PODS" "$TOTAL_PODS" "$SERVER_READY" "$ARGO_WAIT"
         fi
-
-        sleep 10
-        ARGO_WAIT=$((ARGO_WAIT + 10))
+        
+        sleep 5
+        ARGO_WAIT=$((ARGO_WAIT + 5))
     done
-    echo ""
     
     if [ $ARGO_WAIT -ge $ARGO_TIMEOUT ]; then
-        log_warning "ArgoCD not fully ready after ${ARGO_TIMEOUT}s - continuing anyway"
-        kubectl get pods -n argocd --no-headers 2>/dev/null | grep -v -E "Running|Completed" | head -5 || true
+        echo ""
+        log_warning "ArgoCD not fully ready, but continuing to allow restore attempts..."
     fi
 else
     log_warning "ArgoCD namespace not found - skipping"
@@ -555,7 +609,6 @@ fi
 
 set -e
 log_success "Infrastructure components ready!"
-
 
 # -----------------------------------------------------------------------------
 # STEP 4.5: FIX STUCK VOLUMES / ZOMBIE PODS
@@ -672,13 +725,17 @@ if [ "$SKIP_RESTORE" = false ]; then
         fi
     done
     
-    # Also handle gitea statefulset if it exists
-    if kubectl get statefulset gitea -n gitea &> /dev/null; then
-        log_verbose "Scaling down gitea statefulset"
-        kubectl scale statefulset gitea -n gitea --replicas=0 2>/dev/null || true
-        # Delete gitea pods
-        kubectl delete pods -n gitea -l app.kubernetes.io/name=gitea --force --grace-period=0 2>/dev/null || true
+    # Also handle gitea dependencies (postgresql and valkey) if they exist
+    if kubectl get statefulset gitea-postgresql -n gitea &> /dev/null; then
+        log_verbose "Scaling down gitea-postgresql statefulset"
+        kubectl scale statefulset gitea-postgresql -n gitea --replicas=0 2>/dev/null || true
     fi
+    if kubectl get statefulset gitea-valkey-cluster -n gitea &> /dev/null; then
+        log_verbose "Scaling down gitea-valkey-cluster statefulset"
+        kubectl scale statefulset gitea-valkey-cluster -n gitea --replicas=0 2>/dev/null || true
+    fi
+    # Delete gitea pods (including postgresql and valkey)
+    kubectl delete pods -n gitea --all --force --grace-period=0 2>/dev/null || true
     
     log_step "Waiting 30s for volumes to fully detach..."
     sleep 30
@@ -718,6 +775,22 @@ if [ "$SKIP_RESTORE" = false ]; then
         if [ "$ARGOCD_READY" -gt 0 ]; then
             log_success "ArgoCD is running - GitOps reconciliation will restore workloads"
             
+            # Re-enable auto-sync for ArgoCD applications (shutdown script disables it)
+            log_step "Re-enabling ArgoCD auto-sync for all applications..."
+            ARGOCD_APPS=$(kubectl get applications -n argocd -o name 2>/dev/null || true)
+            if [ -n "$ARGOCD_APPS" ]; then
+                for app in $ARGOCD_APPS; do
+                    APP_NAME=$(echo "$app" | sed 's|application.argoproj.io/||')
+                    log_verbose "Re-enabling auto-sync for: $APP_NAME"
+                    # Re-enable automated sync policy
+                    kubectl patch application "$APP_NAME" -n argocd --type=merge \
+                        -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}' 2>/dev/null || true
+                done
+                log_success "Auto-sync re-enabled for ArgoCD applications"
+            else
+                log_verbose "No ArgoCD applications found"
+            fi
+            
             # Optionally trigger a sync
             if command -v argocd &> /dev/null; then
                 log_step "Triggering ArgoCD sync for all applications..."
@@ -740,27 +813,71 @@ if [ "$SKIP_RESTORE" = false ]; then
     fi
     
     # Restore known stateful workloads that might have been scaled to 0
-    log_step "Checking for workloads scaled to 0..."
+    # IMPORTANT: Order matters! Dependencies must be restored first.
+    log_step "Scaling up all workloads in dependency order..."
     RESTORED_COUNT=0
-    for key in "${!DEFAULT_REPLICAS[@]}"; do
-        IFS='/' read -r ns type name <<< "$key"
-        replicas="${DEFAULT_REPLICAS[$key]}"
+    
+    # Define restore order explicitly (dependencies first)
+    # Format: "namespace/resource-type/name:replicas"
+    RESTORE_ORDER=(
+        # 1. ArgoCD components (Redis must come first for ArgoCD to function)
+        "argocd/deployment/argocd-redis:1"
+        "argocd/deployment/argocd-applicationset-controller:1"
+        "argocd/deployment/argocd-notifications-controller:1"
+        # 2. Storage backend
+        "storage/deployment/minio:1"
+        # 3. Monitoring infrastructure (operator first, then workloads)
+        "monitoring/deployment/prometheus-operator:1"
+        "monitoring/deployment/observability-stack-kube-state-metrics:1"
+        "monitoring/statefulset/prometheus-prometheus-prometheus:1"
+        "monitoring/statefulset/alertmanager-prometheus-alertmanager:1"
+        "monitoring/deployment/observability-stack-grafana:1"
+        # 4. Observability
+        "observability/statefulset/loki:1"
+        # 5. Gitea (dependencies first: postgresql -> valkey -> gitea)
+        "gitea/statefulset/gitea-postgresql:1"
+        "gitea/statefulset/gitea-valkey-cluster:3"
+        "gitea/deployment/gitea:1"
+        # 6. Harbor (if installed)
+        "harbor/statefulset/harbor-database:1"
+        "harbor/statefulset/harbor-registry:1"
+    )
+    
+    for entry in "${RESTORE_ORDER[@]}"; do
+        # Parse "namespace/type/name:replicas"
+        workload="${entry%:*}"
+        replicas="${entry#*:}"
+        IFS='/' read -r ns type name <<< "$workload"
         
         log_verbose "Checking $type/$name in $ns..."
         if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
             CURRENT=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
             log_verbose "Current replicas: $CURRENT, desired: $replicas"
-            if [ "$CURRENT" -eq 0 ]; then
+            if [ "$CURRENT" = "0" ] || [ -z "$CURRENT" ]; then
                 log_step "Scaling up $type/$name in $ns to $replicas replicas"
                 if kubectl scale "$type" "$name" -n "$ns" --replicas="$replicas" 2>/dev/null; then
                     log_success "Scaled: $type/$name"
                     RESTORED_COUNT=$((RESTORED_COUNT + 1))
+                    
+                    # Wait for critical dependencies to be ready before continuing
+                    if [ "$name" = "argocd-redis" ]; then
+                        log_step "Waiting for ArgoCD Redis to be ready..."
+                        kubectl rollout status deployment/argocd-redis -n argocd --timeout=120s 2>/dev/null || true
+                    elif [ "$name" = "gitea-postgresql" ]; then
+                        log_step "Waiting for PostgreSQL to be ready..."
+                        kubectl rollout status statefulset/gitea-postgresql -n gitea --timeout=120s 2>/dev/null || true
+                    elif [ "$name" = "gitea-valkey-cluster" ]; then
+                        log_step "Waiting for Valkey cluster to initialize..."
+                        sleep 15  # Give valkey time to form cluster
+                    fi
                 else
                     log_warning "Failed to scale: $type/$name"
                 fi
+            else
+                log_verbose "$type/$name already has $CURRENT replicas"
             fi
         else
-            log_verbose "$type/$name not found in $ns"
+            log_verbose "$type/$name not found in $ns - may not be installed"
         fi
     done
     
