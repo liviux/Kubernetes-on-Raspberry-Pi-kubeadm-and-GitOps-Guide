@@ -219,8 +219,9 @@ check_critical_pods() {
     for ns in "${critical_namespaces[@]}"; do
         log_verbose "Checking namespace: $ns"
         if kubectl get namespace "$ns" &> /dev/null; then
-            NOT_RUNNING=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
-            if [ "$NOT_RUNNING" -gt 0 ]; then
+            NOT_RUNNING=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l | tr -d '[:space:]')
+            NOT_RUNNING=${NOT_RUNNING:-0}
+            if [ "$NOT_RUNNING" != "0" ] 2>/dev/null; then
                 log_warning "Namespace $ns has $NOT_RUNNING pods not running"
                 if [ "$VERBOSE" = true ]; then
                     kubectl get pods -n "$ns" --no-headers | grep -v "Running\|Completed" | head -5
@@ -342,8 +343,9 @@ if command -v cilium &> /dev/null; then
     fi
 else
     log_verbose "Cilium CLI not installed, checking pods instead..."
-    CILIUM_PODS=$(kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -v "Running" | wc -l || echo "0")
-    if [ "$CILIUM_PODS" -eq 0 ]; then
+    CILIUM_PODS=$(kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -v "Running" | wc -l | tr -d '[:space:]')
+    CILIUM_PODS=${CILIUM_PODS:-0}
+    if [ "$CILIUM_PODS" -eq 0 ] 2>/dev/null; then
         log_success "Cilium pods are running"
     else
         log_warning "Some Cilium pods are not running"
@@ -359,18 +361,19 @@ if kubectl get namespace longhorn-system &> /dev/null; then
     LH_WAIT=0
     LH_TIMEOUT=180  # 3 minutes for Longhorn pods
     while [ $LH_WAIT -lt $LH_TIMEOUT ]; do
-        LH_PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
-        if [ "$LH_PODS" -eq 0 ]; then
+        LH_PODS=$(kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l | tr -d '[:space:]')
+        LH_PODS=${LH_PODS:-0}
+        if [ "$LH_PODS" -eq 0 ] 2>/dev/null; then
             log_success "All Longhorn pods are running"
             break
         fi
-        printf "\r  Waiting for Longhorn pods... (%d not ready, %ds / %ds)" "$LH_PODS" $LH_WAIT $LH_TIMEOUT
+        printf "\r  Waiting for Longhorn pods... (%s not ready, %ds / %ds)  " "$LH_PODS" "$LH_WAIT" "$LH_TIMEOUT"
         sleep 10
         LH_WAIT=$((LH_WAIT + 10))
     done
     echo ""
     
-    if [ "$LH_PODS" -gt 0 ]; then
+    if [ "$LH_PODS" != "0" ] && [ -n "$LH_PODS" ]; then
         log_warning "Longhorn has $LH_PODS pods not running after ${LH_TIMEOUT}s. Continuing anyway..."
         if [ "$VERBOSE" = true ]; then
             kubectl get pods -n longhorn-system --no-headers | grep -v "Running\|Completed" | head -5
@@ -431,6 +434,24 @@ else
     log_success "No zombie pods detected"
 fi
 
+# Delete old pods from previous ReplicaSets that may be holding volume locks
+log_step "Cleaning up old pods holding volume locks..."
+for workload in "monitoring/observability-stack-grafana" "gitea/gitea" "argocd/argocd-repo-server"; do
+    IFS='/' read -r ns name <<< "$workload"
+    if kubectl get namespace "$ns" &> /dev/null; then
+        # Find pods that are not Running/Completed and delete them
+        OLD_PODS=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep "$name" | grep -v "Running\|Completed" | awk '{print $1}' || true)
+        if [ -n "$OLD_PODS" ]; then
+            echo "$OLD_PODS" | while read -r pod; do
+                if [ -n "$pod" ]; then
+                    log_warning "Deleting non-running pod: $pod in $ns"
+                    kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+                fi
+            done
+        fi
+    fi
+done
+
 # Proactively clean up stale VolumeAttachments that reference old pods
 log_step "Checking for stale VolumeAttachments..."
 STALE_VA=$(kubectl get volumeattachments -o json 2>/dev/null | jq -r '.items[] | select(.status.attached == false or .status.attached == null) | .metadata.name' 2>/dev/null || true)
@@ -474,20 +495,53 @@ fi
 if [ "$SKIP_RESTORE" = false ]; then
     log_step "Pre-cycling workloads to clear potential volume locks..."
     
-    # Scale down workloads that commonly have volume issues
-    for workload in "monitoring/deployment/observability-stack-grafana" "gitea/statefulset/gitea" "storage/deployment/minio"; do
+    # First, scale down to 0 and delete ALL pods for workloads with volume issues
+    for workload in "monitoring/deployment/observability-stack-grafana" "gitea/deployment/gitea" "storage/deployment/minio"; do
         IFS='/' read -r ns type name <<< "$workload"
-        if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
-            CURRENT=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
-            if [ "$CURRENT" -gt 0 ]; then
-                log_verbose "Cycling $name in $ns (current replicas: $CURRENT)"
+        if kubectl get namespace "$ns" &> /dev/null; then
+            # Scale to 0
+            if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
+                log_verbose "Scaling down $name in $ns"
                 kubectl scale "$type" "$name" -n "$ns" --replicas=0 2>/dev/null || true
+            fi
+            
+            # Force delete ALL pods with this name prefix (catches old ReplicaSet pods too)
+            OLD_PODS=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep "^${name}" | awk '{print $1}' || true)
+            if [ -n "$OLD_PODS" ]; then
+                echo "$OLD_PODS" | while read -r pod; do
+                    if [ -n "$pod" ]; then
+                        log_warning "Force deleting pod holding volume: $pod"
+                        kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+                    fi
+                done
             fi
         fi
     done
     
-    log_step "Waiting 20s for volumes to fully detach..."
-    sleep 20
+    # Also handle gitea statefulset if it exists
+    if kubectl get statefulset gitea -n gitea &> /dev/null; then
+        log_verbose "Scaling down gitea statefulset"
+        kubectl scale statefulset gitea -n gitea --replicas=0 2>/dev/null || true
+        # Delete gitea pods
+        kubectl delete pods -n gitea -l app.kubernetes.io/name=gitea --force --grace-period=0 2>/dev/null || true
+    fi
+    
+    log_step "Waiting 30s for volumes to fully detach..."
+    sleep 30
+    
+    # Verify volumes are detached
+    log_step "Verifying volumes are detached..."
+    if kubectl get namespace longhorn-system &> /dev/null; then
+        ATTACHED_VOLS=$(kubectl get volumes.longhorn.io -n longhorn-system -o json 2>/dev/null | \
+            jq -r '.items[] | select(.status.state == "attached") | .metadata.name' 2>/dev/null | wc -l | tr -d '[:space:]')
+        ATTACHED_VOLS=${ATTACHED_VOLS:-0}
+        if [ "$ATTACHED_VOLS" != "0" ]; then
+            log_warning "Still $ATTACHED_VOLS volumes attached. Waiting 20s more..."
+            sleep 20
+        else
+            log_success "All volumes detached"
+        fi
+    fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -582,8 +636,9 @@ kubectl get nodes -o wide
 echo ""
 echo "System Pods (kube-system):"
 kubectl get pods -n kube-system --no-headers 2>/dev/null | head -10
-KUBE_SYSTEM_TOTAL=$(kubectl get pods -n kube-system --no-headers 2>/dev/null | wc -l || echo "0")
-if [ "$KUBE_SYSTEM_TOTAL" -gt 10 ]; then
+KUBE_SYSTEM_TOTAL=$(kubectl get pods -n kube-system --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')
+KUBE_SYSTEM_TOTAL=${KUBE_SYSTEM_TOTAL:-0}
+if [ "$KUBE_SYSTEM_TOTAL" -gt 10 ] 2>/dev/null; then
     echo "  ... and $((KUBE_SYSTEM_TOTAL - 10)) more pods"
 fi
 
@@ -592,8 +647,9 @@ echo "Problem Pods (if any):"
 PROBLEM_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -v "Running\|Completed" | head -10 || true)
 if [ -n "$PROBLEM_PODS" ]; then
     echo "$PROBLEM_PODS"
-    PROBLEM_COUNT=$(kubectl get pods -A --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "0")
-    if [ "$PROBLEM_COUNT" -gt 10 ]; then
+    PROBLEM_COUNT=$(kubectl get pods -A --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l | tr -d '[:space:]')
+    PROBLEM_COUNT=${PROBLEM_COUNT:-0}
+    if [ "$PROBLEM_COUNT" -gt 10 ] 2>/dev/null; then
         echo "  ... and $((PROBLEM_COUNT - 10)) more problem pods"
     fi
     echo ""
