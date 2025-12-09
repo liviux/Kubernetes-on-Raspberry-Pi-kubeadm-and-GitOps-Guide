@@ -778,6 +778,22 @@ With constrained hardware, careful resource allocation is critical. Below is the
 | **Grafana** | Metrics & logs | Dashboards & log exploration |
 | **Longhorn UI** | Storage management | Volume health & snapshots |
 
+**Web UI Access URLs (via Gateway API):**
+
+All web UIs are exposed via Traefik Gateway using nip.io wildcard DNS. Access from any device on your network:
+
+| UI | URL | Authentication |
+|----|-----|----------------|
+| **ArgoCD** | `http://argocd.192.168.68.210.nip.io` | admin / (initial password from secret) |
+| **Grafana** | `http://grafana.192.168.68.210.nip.io` | admin / (from Helm values) |
+| **Longhorn** | `http://longhorn.192.168.68.210.nip.io` | None (internal network only) |
+| **Gitea** | `http://gitea.192.168.68.210.nip.io` | Self-registered or admin |
+| **Headlamp** | `http://headlamp.192.168.68.210.nip.io` | Service Account token |
+| **Hubble** | `http://hubble.192.168.68.210.nip.io` | None |
+| **Jaeger** | `http://jaeger.192.168.68.210.nip.io` | None |
+
+> 💡 **Note:** Replace `192.168.68.210` with your Traefik LoadBalancer IP if different. Find it with: `kubectl get svc -n traefik-system traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}'`
+
 #### **G. Deployment Sequence**
 
 The following diagram shows the order of operations. Phases 1-4 are manual; phases 5+ are automated via ArgoCD sync waves.
@@ -878,6 +894,7 @@ This structure follows the **separation of concerns** principle:
 │   │   │                                #          LoadBalancer IP, Gateway API
 │   │   ├── longhorn.yaml                # Storage: Longhorn distributed storage
 │   │   │                                #          Single replica, HDD-only affinity
+│   │   │                                #          Includes HTTPRoute for UI access
 │   │   └── cert-manager.yaml            # TLS: Let's Encrypt automation, ClusterIssuers
 │   │
 │   ├── storage/                         # ──────────────────────────────────────
@@ -3637,8 +3654,8 @@ echo "  • Storage Node: rpi4-1 only"
 echo "  • Workers: Protected (allowScheduling: false)"
 echo ""
 echo "Access Longhorn UI:"
-echo "  kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80"
-echo "  Open: http://localhost:8080"
+echo "  Browser: http://longhorn.192.168.68.210.nip.io"
+echo "  Fallback: kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80"
 echo ""
 echo "Verify with:"
 echo "  bash tests/03_storage_test.sh"
@@ -3873,12 +3890,16 @@ persistentvolumeclaim "test-storage-verify" deleted
 
 **Access Longhorn UI:**
 
-```bash
-# Port-forward the Longhorn frontend
-kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
+Longhorn UI is exposed via Gateway API for persistent browser access (no port-forwarding needed):
 
-# Access at http://localhost:8080
-```
+| Access Method | URL | When to Use |
+|---------------|-----|-------------|
+| **HTTPRoute (persistent)** | http://longhorn.192.168.68.210.nip.io | Normal access from any device on network |
+| **Port-forward (fallback)** | `kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80` | If Gateway/Traefik is down |
+
+The HTTPRoute is included in `gitops/infrastructure/longhorn.yaml` and applied automatically by ArgoCD.
+
+> ⚠️ **Security Note:** Longhorn UI has no built-in authentication. Access is open to anyone on your network. Consider restricting network access or adding Traefik BasicAuth middleware for production use.
 
 **Verify Storage Configuration:**
 
@@ -12448,8 +12469,9 @@ kubectl get volumes.longhorn.io -n longhorn-system
 # Check Longhorn nodes
 kubectl get nodes.longhorn.io -n longhorn-system
 
-# Access Longhorn UI
-kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
+# Access Longhorn UI (browser)
+# Primary: http://longhorn.192.168.68.210.nip.io
+# Fallback: kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
 
 # Check disk pressure
 df -h /mnt/usb-data/longhorn
@@ -13179,7 +13201,30 @@ kubectl delete volumes.longhorn.io -n longhorn-system --all
 
 ### 12.11 Cluster Shutdown & Startup
 
-Since this is a home lab cluster, you'll likely power it off when not in use. These scripts ensure **clean shutdown** (preventing data corruption) and **smooth startup** (verifying health before workloads resume).
+#### Why Dedicated Scripts Are Essential
+
+Unlike cloud-managed Kubernetes clusters that run 24/7, a Raspberry Pi home lab has unique operational requirements:
+
+| Challenge | Impact Without Proper Handling | Script Solution |
+|-----------|-------------------------------|-----------------|
+| **Power costs & heat** | Running 4 RPis 24/7 wastes electricity and generates heat | Shut down when not needed |
+| **SD card wear** | Continuous writes degrade SD cards faster | Clean shutdown reduces write operations |
+| **Longhorn volume locks** | Hard power-off leaves volumes in "attached" state | Graceful scale-down releases volume locks |
+| **Multi-Attach errors** | Pods fail to start with "Volume already attached" | Pre-startup cleanup clears stale attachments |
+| **ArgoCD race conditions** | GitOps tries to restore workloads before storage is ready | Sequential startup with dependency ordering |
+| **CSI driver registration** | Longhorn CSI not ready = volume mount failures | Startup waits for CSI registration on all nodes |
+| **Resource exhaustion** | Starting all workloads simultaneously overwhelms 4GB RAM | Sequential workload startup with ready-checks |
+
+**The Core Problem:**
+
+Kubernetes assumes nodes are always available. When you power off Raspberry Pis:
+1. **Longhorn volumes remain "attached"** to nodes that no longer exist
+2. **Pods get stuck** waiting for volumes that can't be mounted
+3. **ArgoCD immediately tries** to reconcile all workloads simultaneously
+4. **CSI drivers need time** to re-register after node boot
+5. **Resource-constrained nodes** can't handle parallel workload startup
+
+These scripts solve all of these issues with ordered shutdown and sequential startup.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -13189,32 +13234,78 @@ Since this is a home lab cluster, you'll likely power it off when not in use. Th
 │  SHUTDOWN SEQUENCE (scripts/shutdown-cluster.sh)                           │
 │  ─────────────────────────────────────────────────                         │
 │                                                                             │
-│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐   │
-│  │ Cordon  │───►│  Scale  │───►│  Wait   │───►│Shutdown │───►│Shutdown │   │
-│  │  All    │    │  Down   │    │ Detach  │    │ Workers │    │   CP    │   │
-│  │ Nodes   │    │Stateful │    │ Volumes │    │ (rev.)  │    │ (last)  │   │
-│  └─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘   │
-│                                                                             │
-│  Why this order?                                                            │
-│  • Cordon first: Prevents new pods from scheduling                          │
-│  • Scale down: Allows volumes to detach cleanly                             │
-│  • Workers first: Ensures workloads move off before nodes disappear        │
-│  • CP last: API server available until all workers are down                 │
+│  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐       │
+│  │ Disable │──►│ Cordon  │──►│  Scale  │──►│  Wait   │──►│Shutdown │       │
+│  │ ArgoCD  │   │  All    │   │  Down   │   │ Detach  │   │ Nodes   │       │
+│  │ Sync    │   │ Nodes   │   │Workloads│   │ Volumes │   │ (order) │       │
+│  └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘       │
 │                                                                             │
 │  STARTUP SEQUENCE (scripts/startup-cluster.sh)                              │
 │  ───────────────────────────────────────────────                            │
 │                                                                             │
-│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐   │
-│  │Power On │───►│  Wait   │───►│  Wait   │───►│Uncordon │───►│ Verify  │   │
-│  │ CP First│    │  API    │    │  Nodes  │    │   All   │    │ Health  │   │
-│  │         │    │ Server  │    │  Ready  │    │ Nodes   │    │         │   │
-│  └─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘   │
+│  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐       │
+│  │  Wait   │──►│  Wait   │──►│  Wait   │──►│ Cleanup │──►│ Restore │       │
+│  │  API +  │   │ Cilium  │   │Longhorn │   │ Stale   │   │Workloads│       │
+│  │ Nodes   │   │ CoreDNS │   │  + CSI  │   │Resources│   │Sequential       │
+│  └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘       │
 │                                                                             │
-│  Why this order?                                                            │
-│  • CP first: API server must be up before workers can join                  │
-│  • Wait for Ready: Ensures kubelet and CNI are functional                  │
-│  • Uncordon: Re-enables scheduling on all nodes                             │
-│  • ArgoCD auto-syncs: Workloads restored automatically                      │
+│  Key Startup Features:                                                      │
+│  • Waits for Longhorn CSI driver to register on ALL nodes                  │
+│  • Cleans up stale git locks in ArgoCD repo-server                         │
+│  • Deletes zombie pods holding volume locks                                │
+│  • Scales up workloads ONE AT A TIME with ready-check between each         │
+│  • Detects Multi-Attach volume errors and auto-remedies                    │
+│  • Only completes when ALL critical workloads are Running                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Startup Sequence Deep Dive
+
+The startup script follows a strict dependency order to ensure workloads start successfully:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    STARTUP DEPENDENCY CHAIN                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  INFRASTRUCTURE LAYER (must be ready first)                                 │
+│  ──────────────────────────────────────────                                │
+│                                                                             │
+│  ┌────────────┐    ┌────────────┐    ┌────────────┐    ┌────────────┐      │
+│  │  Cilium    │───►│  CoreDNS   │───►│  Longhorn  │───►│  Longhorn  │      │
+│  │   (CNI)    │    │   (DNS)    │    │   Pods     │    │ CSI Driver │      │
+│  │   Pods     │    │   Pods     │    │  Running   │    │ Registered │      │
+│  └────────────┘    └────────────┘    └────────────┘    └────────────┘      │
+│        │                 │                  │                │              │
+│        │                 │                  │                │              │
+│        └─────────────────┴──────────────────┴────────────────┘              │
+│                                    │                                        │
+│                                    ▼                                        │
+│  GITOPS LAYER (required to manage workloads)                               │
+│  ───────────────────────────────────────────                               │
+│                                                                             │
+│  ┌────────────┐    ┌────────────┐    ┌────────────┐    ┌────────────┐      │
+│  │  ArgoCD    │───►│  ArgoCD    │───►│  ArgoCD    │───►│  Re-enable │      │
+│  │   Redis    │    │   Repo     │    │   Server   │    │  Auto-Sync │      │
+│  │  (cache)   │    │  Server    │    │  (ready)   │    │            │      │
+│  └────────────┘    └────────────┘    └────────────┘    └────────────┘      │
+│                                                                             │
+│  WORKLOAD LAYER (started sequentially with ready-checks)                   │
+│  ───────────────────────────────────────────────────────                   │
+│                                                                             │
+│  ┌────────────┐    ┌────────────┐    ┌────────────┐    ┌────────────┐      │
+│  │   MinIO    │───►│ Prometheus │───►│  Grafana   │───►│   Gitea    │      │
+│  │ (storage)  │    │  (metrics) │    │  (dashbd)  │    │   (git)    │      │
+│  │  ⏳ wait   │    │  ⏳ wait   │    │  ⏳ wait   │    │  ⏳ wait   │      │
+│  └────────────┘    └────────────┘    └────────────┘    └────────────┘      │
+│                                                                             │
+│  Each workload:                                                             │
+│  1. Delete old pods (release volume locks)                                 │
+│  2. Scale up to desired replicas                                           │
+│  3. Wait for pods to be RUNNING (not just scheduled)                       │
+│  4. Detect Multi-Attach errors and auto-cleanup                            │
+│  5. Only proceed to next workload when ready                               │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -13252,11 +13343,13 @@ bash scripts/shutdown-cluster.sh --verbose
 
 **What it does:**
 
-1. **Cordons all nodes** - Prevents new pod scheduling
-2. **Scales down stateful workloads** - MinIO, Gitea, Prometheus, Loki, Harbor, etc.
-3. **Waits for volume detachment** - Gives Longhorn time to cleanly detach PVs
-4. **Shuts down workers first** - In reverse order (rpi4-4 → rpi4-3 → rpi4-2)
-5. **Shuts down control plane last** - Ensures API server available during worker shutdown
+1. **Disables ArgoCD auto-sync** - Prevents GitOps from recreating workloads during shutdown
+2. **Cordons all nodes** - Prevents new pod scheduling
+3. **Scales down stateful workloads** - MinIO, Gitea, Prometheus, Grafana, etc.
+4. **Waits for volume detachment** - Gives Longhorn time to cleanly detach PVs
+5. **Cleans up stuck resources** - Force-deletes terminating pods and stale volumes
+6. **Shuts down workers first** - In reverse order (rpi4-4 → rpi4-3 → rpi4-2)
+7. **Shuts down control plane last** - Ensures API server available during worker shutdown
 
 **Configurable options:**
 
@@ -15297,12 +15390,12 @@ kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeed
 ---
 
 TODO list - for next time I re-create the cluster:
-- create a variable file, considering there are ansible playboks, bash scripts, kubernetes manifests, helm charts, argocd manifest, etc. > maybe a file with variables and then a script to re-crete all the files and in the README (variables for everything, including application versions, even a custom dns, IPs, etc.)
-- by default gitea to have an github-like theme
-- create a beautiful web app with all the cluster dashboards and links to everything
-- replace minio as they remove features form community version and exactly when this guide was deployed they put minio comuunity version on maintanance mode
-- move in secrets all hardcoded passwords
-- persistent longhorn ui 
-- github trunkates the README on main page so a new solution is needed for the full guide
-- a comprehesiv test after each tool/phase that will test multiple things for each tool and how tools interact with each other
-- remove skafold
+
+* create a variable file, considering there are ansible playboks, bash scripts, kubernetes manifests, helm charts, argocd manifest, etc. > maybe a file with variables and then a script to re-crete all the files and in the README (variables for everything, including application versions, even a custom dns, IPs, etc.)
+* by default gitea to have an github-like theme
+* create a beautiful web app with all the cluster dashboards and links to everything
+* replace minio as they remove features form community version and exactly when this guide was deployed they put minio comuunity version on maintanance mode
+* move in secrets all hardcoded passwords
+* github trunkates the README on main page so a new solution is needed for the full guide
+* a comprehesiv test after each tool/phase that will test multiple things for each tool and how tools interact with each other
+* remove skafold

@@ -11,7 +11,8 @@
 #   - Data path: /var/lib/longhorn
 #
 # UI Access:
-#   kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
+#   Browser: http://longhorn.192.168.68.210.nip.io (via HTTPRoute)
+#   Fallback: kubectl port-forward svc/longhorn-frontend -n longhorn-system 8080:80
 #
 # NOTE: After initial deployment, you must manually:
 #   1. Label storage node: kubectl label node rpi4-1 node.longhorn.io/create-default-disk=true
@@ -64,3 +65,32 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+---
+# =============================================================================
+# Longhorn UI HTTPRoute (Gateway API)
+# =============================================================================
+# Provides persistent browser access to Longhorn storage management.
+#
+# SECURITY NOTE: Longhorn UI has NO built-in authentication. Anyone with 
+# network access can view and manage storage. Consider restricting access
+# to internal network only or adding Traefik BasicAuth middleware.
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: longhorn-ui
+  namespace: longhorn-system
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik-system
+  hostnames:
+    - "longhorn.192.168.68.210.nip.io"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: longhorn-frontend
+          port: 80
