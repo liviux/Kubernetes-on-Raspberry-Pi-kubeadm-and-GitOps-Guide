@@ -8,16 +8,20 @@
 # Usage: bash scripts/startup-cluster.sh [OPTIONS]
 #
 # Options:
-#   --wait-only       Only wait for nodes, don't uncordon or restore
-#   --skip-restore    Uncordon nodes but don't scale up workloads
-#   --timeout <s>     Max seconds to wait for nodes (default: 300)
-#   --verbose, -v     Enable verbose output for debugging
-#   --skip-wait       Skip waiting for critical workloads to be ready
+#   --wait-only            Only wait for nodes, don't uncordon or restore
+#   --skip-restore         Uncordon nodes but don't scale up workloads
+#   --timeout <s>          Max seconds to wait for nodes (default: 300)
+#   --workload-timeout <s> Max seconds to wait for workloads (default: 900)
+#   --verbose, -v          Enable verbose output for debugging
+#   --skip-wait            Skip waiting for critical workloads to be ready
 #
 # Prerequisites:
 #   - All nodes physically powered on
 #   - kubectl configured with cluster access
 #   - Control plane should be powered on 2-3 min before workers
+#
+# The script will NOT complete successfully until all critical workloads
+# (ArgoCD, MinIO, Grafana, Gitea) are fully ready and running.
 # =============================================================================
 
 set -euo pipefail
@@ -26,8 +30,9 @@ set -euo pipefail
 # CONFIGURATION
 # =============================================================================
 EXPECTED_NODES=4
-MAX_WAIT=${MAX_WAIT:-300}  # 5 minutes default
-WORKLOAD_WAIT=${WORKLOAD_WAIT:-600}  # 10 minutes for critical workloads
+MAX_WAIT=${MAX_WAIT:-300}  # 5 minutes default for node readiness
+WORKLOAD_WAIT=${WORKLOAD_WAIT:-900}  # 15 minutes for critical workloads (RPi can be slow)
+STARTUP_SUCCESS=true  # Track overall success
 
 # Namespaces with stateful workloads to restore (reverse of shutdown order)
 STATEFUL_NAMESPACES=(
@@ -104,19 +109,24 @@ while [[ $# -gt 0 ]]; do
             MAX_WAIT="$2"
             shift 2
             ;;
+        --workload-timeout)
+            WORKLOAD_WAIT="$2"
+            shift 2
+            ;;
         --verbose|-v)
             VERBOSE=true
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--wait-only] [--skip-restore] [--skip-wait] [--timeout <seconds>] [--verbose]"
+            echo "Usage: $0 [--wait-only] [--skip-restore] [--skip-wait] [--timeout <seconds>] [--workload-timeout <seconds>] [--verbose]"
             echo ""
             echo "Options:"
-            echo "  --wait-only     Only wait for nodes to be ready"
-            echo "  --skip-restore  Don't scale up workloads after uncordoning"
-            echo "  --skip-wait     Skip waiting for critical workloads"
-            echo "  --timeout <s>   Max seconds to wait (default: 300)"
-            echo "  --verbose, -v   Enable verbose output for debugging"
+            echo "  --wait-only            Only wait for nodes to be ready"
+            echo "  --skip-restore         Don't scale up workloads after uncordoning"
+            echo "  --skip-wait            Skip waiting for critical workloads"
+            echo "  --timeout <s>          Max seconds to wait for nodes (default: 300)"
+            echo "  --workload-timeout <s> Max seconds to wait for workloads (default: 900)"
+            echo "  --verbose, -v          Enable verbose output for debugging"
             exit 0
             ;;
         *)
@@ -544,6 +554,23 @@ fi
 log_step "4d. Waking up ArgoCD..."
 
 if kubectl get namespace argocd &> /dev/null; then
+    # 0. CLEAN UP STALE GIT LOCKS IN REPO-SERVER
+    # After a hard shutdown, git processes may leave behind .git/index.lock files
+    # that prevent ArgoCD from syncing repositories
+    log_step "  Cleaning up ArgoCD repo-server cache (stale git locks)..."
+    
+    # Delete repo-server pods to clear any stale /tmp/_argocd-repo cache
+    REPO_SERVER_PODS=$(kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-repo-server --no-headers 2>/dev/null | awk '{print $1}' || true)
+    if [ -n "$REPO_SERVER_PODS" ]; then
+        log_verbose "  Force deleting repo-server pods to clear git cache..."
+        echo "$REPO_SERVER_PODS" | while read -r pod; do
+            if [ -n "$pod" ]; then
+                kubectl delete pod "$pod" -n argocd --force --grace-period=0 2>/dev/null || true
+            fi
+        done
+        sleep 5
+    fi
+    
     # 1. DETECT & SCALE UP
     # If replicas are 0, we must scale up manually because the shutdown script scaled them down.
     # IMPORTANT: Redis must come up first, then other components
@@ -711,17 +738,6 @@ if [ "$SKIP_RESTORE" = false ]; then
                 log_verbose "Scaling down $name in $ns"
                 kubectl scale "$type" "$name" -n "$ns" --replicas=0 2>/dev/null || true
             fi
-            
-            # Force delete ALL pods with this name prefix (catches old ReplicaSet pods too)
-            OLD_PODS=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep "^${name}" | awk '{print $1}' || true)
-            if [ -n "$OLD_PODS" ]; then
-                echo "$OLD_PODS" | while read -r pod; do
-                    if [ -n "$pod" ]; then
-                        log_warning "Force deleting pod holding volume: $pod"
-                        kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
-                    fi
-                done
-            fi
         fi
     done
     
@@ -734,23 +750,61 @@ if [ "$SKIP_RESTORE" = false ]; then
         log_verbose "Scaling down gitea-valkey-cluster statefulset"
         kubectl scale statefulset gitea-valkey-cluster -n gitea --replicas=0 2>/dev/null || true
     fi
-    # Delete gitea pods (including postgresql and valkey)
-    kubectl delete pods -n gitea --all --force --grace-period=0 2>/dev/null || true
     
-    log_step "Waiting 30s for volumes to fully detach..."
-    sleep 30
+    # Wait a moment for scale down to take effect
+    sleep 5
+    
+    # Force delete ALL pods in namespaces that use persistent volumes
+    # This is aggressive but necessary to release volume locks
+    log_step "Force deleting all pods in critical namespaces to release volumes..."
+    for ns in "monitoring" "gitea" "storage" "observability"; do
+        if kubectl get namespace "$ns" &> /dev/null; then
+            POD_COUNT=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')
+            if [ "$POD_COUNT" != "0" ]; then
+                log_warning "Force deleting $POD_COUNT pods in $ns namespace..."
+                kubectl delete pods -n "$ns" --all --force --grace-period=0 2>/dev/null || true
+            fi
+        fi
+    done
+    
+    log_step "Waiting 45s for volumes to fully detach..."
+    sleep 45
     
     # Verify volumes are detached
     log_step "Verifying volumes are detached..."
     if kubectl get namespace longhorn-system &> /dev/null; then
-        ATTACHED_VOLS=$(kubectl get volumes.longhorn.io -n longhorn-system -o json 2>/dev/null | \
-            jq -r '.items[] | select(.status.state == "attached") | .metadata.name' 2>/dev/null | wc -l | tr -d '[:space:]')
-        ATTACHED_VOLS=${ATTACHED_VOLS:-0}
+        # Wait for volumes to detach with a loop
+        DETACH_WAIT=0
+        DETACH_TIMEOUT=120
+        while [ $DETACH_WAIT -lt $DETACH_TIMEOUT ]; do
+            ATTACHED_VOLS=$(kubectl get volumes.longhorn.io -n longhorn-system -o json 2>/dev/null | \
+                jq -r '.items[] | select(.status.state == "attached") | .metadata.name' 2>/dev/null | wc -l | tr -d '[:space:]')
+            ATTACHED_VOLS=${ATTACHED_VOLS:-0}
+            
+            if [ "$ATTACHED_VOLS" = "0" ]; then
+                log_success "All volumes detached"
+                break
+            fi
+            
+            printf "\r  Waiting for %d volumes to detach... (%ds/%ds)" "$ATTACHED_VOLS" "$DETACH_WAIT" "$DETACH_TIMEOUT"
+            sleep 10
+            DETACH_WAIT=$((DETACH_WAIT + 10))
+        done
+        echo ""
+        
         if [ "$ATTACHED_VOLS" != "0" ]; then
-            log_warning "Still $ATTACHED_VOLS volumes attached. Waiting 20s more..."
-            sleep 20
-        else
-            log_success "All volumes detached"
+            log_warning "Still $ATTACHED_VOLS volumes attached after ${DETACH_TIMEOUT}s"
+            log_step "Force detaching remaining volumes..."
+            kubectl get volumes.longhorn.io -n longhorn-system -o json 2>/dev/null | \
+                jq -r '.items[] | select(.status.state == "attached") | .metadata.name' 2>/dev/null | \
+                while read -r vol; do
+                    if [ -n "$vol" ]; then
+                        log_verbose "Force detaching: $vol"
+                        kubectl patch volumes.longhorn.io "$vol" -n longhorn-system \
+                            --type='merge' -p='{"spec":{"nodeID":""}}' 2>/dev/null || true
+                    fi
+                done
+            sleep 15
         fi
     fi
 fi
@@ -814,72 +868,183 @@ if [ "$SKIP_RESTORE" = false ]; then
     
     # Restore known stateful workloads that might have been scaled to 0
     # IMPORTANT: Order matters! Dependencies must be restored first.
-    log_step "Scaling up all workloads in dependency order..."
+    # Each workload waits to be READY before starting the next (resource constraints on RPi)
+    log_step "Scaling up workloads SEQUENTIALLY (one at a time, waiting for ready)..."
+    log_info "This prevents resource exhaustion on Raspberry Pi nodes."
     RESTORED_COUNT=0
     
     # Define restore order explicitly (dependencies first)
-    # Format: "namespace/resource-type/name:replicas"
+    # Format: "namespace/resource-type/name:replicas:wait_timeout"
+    # Wait timeout is in seconds (0 = don't wait, just scale)
     RESTORE_ORDER=(
         # 1. ArgoCD components (Redis must come first for ArgoCD to function)
-        "argocd/deployment/argocd-redis:1"
-        "argocd/deployment/argocd-applicationset-controller:1"
-        "argocd/deployment/argocd-notifications-controller:1"
-        # 2. Storage backend
-        "storage/deployment/minio:1"
+        "argocd/deployment/argocd-redis:1:120"
+        "argocd/deployment/argocd-applicationset-controller:1:60"
+        "argocd/deployment/argocd-notifications-controller:1:60"
+        # 2. Storage backend (critical - many things depend on it)
+        "storage/deployment/minio:1:180"
         # 3. Monitoring infrastructure (operator first, then workloads)
-        "monitoring/deployment/prometheus-operator:1"
-        "monitoring/deployment/observability-stack-kube-state-metrics:1"
-        "monitoring/statefulset/prometheus-prometheus-prometheus:1"
-        "monitoring/statefulset/alertmanager-prometheus-alertmanager:1"
-        "monitoring/deployment/observability-stack-grafana:1"
-        # 4. Observability
-        "observability/statefulset/loki:1"
+        "monitoring/deployment/prometheus-operator:1:120"
+        "monitoring/deployment/observability-stack-kube-state-metrics:1:90"
+        "monitoring/statefulset/prometheus-prometheus-prometheus:1:180"
+        "monitoring/statefulset/alertmanager-prometheus-alertmanager:1:120"
+        # Grafana has init-chown-data init container and needs extra time
+        "monitoring/deployment/observability-stack-grafana:1:300"
+        # 4. Observability (if installed)
+        "observability/statefulset/loki:1:180"
         # 5. Gitea (dependencies first: postgresql -> valkey -> gitea)
-        "gitea/statefulset/gitea-postgresql:1"
-        "gitea/statefulset/gitea-valkey-cluster:3"
-        "gitea/deployment/gitea:1"
+        "gitea/statefulset/gitea-postgresql:1:180"
+        "gitea/statefulset/gitea-valkey-cluster:3:120"
+        "gitea/deployment/gitea:1:180"
         # 6. Harbor (if installed)
-        "harbor/statefulset/harbor-database:1"
-        "harbor/statefulset/harbor-registry:1"
+        "harbor/statefulset/harbor-database:1:180"
+        "harbor/statefulset/harbor-registry:1:120"
     )
     
+    # Function to delete pods for a workload (to release volume locks)
+    delete_workload_pods() {
+        local ns="$1"
+        local name="$2"
+        
+        # Delete ALL pods matching this workload name (including old replicasets)
+        local pods=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "^${name}" | awk '{print $1}')
+        if [ -n "$pods" ]; then
+            log_verbose "  Deleting existing pods for $name to release volumes..."
+            echo "$pods" | while read -r pod; do
+                if [ -n "$pod" ]; then
+                    kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+                fi
+            done
+            sleep 5
+        fi
+    }
+    
+    # Function to wait for a workload to be ready
+    wait_for_workload_ready() {
+        local ns="$1"
+        local type="$2"
+        local name="$3"
+        local timeout="$4"
+        local elapsed=0
+        
+        if [ "$timeout" = "0" ]; then
+            return 0
+        fi
+        
+        log_step "  Waiting for $name to be ready (timeout: ${timeout}s)..."
+        
+        while [ $elapsed -lt $timeout ]; do
+            local desired=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+            local ready=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            ready=${ready:-0}
+            
+            # Also check that pods are actually Running (not just readyReplicas count)
+            local running_pods=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "^${name}" | grep -c "Running" 2>/dev/null || echo "0")
+            
+            if [ "$ready" = "$desired" ] && [ "$ready" != "0" ] && [ "$running_pods" -ge "$desired" ]; then
+                log_success "  $name is ready ($ready/$desired)"
+                return 0
+            fi
+            
+            # Get pod status for more info - show the pod that's NOT ready
+            local pod_info=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "^${name}" | grep -v "Running" | head -1 || true)
+            if [ -z "$pod_info" ]; then
+                pod_info=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "^${name}" | head -1 || true)
+            fi
+            local pod_status=$(echo "$pod_info" | awk '{print $2, $3}' || echo "unknown")
+            
+            # Check for volume attachment errors and handle them
+            local pod_name=$(echo "$pod_info" | awk '{print $1}')
+            if [ -n "$pod_name" ]; then
+                local events=$(kubectl get events -n "$ns" --field-selector involvedObject.name="$pod_name" --sort-by='.lastTimestamp' 2>/dev/null | tail -3)
+                if echo "$events" | grep -q "Multi-Attach"; then
+                    log_warning "  Volume Multi-Attach error detected - cleaning up old pods..."
+                    # Find and delete the OLD pod holding the volume
+                    local old_pods=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "^${name}" | grep -v "$pod_name" | awk '{print $1}')
+                    if [ -n "$old_pods" ]; then
+                        echo "$old_pods" | while read -r old_pod; do
+                            if [ -n "$old_pod" ]; then
+                                log_verbose "    Force deleting old pod: $old_pod"
+                                kubectl delete pod "$old_pod" -n "$ns" --force --grace-period=0 2>/dev/null || true
+                            fi
+                        done
+                    fi
+                fi
+            fi
+            
+            printf "\r    Waiting: %s (%s) %ds/%ds   " "$name" "$pod_status" "$elapsed" "$timeout"
+            
+            sleep 10
+            elapsed=$((elapsed + 10))
+        done
+        
+        echo ""
+        log_warning "  $name not ready after ${timeout}s - continuing anyway"
+        return 1
+    }
+    
+    echo ""
     for entry in "${RESTORE_ORDER[@]}"; do
-        # Parse "namespace/type/name:replicas"
-        workload="${entry%:*}"
-        replicas="${entry#*:}"
+        # Parse "namespace/type/name:replicas:timeout"
+        workload_and_replicas="${entry%:*}"
+        timeout="${entry##*:}"
+        workload="${workload_and_replicas%:*}"
+        replicas="${workload_and_replicas#*:}"
+        # Handle case where there's no timeout specified (backward compat)
+        if [ "$replicas" = "$workload" ]; then
+            replicas="${entry#*:}"
+            replicas="${replicas%:*}"
+            timeout="120"
+        fi
         IFS='/' read -r ns type name <<< "$workload"
         
         log_verbose "Checking $type/$name in $ns..."
         if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
             CURRENT=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
-            log_verbose "Current replicas: $CURRENT, desired: $replicas"
-            if [ "$CURRENT" = "0" ] || [ -z "$CURRENT" ]; then
-                log_step "Scaling up $type/$name in $ns to $replicas replicas"
+            CURRENT=${CURRENT:-0}
+            READY=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            READY=${READY:-0}
+            
+            # Check if already running and ready
+            if [ "$READY" = "$replicas" ] && [ "$READY" != "0" ]; then
+                log_success "▶ $name: already running ($READY/$replicas ready)"
+                continue
+            fi
+            
+            # Scale up if needed
+            if [ "$CURRENT" = "0" ] || [ "$CURRENT" != "$replicas" ]; then
+                # For workloads with persistent volumes, delete existing pods first to release volume locks
+                case "$name" in
+                    *grafana*|*gitea*|*minio*|*postgresql*|*loki*|*prometheus*|*alertmanager*)
+                        delete_workload_pods "$ns" "$name"
+                        ;;
+                esac
+                
+                log_step "▶ Starting $name in $ns ($replicas replicas)..."
                 if kubectl scale "$type" "$name" -n "$ns" --replicas="$replicas" 2>/dev/null; then
-                    log_success "Scaled: $type/$name"
                     RESTORED_COUNT=$((RESTORED_COUNT + 1))
                     
-                    # Wait for critical dependencies to be ready before continuing
-                    if [ "$name" = "argocd-redis" ]; then
-                        log_step "Waiting for ArgoCD Redis to be ready..."
-                        kubectl rollout status deployment/argocd-redis -n argocd --timeout=120s 2>/dev/null || true
-                    elif [ "$name" = "gitea-postgresql" ]; then
-                        log_step "Waiting for PostgreSQL to be ready..."
-                        kubectl rollout status statefulset/gitea-postgresql -n gitea --timeout=120s 2>/dev/null || true
-                    elif [ "$name" = "gitea-valkey-cluster" ]; then
-                        log_step "Waiting for Valkey cluster to initialize..."
-                        sleep 15  # Give valkey time to form cluster
-                    fi
+                    # Wait for it to be ready before continuing to next workload
+                    wait_for_workload_ready "$ns" "$type" "$name" "$timeout"
                 else
-                    log_warning "Failed to scale: $type/$name"
+                    log_warning "  Failed to scale: $type/$name"
                 fi
             else
-                log_verbose "$type/$name already has $CURRENT replicas"
+                # Already scaled but not ready - wait for it
+                log_step "▶ $name: waiting to become ready..."
+                # Delete old pods if stuck
+                case "$name" in
+                    *grafana*|*gitea*|*minio*|*postgresql*|*loki*|*prometheus*|*alertmanager*)
+                        delete_workload_pods "$ns" "$name"
+                        ;;
+                esac
+                wait_for_workload_ready "$ns" "$type" "$name" "$timeout"
             fi
         else
             log_verbose "$type/$name not found in $ns - may not be installed"
         fi
     done
+    echo ""
     
     if [ $RESTORED_COUNT -gt 0 ]; then
         log_success "Restored $RESTORED_COUNT workloads"
@@ -938,117 +1103,150 @@ if kubectl top nodes &> /dev/null; then
 fi
 
 # -----------------------------------------------------------------------------
-# STEP 7: Wait for critical workloads (unless skipped)
+# STEP 7: Final verification of critical workloads
 # -----------------------------------------------------------------------------
 if [ "$SKIP_WAIT" = false ] && [ "$SKIP_RESTORE" = false ]; then
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│ STEP 7: Waiting for critical workloads to be ready                  │"
+    echo "│ STEP 7: Final verification of critical workloads                    │"
     echo "└─────────────────────────────────────────────────────────────────────┘"
     
-    log_info "Waiting for MinIO, Grafana, and Gitea to be fully ready..."
-    log_info "This ensures storage and observability are available before completion."
+    log_info "Verifying all critical workloads are running..."
     echo ""
     
-    WORKLOAD_START=$(date +%s)
-    ALL_READY=false
+    ALL_READY=true
     
-    while [ $(($(date +%s) - WORKLOAD_START)) -lt $WORKLOAD_WAIT ]; do
-        ALL_READY=true
-        ELAPSED=$(($(date +%s) - WORKLOAD_START))
+    # Quick check - since we already waited for each workload sequentially,
+    # this should mostly be a verification pass
+    for workload in "${CRITICAL_WORKLOADS[@]}"; do
+        IFS='/' read -r ns type name <<< "$workload"
         
-        for workload in "${CRITICAL_WORKLOADS[@]}"; do
-            IFS='/' read -r ns type name <<< "$workload"
-            
-            if ! kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
-                log_verbose "$type/$name in $ns not found, skipping..."
-                continue
-            fi
-            
-            DESIRED=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
-            READY=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-            
-            if [ "$READY" != "$DESIRED" ] || [ "$READY" -eq 0 ]; then
-                ALL_READY=false
-                log_verbose "$name: $READY/$DESIRED ready"
-            fi
-        done
-        
-        if [ "$ALL_READY" = true ]; then
-            echo ""
-            log_success "All critical workloads are ready!"
-            break
+        if ! kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
+            log_verbose "$type/$name in $ns not found, skipping..."
+            continue
         fi
         
-        # Show progress
-        printf "\r  Waiting for workloads... (%ds / %ds)  " $ELAPSED $WORKLOAD_WAIT
+        DESIRED=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+        READY=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        READY=${READY:-0}
         
-        # Show individual status every 30 seconds
-        if [ $((ELAPSED % 30)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
-            echo ""
+        if [ "$READY" = "$DESIRED" ] && [ "$READY" != "0" ]; then
+            echo -e "  ${GREEN}✅${NC} $name ($ns): $READY/$DESIRED ready"
+        else
+            echo -e "  ${YELLOW}⏳${NC} $name ($ns): $READY/$DESIRED ready"
+            ALL_READY=false
+        fi
+    done
+    echo ""
+    
+    # If any workload is not ready, do an extended wait
+    if [ "$ALL_READY" = false ]; then
+        log_warning "Some workloads are not yet ready. Doing extended wait..."
+        WORKLOAD_START=$(date +%s)
+        
+        while [ $(($(date +%s) - WORKLOAD_START)) -lt $WORKLOAD_WAIT ]; do
+            ALL_READY=true
+            ELAPSED=$(($(date +%s) - WORKLOAD_START))
+            NOT_READY_LIST=""
+            
             for workload in "${CRITICAL_WORKLOADS[@]}"; do
                 IFS='/' read -r ns type name <<< "$workload"
-                if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
-                    READY=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-                    DESIRED=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "?")
-                    if [ "$READY" = "$DESIRED" ] && [ "$READY" -gt 0 ]; then
-                        echo -e "    ${GREEN}✅${NC} $name: $READY/$DESIRED ready"
-                    else
-                        echo -e "    ${YELLOW}⏳${NC} $name: $READY/$DESIRED ready"
-                    fi
+                
+                if ! kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
+                    continue
+                fi
+                
+                DESIRED=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+                READY=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+                READY=${READY:-0}
+                
+                if [ "$READY" != "$DESIRED" ] || [ "$READY" = "0" ]; then
+                    ALL_READY=false
+                    NOT_READY_LIST="${NOT_READY_LIST}${name}($READY/$DESIRED) "
                 fi
             done
-        fi
-        
-        sleep 10
-    done
+            
+            if [ "$ALL_READY" = true ]; then
+                echo ""
+                log_success "All critical workloads are ready!"
+                break
+            fi
+            
+            printf "\r  Waiting for: %s (%ds/%ds)   " "$NOT_READY_LIST" "$ELAPSED" "$WORKLOAD_WAIT"
+            sleep 10
+        done
+    else
+        log_success "All critical workloads are ready!"
+    fi
     
+    # Set success based on final state
     if [ "$ALL_READY" = false ]; then
         echo ""
-        log_warning "Timeout waiting for critical workloads after ${WORKLOAD_WAIT}s"
-        log_info "Workloads may still be starting. Check status with: kubectl get pods -A"
+        log_error "Some critical workloads are not ready after waiting"
         echo ""
         echo "Current status of critical workloads:"
         for workload in "${CRITICAL_WORKLOADS[@]}"; do
             IFS='/' read -r ns type name <<< "$workload"
             if kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
                 READY=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+                READY=${READY:-0}
                 DESIRED=$(kubectl get "$type" "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "?")
                 echo "  - $name ($ns): $READY/$DESIRED ready"
-                # Show pod events if not ready
-                if [ "$READY" != "$DESIRED" ] || [ "$READY" -eq 0 ]; then
-                    echo "    Recent events:"
-                    kubectl get events -n "$ns" --sort-by='.lastTimestamp' 2>/dev/null | grep -i "$name" | tail -3 | sed 's/^/      /'
+                if [ "$READY" != "$DESIRED" ] || [ "$READY" = "0" ]; then
+                    echo "    Pods:"
+                    kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -E "^${name}" | head -3 | sed 's/^/      /'
                 fi
             fi
         done
+        echo ""
+        log_warning "You may need to investigate manually."
+        log_info "Try: kubectl describe pod -n <namespace> <pod-name>"
+        STARTUP_SUCCESS=false
+    else
+        STARTUP_SUCCESS=true
     fi
 else
     if [ "$SKIP_WAIT" = true ]; then
         log_info "Skipping wait for critical workloads (--skip-wait specified)"
     fi
+    STARTUP_SUCCESS=true
 fi
 
 # -----------------------------------------------------------------------------
 # SUMMARY
 # -----------------------------------------------------------------------------
 echo ""
-echo "╔═══════════════════════════════════════════════════════════════════════╗"
-echo "║                     STARTUP SEQUENCE COMPLETE                         ║"
-echo "╠═══════════════════════════════════════════════════════════════════════╣"
-echo "║                                                                       ║"
-echo "║  ✅ All $EXPECTED_NODES nodes are Ready                                        ║"
-echo "║  ✅ Nodes uncordoned and schedulable                                  ║"
-if [ "$ALL_READY" = true ] 2>/dev/null; then
-echo "║  ✅ Critical workloads (MinIO, Grafana, Gitea) are running            ║"
+if [ "$STARTUP_SUCCESS" = true ] 2>/dev/null; then
+    echo "╔═══════════════════════════════════════════════════════════════════════╗"
+    echo "║                     STARTUP SEQUENCE COMPLETE                         ║"
+    echo "╠═══════════════════════════════════════════════════════════════════════╣"
+    echo "║                                                                       ║"
+    echo "║  ✅ All $EXPECTED_NODES nodes are Ready                                        ║"
+    echo "║  ✅ Nodes uncordoned and schedulable                                  ║"
+    echo "║  ✅ All critical workloads are running and ready                      ║"
+    echo "║                                                                       ║"
+    echo "║  Useful commands:                                                     ║"
+    echo "║    kubectl get pods -A              # View all pods                   ║"
+    echo "║    kubectl top nodes                # Check resource usage            ║"
+    echo "║    argocd app list                  # View ArgoCD applications        ║"
+    echo "║    cilium status                    # Check CNI health                ║"
+    echo "║    bash tests/01_infra_test.sh      # Run infrastructure tests        ║"
+    echo "║                                                                       ║"
+    echo "╚═══════════════════════════════════════════════════════════════════════╝"
+else
+    echo "╔═══════════════════════════════════════════════════════════════════════╗"
+    echo "║                 STARTUP SEQUENCE COMPLETED WITH WARNINGS              ║"
+    echo "╠═══════════════════════════════════════════════════════════════════════╣"
+    echo "║                                                                       ║"
+    echo "║  ✅ All $EXPECTED_NODES nodes are Ready                                        ║"
+    echo "║  ✅ Nodes uncordoned and schedulable                                  ║"
+    echo "║  ⚠️  Some workloads are not yet ready                                  ║"
+    echo "║                                                                       ║"
+    echo "║  Check workload status:                                               ║"
+    echo "║    kubectl get pods -A | grep -v Running                              ║"
+    echo "║    kubectl describe pod -n <namespace> <pod-name>                     ║"
+    echo "║    kubectl logs -n <namespace> <pod-name>                             ║"
+    echo "║                                                                       ║"
+    echo "╚═══════════════════════════════════════════════════════════════════════╝"
 fi
-echo "║                                                                       ║"
-echo "║  Useful commands:                                                     ║"
-echo "║    kubectl get pods -A              # View all pods                   ║"
-echo "║    kubectl top nodes                # Check resource usage            ║"
-echo "║    argocd app list                  # View ArgoCD applications        ║"
-echo "║    cilium status                    # Check CNI health                ║"
-echo "║    bash tests/01_infra_test.sh      # Run infrastructure tests        ║"
-echo "║                                                                       ║"
-echo "╚═══════════════════════════════════════════════════════════════════════╝"
 echo ""
