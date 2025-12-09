@@ -522,6 +522,57 @@ if kubectl get namespace longhorn-system &> /dev/null; then
         kubectl get pods -n longhorn-system --no-headers 2>/dev/null | grep -v -E "Running|Completed" | head -5 || true
     fi
     
+    # CRITICAL: Wait for Longhorn CSI driver to be registered on ALL nodes
+    # Without this, volume attachments will fail with "CSINode does not contain driver"
+    log_step "    Waiting for Longhorn CSI driver registration on all nodes..."
+    CSI_WAIT=0
+    CSI_TIMEOUT=180  # 3 minutes for CSI registration
+    NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')
+    NODE_COUNT=${NODE_COUNT:-4}
+    
+    while [ $CSI_WAIT -lt $CSI_TIMEOUT ]; do
+        # Check how many nodes have the Longhorn CSI driver registered
+        CSI_READY_NODES=0
+        MISSING_NODES=""
+        
+        for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            # Check if driver.longhorn.io is in the CSINode spec
+            if kubectl get csinode "$node" -o jsonpath='{.spec.drivers[*].name}' 2>/dev/null | grep -q "driver.longhorn.io"; then
+                CSI_READY_NODES=$((CSI_READY_NODES + 1))
+            else
+                MISSING_NODES="${MISSING_NODES}${node} "
+            fi
+        done
+        
+        if [ "$CSI_READY_NODES" -ge "$NODE_COUNT" ]; then
+            log_success "    Longhorn CSI driver registered on all $NODE_COUNT nodes"
+            break
+        fi
+        
+        printf "\r      CSI driver ready on %d/%d nodes (missing: %s) %ds/%ds   " "$CSI_READY_NODES" "$NODE_COUNT" "$MISSING_NODES" "$CSI_WAIT" "$CSI_TIMEOUT"
+        
+        # If nodes are missing CSI driver, try restarting their longhorn-csi-plugin pods
+        if [ $((CSI_WAIT % 60)) -eq 0 ] && [ $CSI_WAIT -gt 0 ] && [ -n "$MISSING_NODES" ]; then
+            log_verbose "    Restarting longhorn-csi-plugin on missing nodes..."
+            for node in $MISSING_NODES; do
+                CSI_POD=$(kubectl get pods -n longhorn-system -l app=longhorn-csi-plugin --field-selector spec.nodeName="$node" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+                if [ -n "$CSI_POD" ]; then
+                    kubectl delete pod "$CSI_POD" -n longhorn-system --force --grace-period=0 2>/dev/null || true
+                fi
+            done
+        fi
+        
+        sleep 10
+        CSI_WAIT=$((CSI_WAIT + 10))
+    done
+    echo ""
+    
+    if [ "$CSI_READY_NODES" -lt "$NODE_COUNT" ]; then
+        log_warning "    Longhorn CSI driver not registered on all nodes after ${CSI_TIMEOUT}s"
+        log_warning "    Missing nodes: $MISSING_NODES"
+        log_info "    This may cause volume attachment failures. Try: kubectl get csinode -o wide"
+    fi
+    
     # Wait for storage node to be schedulable
     log_step "    Waiting for storage node (rpi4-1) to be schedulable..."
     LH_NODE_WAIT=0
