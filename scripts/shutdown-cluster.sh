@@ -296,6 +296,17 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2d.5: Explicitly cleanup repo-server to prevent git locks
+    # ─────────────────────────────────────────────────────────────────────────
+    log_step "2d.5. Cleaning up ArgoCD repo-server pods..."
+    if kubectl get namespace argocd &> /dev/null; then
+        # Force delete the pods to ensure the emptyDir cache is wiped
+        # This prevents index.lock files from persisting if using persistent storage
+        kubectl delete pods -n argocd -l app.kubernetes.io/name=argocd-repo-server --force --grace-period=0 2>/dev/null || true
+        log_success "Repo-server pods deleted"
+    fi
+
+    # ─────────────────────────────────────────────────────────────────────────
     # STEP 2e: Wait for volumes to detach
     # ─────────────────────────────────────────────────────────────────────────
     echo ""

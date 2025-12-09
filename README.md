@@ -13715,6 +13715,17 @@ if [ "$SKIP_SCALE_DOWN" = false ]; then
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2d.5: Explicitly cleanup repo-server to prevent git locks
+    # ─────────────────────────────────────────────────────────────────────────
+    log_step "2d.5. Cleaning up ArgoCD repo-server pods..."
+    if kubectl get namespace argocd &> /dev/null; then
+        # Force delete the pods to ensure the emptyDir cache is wiped
+        # This prevents index.lock files from persisting if using persistent storage
+        kubectl delete pods -n argocd -l app.kubernetes.io/name=argocd-repo-server --force --grace-period=0 2>/dev/null || true
+        log_success "Repo-server pods deleted"
+    fi
+
+    # ─────────────────────────────────────────────────────────────────────────
     # STEP 2e: Wait for volumes to detach
     # ─────────────────────────────────────────────────────────────────────────
     echo ""
@@ -15399,3 +15410,4 @@ TODO list - for next time I re-create the cluster:
 * github trunkates the README on main page so a new solution is needed for the full guide
 * a comprehesiv test after each tool/phase that will test multiple things for each tool and how tools interact with each other
 * remove skafold
+* make all the UI links accessible only within the local network
