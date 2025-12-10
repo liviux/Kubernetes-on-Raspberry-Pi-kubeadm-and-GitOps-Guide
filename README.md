@@ -1,7 +1,7 @@
 # Kubernetes Cluster on Raspberry Pi 4: Bare Metal GitOps Guide
 
-TL;DR: This guide details the step-by-step process to deploy a production-grade Kubernetes cluster on Raspberry Pi 4 hardware using Ansible for infrastructure provisioning and ArgoCD for GitOps-based application management. And a ton of modern cloud-native tools along it.
-Just notices Github trunkates the readme if it's too long, so there's a TODO idem to split it or to use another documentation format. For now you can open the READMe file separately to see the full content.
+TL;DR: This guide walks you through deploying a production-grade Kubernetes cluster on Raspberry Pi 4 hardware. It uses Ansible for infrastructure provisioning and ArgoCD for GitOps-based management, plus a ton of modern cloud-native tools.
+Note: GitHub truncates long READMEs, so there's a TODO to split it or use another format. For now, open the README file separately to see the full content.
 
 ## Table of Contents
 1.  [Introduction and Scope](#1-introduction-and-scope)
@@ -15411,14 +15411,14 @@ kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeed
 
 ---
 
-TODO list - for next time I re-create the cluster:
+TODO list - Stuff to fix next time I rebuild the cluster:
 
-* create a variable file, considering there are ansible playboks, bash scripts, kubernetes manifests, helm charts, argocd manifest, etc. > maybe a file with variables and then a script to re-crete all the files and in the README (variables for everything, including application versions, even a custom dns, IPs, etc.)
-* by default gitea to have an github-like theme
-* create a beautiful web app with all the cluster dashboards and links to everything
-* replace minio as they remove features form community version and exactly when this guide was deployed they put minio comuunity version on maintanance mode
-* move in secrets all hardcoded passwords
-* github trunkates the README on main page so a new solution is needed for the full guide
-* a comprehesiv test after each tool/phase that will test multiple things for each tool and how tools interact with each other
-* remove skafold
-* make all the UI links accessible only within the local network
+* Create a variables file since we have Ansible playbooks, bash scripts, Kubernetes manifests, Helm charts, ArgoCD manifests, etc. Maybe a file with all variables and a script to regenerate everything. Include variables for everything in the README, like app versions, custom DNS, IPs, etc.
+* Set Gitea to use a GitHub-like theme by default.
+* Build a nice web app that links to all the cluster dashboards and tools.
+* Replace MinIO since they removed features from the community version right when this guide was deployed, and now it's in maintenance mode.
+* Move all hardcoded passwords into secrets.
+* GitHub truncates the README on the main page, so we need a new solution for the full guide.
+* Add comprehensive tests after each tool/phase to check multiple things for each tool and how they interact.
+* Remove Skaffold.
+* Make all UI links accessible only within the local network.
