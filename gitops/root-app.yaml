@@ -59,7 +59,9 @@ spec:
       
       # Exclude patterns to prevent infinite application loops
       # These directories contain actual workloads, not ArgoCD Applications
-      exclude: "{apps/*,services/*}"
+      # Also exclude *-manifests directories which contain raw K8s resources
+      # that are managed by their own ArgoCD Applications
+      exclude: "{apps/*,services/*,*-manifests/*}"
   
   destination:
     server: https://kubernetes.default.svc

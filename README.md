@@ -7127,8 +7127,8 @@ spec:
     path: gitops
     directory:
       recurse: true
-      # Exclude to avoid infinite loops
-      exclude: "{apps/*,services/*}"
+      # Exclude to avoid infinite loops and raw manifest directories
+      exclude: "{apps/*,services/*,*-manifests/*}"
   
   destination:
     server: https://kubernetes.default.svc
